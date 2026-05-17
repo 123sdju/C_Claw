@@ -1,0 +1,25 @@
+{
+  "plugins": [
+    {
+      "name": "weather",
+      "command": "python3",
+      "args": ["apps/posix/cli/plugins/weather_tool.py"],
+      "tools": [
+        {
+          "name": "weather_query",
+          "description": "查询指定城市的天气信息，返回温度和天气状况",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string",
+                "description": "城市名称，如 Beijing, Shanghai, Tokyo"
+              }
+            },
+            "required": ["city"]
+          }
+        }
+      ]
+    }
+  ]
+}

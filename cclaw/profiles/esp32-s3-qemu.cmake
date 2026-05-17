@@ -1,0 +1,28 @@
+# 学习导读：cclaw/profiles/esp32-s3-qemu.cmake
+# 所属层次：构建 profile。
+# 阅读重点：这里为不同目标选择平台和功能开关，阅读时重点看 CMake 变量如何裁剪源码。
+# 注释说明：如果注释与代码冲突，以代码行为和测试为准。
+set(CC_PROFILE_TARGET_PLATFORM esp32)
+
+# ESP32 QEMU profile 裁掉外部进程、SQLite 和桌面 CLI，只保留设备可承受的核心能力。
+set(CC_PROFILE_ENABLE_FILE_TOOLS ON)
+set(CC_PROFILE_ENABLE_HTTP_TOOL OFF)
+set(CC_PROFILE_ENABLE_MEMORY ON)
+set(CC_PROFILE_ENABLE_CLI OFF)
+set(CC_PROFILE_ENABLE_SHELL OFF)
+set(CC_PROFILE_ENABLE_PLUGIN OFF)
+set(CC_PROFILE_ENABLE_DOCKER_SANDBOX OFF)
+set(CC_PROFILE_ENABLE_SQLITE OFF)
+set(CC_PROFILE_ENABLE_OPENAI OFF)
+set(CC_PROFILE_ENABLE_OLLAMA OFF)
+set(CC_PROFILE_ENABLE_ANTHROPIC OFF)
+
+# 设备默认路径使用 /sdcard/cclaw，和桌面 build/runtime 路径分离。
+set(CC_PROFILE_DEFAULT_CONFIG_PATH "/sdcard/cclaw/config.json")
+set(CC_PROFILE_DEFAULT_PLUGIN_CONFIG_PATH "")
+set(CC_PROFILE_DEFAULT_DATA_DIR "/sdcard/cclaw/data")
+set(CC_PROFILE_DEFAULT_WORKSPACE_PATH "/sdcard/cclaw/workspace")
+set(CC_PROFILE_DEFAULT_STORAGE_PATH "/sdcard/cclaw/data/sessions.json")
+set(CC_PROFILE_DEFAULT_MEMORY_PATH "/sdcard/cclaw/data/memory.json")
+set(CC_PROFILE_DEFAULT_SOUL_FILE "/sdcard/cclaw/soul.md")
+set(CC_PROFILE_DEFAULT_USER_FILE "/sdcard/cclaw/user.md")

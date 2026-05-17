@@ -1,0 +1,71 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 16,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "posix-cli",
+      "displayName": "POSIX CLI",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/posix-cli",
+      "cacheVariables": {
+        "CC_PROFILE": "posix-cli",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "core-minimal",
+      "displayName": "Core Minimal",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/core-minimal",
+      "cacheVariables": {
+        "CC_PROFILE": "core-minimal",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "windows-cli",
+      "displayName": "Windows CLI",
+      "description": "For a Windows host or a Linux host with an installed Windows cross toolchain and libcurl; not part of the default Linux validation path.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/windows-cli",
+      "cacheVariables": {
+        "CC_PROFILE": "windows-cli",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "posix-cli",
+      "configurePreset": "posix-cli"
+    },
+    {
+      "name": "core-minimal",
+      "configurePreset": "core-minimal"
+    },
+    {
+      "name": "windows-cli",
+      "configurePreset": "windows-cli"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "posix-cli",
+      "configurePreset": "posix-cli",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "core-minimal",
+      "configurePreset": "core-minimal",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

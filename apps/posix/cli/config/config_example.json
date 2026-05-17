@@ -1,0 +1,33 @@
+{
+  "model": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "base_url": "https://api.openai.com",
+    "api_key": "",
+    "thinking_mode": 0,
+    "stream_mode": 0
+  },
+  "storage": {
+    "type": "sqlite"
+  },
+  "sandbox": {
+    "type": "local",
+    "shell_requires_approval": true,
+    "timeout_ms": 30000
+  },
+  "memory": {
+    "backend": "json_file"
+  },
+  "system": {
+    "max_steps": 10,
+    "context_window_tokens": 8192,
+    "context_compress_threshold": 80,
+    "context_keep_recent": 20
+  },
+  "cli": {
+    "debug_mode": false
+  },
+  "tools": {
+    "enabled": ["read", "write", "http", "shell", "memory"]
+  }
+}

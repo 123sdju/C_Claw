@@ -1,0 +1,25 @@
+{
+  "model": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "base_url": "https://api.openai.com",
+    "api_key": "",
+    "thinking_mode": 0,
+    "stream_mode": 0
+  },
+  "storage": {
+    "type": "json",
+    "data_dir": "/sdcard/cclaw/data",
+    "path": "/sdcard/cclaw/data/sessions.json"
+  },
+  "workspace": {
+    "path": "/sdcard/cclaw/workspace"
+  },
+  "memory": {
+    "backend": "json_file",
+    "path": "/sdcard/cclaw/data/memory.json"
+  },
+  "tools": {
+    "enabled": ["read", "write", "memory", "gpio"]
+  }
+}

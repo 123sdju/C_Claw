@@ -1,0 +1,29 @@
+# 学习导读：cclaw/profiles/core-minimal.cmake
+# 所属层次：构建 profile。
+# 阅读重点：这里为不同目标选择平台和功能开关，阅读时重点看 CMake 变量如何裁剪源码。
+# 注释说明：如果注释与代码冲突，以代码行为和测试为准。
+set(CC_PROFILE_TARGET_PLATFORM auto)
+
+# core-minimal 保留核心 runtime、文件工具和记忆能力，关闭 CLI、shell、插件和外部 LLM。
+# 它适合验证 core/adapters/platform 的基础可编译性，不依赖桌面交互入口。
+set(CC_PROFILE_ENABLE_FILE_TOOLS ON)
+set(CC_PROFILE_ENABLE_HTTP_TOOL OFF)
+set(CC_PROFILE_ENABLE_MEMORY ON)
+set(CC_PROFILE_ENABLE_CLI OFF)
+set(CC_PROFILE_ENABLE_SHELL OFF)
+set(CC_PROFILE_ENABLE_PLUGIN OFF)
+set(CC_PROFILE_ENABLE_DOCKER_SANDBOX OFF)
+set(CC_PROFILE_ENABLE_SQLITE OFF)
+set(CC_PROFILE_ENABLE_OPENAI OFF)
+set(CC_PROFILE_ENABLE_OLLAMA OFF)
+set(CC_PROFILE_ENABLE_ANTHROPIC OFF)
+
+# 默认路径放在 build/core-minimal 下，避免污染源码树。
+set(CC_PROFILE_DEFAULT_CONFIG_PATH "")
+set(CC_PROFILE_DEFAULT_PLUGIN_CONFIG_PATH "")
+set(CC_PROFILE_DEFAULT_DATA_DIR "${CMAKE_BINARY_DIR}/core-minimal/runtime/data")
+set(CC_PROFILE_DEFAULT_WORKSPACE_PATH "${CMAKE_BINARY_DIR}/core-minimal/runtime/workspace")
+set(CC_PROFILE_DEFAULT_STORAGE_PATH "${CMAKE_BINARY_DIR}/core-minimal/runtime/data/sessions.json")
+set(CC_PROFILE_DEFAULT_MEMORY_PATH "${CMAKE_BINARY_DIR}/core-minimal/runtime/data/memory.json")
+set(CC_PROFILE_DEFAULT_SOUL_FILE "")
+set(CC_PROFILE_DEFAULT_USER_FILE "")
