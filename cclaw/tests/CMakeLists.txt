@@ -16,6 +16,7 @@ set(C_CLAW_CORE_TESTS
     test_logger_concurrent
     test_event_bus_concurrent
     test_runtime_concurrent_sessions
+    test_runtime_request_config
     test_config_missing_defaults
 )
 

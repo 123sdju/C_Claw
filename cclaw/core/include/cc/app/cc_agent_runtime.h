@@ -75,6 +75,8 @@ typedef struct cc_agent_runtime_config {
     char *workspace_dir;  /**< 工作区目录。所有文件相关工具操作限定在此目录下。
                           *   由外部保证该目录存在且有读写权限 */
     char *model;          /**< 模型名称。用于日志和元数据，不直接参与 LLM 调用 */
+    int max_tokens;       /**< 主对话单次回复最大 token 数。默认 4096。 */
+    double temperature;   /**< 主对话生成温度。默认 0.7，0.0 表示最确定输出。 */
     int context_window_tokens; /**< LLM 上下文窗口 token 预算。
                           *   用于动态截断历史消息。0 表示不限制。
                           *   默认值：8192 */
@@ -83,6 +85,10 @@ typedef struct cc_agent_runtime_config {
                           *   默认值：0.8 */
     int context_keep_recent; /**< 压缩时保留最近 N 条原始消息。
                           *   默认值：20 */
+    int summary_max_tokens; /**< 上下文摘要压缩请求最大 token 数。
+                          *   默认值：1024 */
+    double summary_temperature; /**< 上下文摘要压缩请求温度。
+                          *   默认值：0.3 */
 } cc_agent_runtime_config_t;
 
 /**

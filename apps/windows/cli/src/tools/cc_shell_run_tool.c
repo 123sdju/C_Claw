@@ -21,7 +21,7 @@
  * 安全约束：
  *   - 通过 sandbox 执行命令，隔离于宿主环境
  *   - 命令在工作目录（workspace_dir）中执行
- *   - 默认超时时间为 30 秒（30000ms）
+ *   - 默认超时时间由注入的 sandbox 配置决定
  */
 
 #include "cc/ports/cc_tool.h"
@@ -97,7 +97,7 @@ static const char *shell_run_schema_json(void *self)
  *   4. 收集 stdout、stderr 和退出码，拼接为格式化输出
  *
  * 关键逻辑：
- *   - 超时时间固定为 30000ms（30 秒），防止命令长时间挂起
+ *   - timeout_ms 设为 0，交给 sandbox 使用配置文件中的默认超时
  *   - 收集 stdout、stderr 和退出码，统一格式化输出
  *   - 若超时，额外附加 TIMED_OUT 标记
  *   - 退出码非 0 时 ok = 0，但内容仍然返回
@@ -143,7 +143,7 @@ static cc_result_t shell_run_call(
     memset(&sandbox_cmd, 0, sizeof(sandbox_cmd));
     sandbox_cmd.command = (char *)command;
     sandbox_cmd.working_dir = (char *)ctx->workspace_dir;
-    sandbox_cmd.timeout_ms = 30000;
+    sandbox_cmd.timeout_ms = 0;
 
     cc_sandbox_result_t sandbox_result;
     rc = tool->sandbox.vtable->run(tool->sandbox.self, &sandbox_cmd, &sandbox_result);

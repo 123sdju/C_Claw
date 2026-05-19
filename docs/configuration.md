@@ -45,6 +45,8 @@ cmake -S . -B build-min \
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com",
     "api_key": "sk-...",
+    "max_tokens": 4096,
+    "temperature": 0.7,
     "thinking_mode": 0
   },
   "storage": {
@@ -73,7 +75,9 @@ cmake -S . -B build-min \
     "system_prompt": null,
     "context_window_tokens": 8192,
     "context_compress_threshold": 80,
-    "context_keep_recent": 20
+    "context_keep_recent": 20,
+    "summary_max_tokens": 1024,
+    "summary_temperature": 0.3
   }
 }
 ```
@@ -86,6 +90,8 @@ cmake -S . -B build-min \
 | `model` | string | 随 provider 变化 | 默认模型名随 provider 变化 |
 | `base_url` | string | 随 provider 变化 | API 基础地址，不包含 provider 自己追加的 endpoint path |
 | `api_key` | string/null | `null` | 远程 provider 通常需要，Ollama 可为空 |
+| `max_tokens` | int | `4096` | 主对话单次回复最大 token 数 |
+| `temperature` | number | `0.7` | 主对话生成温度；`0.0` 更确定，较高值更随机 |
 | `thinking_mode` | int | `0` | 是否启用思考模式，`0` 关闭，`1` 开启 |
 
 OpenAI 兼容配置示例：
@@ -188,6 +194,8 @@ Anthropic 配置示例：
 | `context_window_tokens` | int | `8192` | LLM 上下文 token 预算；`0` 表示不限制 |
 | `context_compress_threshold` | int | `80` | 压缩触发百分比；`0` 禁用压缩 |
 | `context_keep_recent` | int | `20` | 压缩时保留最近 N 条原始消息 |
+| `summary_max_tokens` | int | `1024` | 上下文摘要压缩请求的最大生成 token 数 |
+| `summary_temperature` | number | `0.3` | 上下文摘要压缩请求的生成温度，默认低于主对话以提高稳定性 |
 
 ## 上下文窗口管理
 
@@ -203,7 +211,9 @@ Anthropic 配置示例：
   "system": {
     "context_window_tokens": 128000,
     "context_compress_threshold": 80,
-    "context_keep_recent": 30
+    "context_keep_recent": 30,
+    "summary_max_tokens": 1024,
+    "summary_temperature": 0.3
   }
 }
 ```

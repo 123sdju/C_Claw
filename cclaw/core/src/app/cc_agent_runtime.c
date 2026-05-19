@@ -922,8 +922,8 @@ cc_result_t cc_agent_runtime_handle_message_stream(
         memset(&req, 0, sizeof(req));
         req.model = runtime->config.model;
         req.messages_json = messages_json;
-        req.max_tokens = 4096;
-        req.temperature = 0.7;
+        req.max_tokens = runtime->config.max_tokens;
+        req.temperature = runtime->config.temperature;
         req.stream = 1;
         req.thinking_mode = cc_agent_runtime_get_thinking_mode(runtime);
 
@@ -1274,8 +1274,8 @@ cc_result_t cc_agent_runtime_create_session(
  *   │      tools_json:    Step ② 构建的工具 schema 列表              │
  *   │      stream = 0:   使用非流式（一次性返回完整响应）            │
  *   │                     WHY: 简化循环逻辑，避免处理增量 tool_call  │
- *   │      max_tokens=4096: 单次 LLM 回复的最大 token 数             │
- *   │      temperature=0.7: 输出创造性控制（0=确定, 1=高创造）      │
+ *   │      max_tokens: 单次 LLM 回复的最大 token 数，来自配置        │
+ *   │      temperature: 输出创造性控制（0=确定, 1=高创造），来自配置│
  *   │      thinking_mode: 由 runtime->thinking_mode 控制             │
  *   │                     WHY 独立字段: 部分 LLM 的思考模式是        │
  *   │                     独立于 temperature 的参数（如 deepseek）   │
@@ -1512,13 +1512,13 @@ cc_result_t cc_agent_runtime_handle_message(
          *     需要实现增量 JSON 解析器来拼接完整的函数调用参数。
          *     代价：用户需要等待 LLM 完整回复后才看到结果，交互体验略差。
          *
-         *   - max_tokens=4096：
-         *     单次 LLM 回复的最大 token 数。4K 对于多数工具调用+简短回答足够。
+         *   - max_tokens：
+         *     单次 LLM 回复的最大 token 数，来自配置文件。
          *     如果工具的 JSON 输出很大，LLM 可能被截断，此时需要增大此值。
          *
-         *   - temperature=0.7：
-         *     LLM 输出的"创造性"参数。0.7 是均衡值：既有一定的多样性不至于
-         *     死板，又不会产生过于随机的 tool_call 参数导致工具执行失败。
+         *   - temperature：
+         *     LLM 输出的"创造性"参数，来自配置文件。默认 0.7 是均衡值：
+         *     既有一定的多样性不至于死板，又不会产生过于随机的 tool_call 参数导致工具执行失败。
          *     对于纯工具调用场景，可以降低到 0.0-0.3 以提高稳定性。
          *
          *   - thinking_mode：
@@ -1531,8 +1531,8 @@ cc_result_t cc_agent_runtime_handle_message(
         request.tools_json = tools_json;
         request.model = runtime->config.model;
         request.stream = 0;
-        request.max_tokens = 4096;
-        request.temperature = 0.7;
+        request.max_tokens = runtime->config.max_tokens;
+        request.temperature = runtime->config.temperature;
         request.thinking_mode = cc_agent_runtime_get_thinking_mode(runtime);
 
         /* 发布 LLM 请求开始事件（供 UI 显示"思考中..."等状态） */

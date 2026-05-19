@@ -283,6 +283,17 @@ int cc_json_int_value(const cc_json_value_t *value)
 }
 
 /*
+ * cc_json_number_value — 提取 JSON 数值
+ *
+ * 与 cc_json_int_value 类似，但保留浮点精度，供 temperature 等配置项使用。
+ */
+double cc_json_number_value(const cc_json_value_t *value)
+{
+    if (!value || !cJSON_IsNumber((cJSON *)value)) return 0.0;
+    return ((cJSON *)value)->valuedouble;
+}
+
+/*
  * cc_json_bool_value — 提取 JSON 布尔值
  *
  * 功能：安全地从 JSON 值中提取布尔值（返回 0 或 1）。

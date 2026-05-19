@@ -39,6 +39,8 @@
  *       "model":          "qwen2.5-coder:7b" // 模型名称
  *       "base_url":       "http://localhost:11434" // API 端点地址
  *       "api_key":        "sk-xxxx"    // API 密钥（可选，本地模型不需要）
+ *       "max_tokens":     4096         // 主对话单次回复最大 token 数
+ *       "temperature":    0.7          // 主对话生成温度
  *       "thinking_mode":  0            // 是否启用思考模式（TRAE 扩展）
  *     },
  *     "storage": {
@@ -55,6 +57,10 @@
  *     },
  *     "tools": {
  *       "enabled": ["read", "write", "shell"] // 启用的工具列表
+ *     },
+ *     "system": {
+ *       "summary_max_tokens": 1024,    // 上下文摘要压缩最大 token 数
+ *       "summary_temperature": 0.3     // 上下文摘要压缩生成温度
  *     }
  *   }
  *
@@ -288,6 +294,8 @@ cc_result_t cc_config_load_default(cc_config_t *out_config)
     out_config->max_steps = 10;
     out_config->stream_mode = 0;
     out_config->debug_mode = 0;
+    out_config->max_tokens = 4096;
+    out_config->temperature = 0.7;
     out_config->memory_backend = strdup(CC_DEFAULT_MEMORY_BACKEND);
     out_config->memory_path = strdup(CC_DEFAULT_MEMORY_PATH);
     out_config->plugin_config_path = strdup(CC_DEFAULT_PLUGIN_CONFIG_PATH);
@@ -296,6 +304,8 @@ cc_result_t cc_config_load_default(cc_config_t *out_config)
     out_config->context_window_tokens = 8192;
     out_config->context_compress_threshold = 0.8;
     out_config->context_keep_recent = 20;
+    out_config->summary_max_tokens = 1024;
+    out_config->summary_temperature = 0.3;
     cc_result_t rc = config_required_allocs_ok(out_config);
     if (rc.code != CC_OK) {
         cc_config_destroy(out_config);
@@ -344,6 +354,10 @@ cc_result_t cc_config_load_default(cc_config_t *out_config)
  *                  默认值: 随 provider 变化
  *   - api_key:     JSON "model.api_key" 字符串 → out_config->api_key
  *                  默认值: NULL（本地模型无需密钥；远程模型需要配置）
+ *   - max_tokens:  JSON "model.max_tokens" 整数 → out_config->max_tokens
+ *                  默认值: 4096（主对话单次回复上限）
+ *   - temperature: JSON "model.temperature" 数值 → out_config->temperature
+ *                  默认值: 0.7（主对话生成温度）
  *   - thinking_mode: JSON "model.thinking_mode" 整数 → out_config->thinking_mode
  *                  默认值: 0（禁用思考模式）
  *   解析逻辑：先尝试 cc_json_object_get(root, "model")，若 model 段存在，
@@ -404,6 +418,10 @@ cc_result_t cc_config_load(const char *path, cc_config_t *out_config)
         if (s && !replace_string(&out_config->api_key, s)) goto oom;
         cc_json_value_t *tm = cc_json_object_get(model, "thinking_mode");
         out_config->thinking_mode = tm ? cc_json_int_value(tm) : 0;
+        cc_json_value_t *mt = cc_json_object_get(model, "max_tokens");
+        if (mt) out_config->max_tokens = cc_json_int_value(mt);
+        cc_json_value_t *temp = cc_json_object_get(model, "temperature");
+        if (temp) out_config->temperature = cc_json_number_value(temp);
         cc_json_value_t *sm = cc_json_object_get(model, "stream_mode");
         if (sm) out_config->stream_mode = json_boolish_value(sm);
     }
@@ -539,6 +557,11 @@ cc_result_t cc_config_load(const char *path, cc_config_t *out_config)
          * context_keep_recent:
          *   压缩时保留最近 N 条原始消息不被压缩。
          *   默认 20 条，确保最近对话的完整连贯性。
+         *
+         * summary_max_tokens / summary_temperature:
+         *   LLM 摘要压缩调用使用的生成参数。
+         *   默认 1024 / 0.3，与主对话的 max_tokens / temperature 分离，
+         *   避免用户为了普通聊天调高温度后影响摘要稳定性。
          */
         v = cc_json_object_get(system, "context_window_tokens");
         out_config->context_window_tokens = v ? cc_json_int_value(v) : 8192;
@@ -546,6 +569,10 @@ cc_result_t cc_config_load(const char *path, cc_config_t *out_config)
         out_config->context_compress_threshold = v ? (double)cc_json_int_value(v) / 100.0 : 0.8;
         v = cc_json_object_get(system, "context_keep_recent");
         out_config->context_keep_recent = v ? cc_json_int_value(v) : 20;
+        v = cc_json_object_get(system, "summary_max_tokens");
+        if (v) out_config->summary_max_tokens = cc_json_int_value(v);
+        v = cc_json_object_get(system, "summary_temperature");
+        if (v) out_config->summary_temperature = cc_json_number_value(v);
     }
 
     cc_json_value_t *cli = cc_json_object_get(root, "cli");

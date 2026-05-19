@@ -134,6 +134,16 @@ const char *cc_json_string_value(const cc_json_value_t *value);
 int cc_json_int_value(const cc_json_value_t *value);
 
 /**
+ * cc_json_number_value — 从 JSON 值中提取浮点数
+ *
+ * 如果 value 不是数值类型，返回 0.0。
+ *
+ * @param value  JSON 值（不可为 NULL）
+ * @return       double 数值，不是数值类型则返回 0.0
+ */
+double cc_json_number_value(const cc_json_value_t *value);
+
+/**
  * cc_json_bool_value — 从 JSON 值中提取布尔值
  *
  * 如果 value 不是布尔类型，返回 0（即 false）。

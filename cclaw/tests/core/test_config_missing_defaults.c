@@ -13,6 +13,13 @@
 #include <stdio.h>
 #include <string.h>
 
+static int double_eq(double a, double b)
+{
+    double d = a - b;
+    if (d < 0.0) d = -d;
+    return d < 0.000001;
+}
+
 /**
  * main — 执行本文件的 Given/When/Then 回归测试，失败时返回非零退出码。
  *
@@ -47,6 +54,12 @@ int main(void)
         cc_config_destroy(&config);
         return 1;
     }
+    if (config.max_tokens != 4096 || !double_eq(config.temperature, 0.7) ||
+        config.summary_max_tokens != 1024 ||
+        !double_eq(config.summary_temperature, 0.3)) {
+        cc_config_destroy(&config);
+        return 1;
+    }
 
 #if CC_PLATFORM != CC_PLATFORM_ESP32
     const char legacy_workspace_path[] = "." "/" "workspace";
@@ -65,7 +78,9 @@ int main(void)
     const char *path = "__c_claw_config_ui_test__.json";
     FILE *f = fopen(path, "wb");
     if (!f) return 1;
-    fputs("{\"model\":{\"stream_mode\":true},\"cli\":{\"debug_mode\":true}}", f);
+    fputs("{\"model\":{\"stream_mode\":true,\"max_tokens\":2048,\"temperature\":0.2},"
+          "\"system\":{\"summary_max_tokens\":512,\"summary_temperature\":0.1},"
+          "\"cli\":{\"debug_mode\":true}}", f);
     fclose(f);
 
     memset(&config, 0, sizeof(config));
@@ -79,6 +94,12 @@ int main(void)
     cc_result_free(&rc);
 
     if (config.stream_mode != 1 || config.debug_mode != 1) {
+        cc_config_destroy(&config);
+        return 1;
+    }
+    if (config.max_tokens != 2048 || !double_eq(config.temperature, 0.2) ||
+        config.summary_max_tokens != 512 ||
+        !double_eq(config.summary_temperature, 0.1)) {
         cc_config_destroy(&config);
         return 1;
     }

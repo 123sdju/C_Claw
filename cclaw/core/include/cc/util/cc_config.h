@@ -84,6 +84,11 @@ typedef struct cc_config {
                                   *   1 = 启用（LLM 输出思考过程 + 最终回答）
                                   *   0 = 禁用（仅输出最终回答）
                                   *   默认值：0 */
+    int max_tokens;              /**< 主对话单次回复最大 token 数。
+                                  *   默认值：4096 */
+    double temperature;           /**< 主对话生成温度（0.0-2.0）。
+                                  *   0.0 表示最确定输出。
+                                  *   默认值：0.7 */
     int stream_mode;             /**< 是否默认使用 LLM 流式请求：
                                   *   1 = 默认调用流式 LLM API
                                   *   0 = 默认调用同步 LLM API，运行时可由 gateway 命令切换
@@ -133,6 +138,10 @@ typedef struct cc_config {
     int context_keep_recent;     /**< 压缩时保留最近 N 条原始消息不被压缩。
                                   *   这些消息保留完整细节，确保最近对话的连贯性。
                                   *   默认值：20 */
+    int summary_max_tokens;      /**< 上下文摘要压缩请求的最大生成 token 数。
+                                  *   默认值：1024 */
+    double summary_temperature;   /**< 上下文摘要压缩请求的生成温度。
+                                  *   默认值：0.3 */
 } cc_config_t;
 
 /**

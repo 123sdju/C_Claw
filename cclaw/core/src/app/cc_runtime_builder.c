@@ -279,6 +279,10 @@ cc_result_t cc_runtime_builder_create(
     runtime_config.context_window_tokens = config->context_window_tokens;
     runtime_config.context_compress_threshold = config->context_compress_threshold;
     runtime_config.context_keep_recent = config->context_keep_recent;
+    runtime_config.max_tokens = config->max_tokens;
+    runtime_config.temperature = config->temperature;
+    runtime_config.summary_max_tokens = config->summary_max_tokens;
+    runtime_config.summary_temperature = config->summary_temperature;
     runtime_config.system_prompt = builder->system_prompt;
     runtime_config.workspace_dir = config->workspace_path;
     runtime_config.model = config->model;

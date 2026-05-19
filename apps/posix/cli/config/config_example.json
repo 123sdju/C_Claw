@@ -4,6 +4,8 @@
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com",
     "api_key": "",
+    "max_tokens": 4096,
+    "temperature": 0.7,
     "thinking_mode": 0,
     "stream_mode": 0
   },
@@ -22,7 +24,9 @@
     "max_steps": 10,
     "context_window_tokens": 8192,
     "context_compress_threshold": 80,
-    "context_keep_recent": 20
+    "context_keep_recent": 20,
+    "summary_max_tokens": 1024,
+    "summary_temperature": 0.3
   },
   "cli": {
     "debug_mode": false

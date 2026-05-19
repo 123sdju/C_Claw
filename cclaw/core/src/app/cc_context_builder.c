@@ -67,7 +67,7 @@
  *     即使加载 500 条，经过 token 裁剪后实际发送给 LLM 的消息
  *     可能远少于 500 条。
  *
- *   为什么压缩调用使用 temperature=0.3？
+ *   为什么压缩调用默认使用 temperature=0.3？
  *     摘要任务需要确定性和准确性，不需要创造力。低 temperature
  *     确保生成的摘要更加一致和可靠。
  *
@@ -490,8 +490,8 @@ static cc_json_value_t* build_header_messages(
  *   0 表示压缩失败（out_summary 为 NULL）
  *
  * 设计决策：
- *   1. temperature=0.3：摘要需要准确性和一致性，不需要创造力
- *   2. max_tokens=1024：限制摘要长度，防止 LLM 输出过长
+ *   1. summary_temperature 默认 0.3：摘要需要准确性和一致性，不需要创造力
+ *   2. summary_max_tokens 默认 1024：限制摘要长度，防止 LLM 输出过长
  *   3. prompt 要求 "Output ONLY the summary paragraph"：
  *      防止 LLM 输出"好的让我总结一下..."等废话
  *   4. 消息数 < 3 时跳过压缩：太少消息不值得压缩开销
@@ -578,8 +578,8 @@ static int try_compress_history(
     memset(&req, 0, sizeof(req));
     req.messages_json = compress_json;
     req.model = runtime->config.model;
-    req.max_tokens = 1024;
-    req.temperature = 0.3;
+    req.max_tokens = runtime->config.summary_max_tokens;
+    req.temperature = runtime->config.summary_temperature;
     req.stream = 0;
 
     cc_llm_response_t resp;
