@@ -140,6 +140,9 @@ typedef struct cc_policy_decision {
 /* ── 前向声明 ───────────────────────────────────────────────────────── */
 
 typedef struct cc_policy_engine_vtable cc_policy_engine_vtable_t;
+/**
+ * cc_policy_engine_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
+ */
 typedef struct cc_policy_engine cc_policy_engine_t;
 
 /**

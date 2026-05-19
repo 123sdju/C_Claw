@@ -19,25 +19,82 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * cc_policy_engine_create_default — 外部策略引擎工厂；根据 shell 审批开关创建默认 policy 端口。
+ *
+ * @param shell_requires_approval 按值传入的参数，用于控制本次操作。
+ * @param out_engine 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_policy_engine_create_default(
     int shell_requires_approval,
     cc_policy_engine_t *out_engine
 );
 #if CC_TOOL_FILE_READ
+/**
+ * cc_file_read_tool_create — 外部文件读取工具工厂；把文件系统端口注入 file_read 工具。
+ *
+ * @param fs 按值传入的参数，用于控制本次操作。
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_file_read_tool_create(cc_filesystem_t fs, cc_tool_t *out_tool);
 #endif
 #if CC_TOOL_FILE_WRITE
+/**
+ * cc_file_write_tool_create — 外部文件写入工具工厂；把文件系统端口注入 file_write 工具。
+ *
+ * @param fs 按值传入的参数，用于控制本次操作。
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_file_write_tool_create(cc_filesystem_t fs, cc_tool_t *out_tool);
 #endif
 #if CC_TOOL_HTTP_REQUEST
+/**
+ * cc_http_request_tool_create — 外部 HTTP 请求工具工厂；创建可由 LLM 调用的 http.request 工具。
+ *
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_http_request_tool_create(cc_tool_t *out_tool);
 #endif
 #if CC_TOOL_SHELL_RUN
+/**
+ * cc_shell_run_tool_create — 外部 shell 工具工厂；把 sandbox 端口注入 shell_run 工具。
+ *
+ * @param sandbox 借用的对象指针；函数不取得结构体本身所有权。
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_shell_run_tool_create(cc_sandbox_t sandbox, cc_tool_t *out_tool);
 #endif
+/**
+ * cc_local_sandbox_create — 外部本地 sandbox 工厂；用 timeout_ms 创建受限本机执行环境。
+ *
+ * @param timeout_ms 按值传入的参数，用于控制本次操作。
+ * @param out_sandbox 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_local_sandbox_create(int timeout_ms, cc_sandbox_t *out_sandbox);
+/**
+ * cc_docker_sandbox_create — 外部 Docker sandbox 工厂；用 timeout_ms 创建容器隔离执行环境。
+ *
+ * @param timeout_ms 按值传入的参数，用于控制本次操作。
+ * @param out_sandbox 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_docker_sandbox_create(int timeout_ms, cc_sandbox_t *out_sandbox);
 #if CC_LLM_OPENAI
+/**
+ * cc_openai_provider_create — 外部 OpenAI provider 工厂；复制 URL、API key 和 model 后创建 LLM 端口。
+ *
+ * @param base_url 借用的只读字符串；函数不会释放该指针。
+ * @param api_key 借用的只读字符串；函数不会释放该指针。
+ * @param model 借用的只读字符串；函数不会释放该指针。
+ * @param out_provider 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_openai_provider_create(
     const char *base_url,
     const char *api_key,
@@ -46,6 +103,14 @@ extern cc_result_t cc_openai_provider_create(
 );
 #endif
 #if CC_LLM_OLLAMA
+/**
+ * cc_ollama_provider_create — 外部 Ollama provider 工厂；复制 URL 和 model 后创建本地 LLM 端口。
+ *
+ * @param base_url 借用的只读字符串；函数不会释放该指针。
+ * @param model 借用的只读字符串；函数不会释放该指针。
+ * @param out_provider 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_ollama_provider_create(
     const char *base_url,
     const char *model,
@@ -53,6 +118,15 @@ extern cc_result_t cc_ollama_provider_create(
 );
 #endif
 #if CC_LLM_ANTHROPIC
+/**
+ * cc_anthropic_provider_create — 外部 Anthropic provider 工厂；复制 URL、API key 和 model 后创建 LLM 端口。
+ *
+ * @param base_url 借用的只读字符串；函数不会释放该指针。
+ * @param api_key 借用的只读字符串；函数不会释放该指针。
+ * @param model 借用的只读字符串；函数不会释放该指针。
+ * @param out_provider 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_anthropic_provider_create(
     const char *base_url,
     const char *api_key,
@@ -62,8 +136,13 @@ extern cc_result_t cc_anthropic_provider_create(
 #endif
 
 #if CC_LLM_OPENAI
-/* 学习注释：create_openai 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_openai — 把 cc_config_t 中的 OpenAI 配置转交给 provider 工厂并写入 out_provider。
+ *
+ * @param config 借用的只读配置；函数只读取需要的字段。
+ * @param out_provider 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_openai(const cc_config_t *config, cc_llm_provider_t *out_provider)
 {
     return cc_openai_provider_create(config->base_url, config->api_key, config->model, out_provider);
@@ -71,8 +150,13 @@ static cc_result_t create_openai(const cc_config_t *config, cc_llm_provider_t *o
 #endif
 
 #if CC_LLM_OLLAMA
-/* 学习注释：create_ollama 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_ollama — 把 cc_config_t 中的 Ollama 配置转交给 provider 工厂并写入 out_provider。
+ *
+ * @param config 借用的只读配置；函数只读取需要的字段。
+ * @param out_provider 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_ollama(const cc_config_t *config, cc_llm_provider_t *out_provider)
 {
     return cc_ollama_provider_create(config->base_url, config->model, out_provider);
@@ -80,21 +164,38 @@ static cc_result_t create_ollama(const cc_config_t *config, cc_llm_provider_t *o
 #endif
 
 #if CC_LLM_ANTHROPIC
-/* 学习注释：create_anthropic 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_anthropic — 把 cc_config_t 中的 Anthropic 配置转交给 provider 工厂并写入 out_provider。
+ *
+ * @param config 借用的只读配置；函数只读取需要的字段。
+ * @param out_provider 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_anthropic(const cc_config_t *config, cc_llm_provider_t *out_provider)
 {
     return cc_anthropic_provider_create(config->base_url, config->api_key, config->model, out_provider);
 }
 #endif
 
-/* 学习注释：create_policy 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_policy — 根据 config.shell_requires_approval 创建默认工具策略引擎。
+ *
+ * @param config 借用的只读配置；函数只读取需要的字段。
+ * @param out_policy 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_policy(const cc_config_t *config, cc_policy_engine_t *out_policy)
 {
     return cc_policy_engine_create_default(config->shell_requires_approval, out_policy);
 }
 
+/**
+ * create_memory_store — 根据 config.memory_backend/path 创建长期记忆存储，未启用时返回空端口。
+ *
+ * @param config 借用的只读配置；读取 memory_backend 与 memory_path。
+ * @param out_store 输出 memory store 端口；成功启用时由 runtime_builder 销毁。
+ * @return CC_OK 表示创建成功或当前 profile 明确禁用记忆；失败返回后端错误。
+ */
 static cc_result_t create_memory_store(const cc_config_t *config, cc_memory_store_t *out_store)
 {
 #if CC_HAS_MEMORY
@@ -109,8 +210,13 @@ static cc_result_t create_memory_store(const cc_config_t *config, cc_memory_stor
 #endif
 }
 
-/* 学习注释：create_sandbox 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_sandbox — 根据 config.sandbox_type 在 local/docker sandbox 工厂之间选择。
+ *
+ * @param config 借用的只读配置；函数只读取需要的字段。
+ * @param out_sandbox 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_sandbox(const cc_config_t *config, cc_sandbox_t *out_sandbox)
 {
     memset(out_sandbox, 0, sizeof(*out_sandbox));
@@ -136,8 +242,13 @@ static cc_result_t create_sandbox(const cc_config_t *config, cc_sandbox_t *out_s
 }
 
 #if CC_TOOL_FILE_READ
-/* 学习注释：create_file_read_tool 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_file_read_tool — 把 runtime_builder 提供的文件系统端口注入 file_read 工具。
+ *
+ * @param ctx 借用的上下文对象；函数只在调用期间使用。
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_file_read_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
 {
     return cc_file_read_tool_create(ctx->filesystem, out_tool);
@@ -145,8 +256,13 @@ static cc_result_t create_file_read_tool(const cc_runtime_tool_factory_ctx_t *ct
 #endif
 
 #if CC_TOOL_FILE_WRITE
-/* 学习注释：create_file_write_tool 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_file_write_tool — 把 runtime_builder 提供的文件系统端口注入 file_write 工具。
+ *
+ * @param ctx 借用的上下文对象；函数只在调用期间使用。
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_file_write_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
 {
     return cc_file_write_tool_create(ctx->filesystem, out_tool);
@@ -154,8 +270,13 @@ static cc_result_t create_file_write_tool(const cc_runtime_tool_factory_ctx_t *c
 #endif
 
 #if CC_TOOL_HTTP_REQUEST
-/* 学习注释：create_http_request_tool 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_http_request_tool — 创建 http.request 工具并交给 runtime_builder 注册。
+ *
+ * @param ctx 借用的上下文对象；函数只在调用期间使用。
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_http_request_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
 {
     (void)ctx;
@@ -164,8 +285,13 @@ static cc_result_t create_http_request_tool(const cc_runtime_tool_factory_ctx_t 
 #endif
 
 #if CC_TOOL_SHELL_RUN
-/* 学习注释：create_shell_tool 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_shell_tool — 按需创建 sandbox 并注入 shell_run 工具，注册失败时由调用方清理。
+ *
+ * @param ctx 借用的上下文对象；函数只在调用期间使用。
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_shell_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
 {
     if (!ctx->create_sandbox) {
@@ -185,8 +311,13 @@ static cc_result_t create_shell_tool(const cc_runtime_tool_factory_ctx_t *ctx, c
 }
 #endif
 
-/* 学习注释：create_memory_tool 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * create_memory_tool — 在启用 memory store 时创建 memory 工具，未启用时返回空工具。
+ *
+ * @param ctx 借用的上下文对象；函数只在调用期间使用。
+ * @param out_tool 输出参数；成功时由函数写入，失败时调用方不要使用未初始化内容。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t create_memory_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
 {
 #if CC_HAS_MEMORY
@@ -200,8 +331,12 @@ static cc_result_t create_memory_tool(const cc_runtime_tool_factory_ctx_t *ctx, 
 }
 
 #if CC_TOOL_PLUGIN
-/* 学习注释：read_file_content 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * read_file_content — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * @param path 借用的只读字符串；函数不会释放该指针。
+ * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
+ */
 static char *read_file_content(const char *path)
 {
     if (!path || !path[0]) return NULL;
@@ -225,8 +360,14 @@ static char *read_file_content(const char *path)
     return buf;
 }
 
-/* 学习注释：load_plugins 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * load_plugins — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * @param config 只读配置对象；函数读取字段但不保存 config 指针。
+ * @param registry 借用的对象；函数不释放该对象本身。
+ * @param out_state 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t load_plugins(
     const cc_config_t *config,
     cc_tool_registry_t *registry,
@@ -250,8 +391,12 @@ static cc_result_t load_plugins(
     return cc_result_ok();
 }
 
-/* 学习注释：destroy_plugins 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * destroy_plugins — 释放插件加载阶段创建的 plugin manager 状态。
+ *
+ * @param state 借用的指针参数；若函数需要长期保存内容，会在内部复制。
+ * 无返回值；函数通过对象状态、输出参数或释放动作体现副作用。
+ */
 static void destroy_plugins(void *state)
 {
     cc_plugin_manager_destroy((cc_plugin_manager_t *)state);
@@ -315,8 +460,11 @@ static const cc_runtime_feature_set_t feature_set = {
 #endif
 };
 
-/* 学习注释：cc_app_default_features 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_app_default_features — 返回当前应用 profile 的静态 feature set，供 runtime_builder 发现可编译能力。
+ *
+ * @return 静态只读 feature set 借用指针；调用方不得释放或修改。
+ */
 const cc_runtime_feature_set_t *cc_app_default_features(void)
 {
     return &feature_set;

@@ -18,6 +18,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * cc_esp32_http_ctx — HTTP 响应累积上下文，回调逐块追加响应体并维护长度/容量。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct cc_esp32_http_ctx {
     cc_http_response_t *response;
     cc_http_body_callback_fn on_body;
@@ -26,8 +31,17 @@ typedef struct cc_esp32_http_ctx {
     cc_result_t callback_error;
 } cc_esp32_http_ctx_t;
 
-/* 学习注释：response_append 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * response_append — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param response 借用的对象；函数不释放该对象本身。
+ * @param data 借用的只读字符串；函数不会释放该指针。
+ * @param len 按值传入，用于控制本次操作。
+ * @param max_response_bytes 按值传入，用于控制本次操作。
+ * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
+ */
 static int response_append(
     cc_http_response_t *response,
     const char *data,
@@ -50,8 +64,14 @@ static int response_append(
     return 1;
 }
 
-/* 学习注释：http_event_handler 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * http_event_handler — 处理 ESP-IDF HTTP client 事件，把响应片段追加到请求上下文。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param evt 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @return 返回 esp_err_t 类型结果，供当前调用链继续判断。
+ */
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     cc_esp32_http_ctx_t *ctx = (cc_esp32_http_ctx_t *)evt->user_data;
@@ -79,8 +99,15 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-/* 学习注释：cc_http_client_perform 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_http_client_perform — 执行一次平台 HTTP 请求，填充状态码和响应体或触发流式回调。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param request 借用的对象；函数不释放该对象本身。
+ * @param out_response 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_http_client_perform(
     const cc_http_request_t *request,
     cc_http_response_t *out_response
@@ -156,8 +183,14 @@ cc_result_t cc_http_client_perform(
     return cc_result_ok();
 }
 
-/* 学习注释：cc_http_response_free 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_http_response_free — 释放结果结构体内部由平台层分配的缓冲区，并把大小/指针复位。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param response 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_http_response_free(cc_http_response_t *response)
 {
     if (!response) return;

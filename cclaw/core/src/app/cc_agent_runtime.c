@@ -131,8 +131,13 @@
 static cc_mutex_t g_id_mutex = NULL;
 static unsigned long g_id_counter = 0;
 
-/* 学习注释：ensure_id_mutex 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * ensure_id_mutex — 按需初始化全局消息 ID 互斥锁，保护进程内递增计数。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void ensure_id_mutex(void)
 {
     if (!g_id_mutex) {
@@ -252,8 +257,14 @@ cc_result_t cc_agent_runtime_create(
     return cc_result_ok();
 }
 
-/* 学习注释：build_tool_calls_json 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * build_tool_calls_json — 把单个工具调用编码成 LLM 兼容的 tool_calls JSON 数组字符串。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param call 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
+ */
 static char *build_tool_calls_json(const cc_tool_call_t *call)
 {
     cc_json_value_t *tcs = cc_json_create_array();
@@ -271,8 +282,17 @@ static char *build_tool_calls_json(const cc_tool_call_t *call)
     return json;
 }
 
-/* 学习注释：cc_agent_runtime_store_assistant_text 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_agent_runtime_store_assistant_text — 把最终 assistant 文本和可选 reasoning_content 包装成消息并追加到 session store。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param runtime 借用的对象；函数不释放该对象本身。
+ * @param session_id 借用的只读字符串；函数不会释放该指针。
+ * @param text 借用的只读字符串；函数不会释放该指针。
+ * @param reasoning_content 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_agent_runtime_store_assistant_text(
     cc_agent_runtime_t *runtime,
     const char *session_id,
@@ -303,8 +323,17 @@ cc_result_t cc_agent_runtime_store_assistant_text(
     return rc;
 }
 
-/* 学习注释：cc_agent_runtime_execute_tool_step 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_agent_runtime_execute_tool_step — 参与工具注册、工具调用或工具结果写回流程。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param runtime 借用的对象；函数不释放该对象本身。
+ * @param session_id 借用的只读字符串；函数不会释放该指针。
+ * @param call 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param reasoning_content 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_agent_runtime_execute_tool_step(
     cc_agent_runtime_t *runtime,
     const char *session_id,
@@ -596,8 +625,15 @@ static void execute_pending_tool(stream_loop_ctx_t *ctx)
     cc_string_builder_clear(&ctx->args_builder);
 }
 
-/* 学习注释：stream_loop_callback 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * stream_loop_callback — 维护流式输出缓冲和事件分发状态。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param chunk 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void stream_loop_callback(const cc_stream_chunk_t *chunk, void *user_data)
 {
     stream_loop_ctx_t *ctx = (stream_loop_ctx_t *)user_data;
@@ -1045,8 +1081,16 @@ void cc_agent_runtime_set_thinking_mode(cc_agent_runtime_t *runtime, int enabled
     cc_mutex_unlock(runtime->mutex);
 }
 
-/* 学习注释：cc_agent_runtime_set_tool_approval 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_agent_runtime_set_tool_approval — 参与工具注册、工具调用或工具结果写回流程。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param runtime 借用的对象；函数不释放该对象本身。
+ * @param approve_tool_call 按值传入，用于控制本次操作。
+ * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_agent_runtime_set_tool_approval(
     cc_agent_runtime_t *runtime,
     cc_tool_approval_fn approve_tool_call,
@@ -1093,32 +1137,64 @@ int cc_agent_runtime_get_thinking_mode(cc_agent_runtime_t *runtime)
     return enabled;
 }
 
-/* 学习注释：cc_agent_runtime_event_bus 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_agent_runtime_event_bus — 返回 runtime 注入的事件总线借用指针，供 gateway 订阅流式事件。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param runtime 借用的对象；函数不释放该对象本身。
+ * @return 返回借用对象指针；NULL 表示未注入、未找到或当前对象无效。
+ */
 cc_event_bus_t *cc_agent_runtime_event_bus(cc_agent_runtime_t *runtime)
 {
     return runtime ? runtime->event_bus : NULL;
 }
 
+/**
+ * cc_agent_runtime_tool_registry — 返回 runtime 注入的工具注册表借用指针。
+ *
+ * @param runtime 借用 runtime；可为 NULL。
+ * @return 工具注册表借用指针；runtime 为 NULL 时返回 NULL。
+ */
 cc_tool_registry_t *cc_agent_runtime_tool_registry(cc_agent_runtime_t *runtime)
 {
     return runtime ? runtime->tool_registry : NULL;
 }
 
-/* 学习注释：cc_agent_runtime_session_store 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_agent_runtime_session_store — 返回 runtime 内部会话存储端口地址，供测试或诊断复用。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param runtime 借用的对象；函数不释放该对象本身。
+ * @return 返回借用对象指针；NULL 表示未注入、未找到或当前对象无效。
+ */
 cc_session_store_t *cc_agent_runtime_session_store(cc_agent_runtime_t *runtime)
 {
     return runtime ? &runtime->store : NULL;
 }
 
+/**
+ * cc_agent_runtime_supports_stream — 查询当前 LLM provider 是否实现流式 chat 回调。
+ *
+ * @param runtime 借用 runtime；可为 NULL。
+ * @return 非 0 表示支持流式输出，0 表示不支持或 runtime 无效。
+ */
 int cc_agent_runtime_supports_stream(cc_agent_runtime_t *runtime)
 {
     return runtime && runtime->llm.vtable && runtime->llm.vtable->chat_stream;
 }
 
-/* 学习注释：cc_agent_runtime_create_session 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_agent_runtime_create_session — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param runtime 借用的对象；函数不释放该对象本身。
+ * @param session_id 借用的只读字符串；函数不会释放该指针。
+ * @param workspace_dir 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_agent_runtime_create_session(
     cc_agent_runtime_t *runtime,
     const char *session_id,
@@ -1319,6 +1395,15 @@ cc_result_t cc_agent_runtime_create_session(
  *     记录也不会丢失。
  */
 
+/**
+ * cc_agent_runtime_handle_message — 非流式 Agent 主入口，保存用户消息并执行 ReAct 循环。
+ *
+ * @param runtime 借用 runtime；不可为 NULL。
+ * @param session_id 借用会话 ID。
+ * @param user_input 借用用户输入文本。
+ * @param out_response 输出最终回答字符串；调用方负责 free。
+ * @return CC_OK 表示主循环完成；失败返回存储、LLM、工具或内存错误。
+ */
 cc_result_t cc_agent_runtime_handle_message(
     cc_agent_runtime_t *runtime,
     const char *session_id,

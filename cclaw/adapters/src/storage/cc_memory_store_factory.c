@@ -50,9 +50,33 @@ cc_result_t cc_memory_store_create_noop(cc_memory_store_t *out_store)
     return cc_result_error(CC_ERR_PLATFORM, "Memory store disabled on this platform");
 }
 
+/**
+ * cc_memory_store_create_inmem — 声明内存记忆后端工厂，成功后 out_store 拥有后端 self。
+ *
+ * @param out_store 输出 memory store 端口。
+ * @return CC_OK 表示创建成功；失败返回内存错误。
+ */
 cc_result_t cc_memory_store_create_inmem(cc_memory_store_t *out_store);
+/**
+ * cc_memory_store_create_json_file — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_store 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param file_path 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_memory_store_create_json_file(cc_memory_store_t *out_store, const char *file_path);
 #if CC_STORAGE_SQLITE
+/**
+ * cc_memory_store_create_sqlite — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_store 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param db_path 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_memory_store_create_sqlite(cc_memory_store_t *out_store, const char *db_path);
 #endif
 

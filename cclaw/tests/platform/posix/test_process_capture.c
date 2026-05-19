@@ -38,6 +38,11 @@
 #include <stdio.h>
 #include <string.h>
 
+/**
+ * main — 执行本文件的 Given/When/Then 回归测试，失败时返回非零退出码。
+ *
+ * @return 0 表示断言全部通过，非 0 表示行为回归。
+ */
 int main(void)
 {
     /* 构造 shell 命令：循环 5000 次打印 16 字节固定字符串 */

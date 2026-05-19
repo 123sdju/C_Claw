@@ -85,23 +85,56 @@ typedef struct cc_agent_runtime_config {
                           *   默认值：20 */
 } cc_agent_runtime_config_t;
 
+/**
+ * cc_agent_runtime — Agent 主循环的不透明运行时对象。
+ *
+ * 对外只通过本头文件的函数访问。对象内部保存注入端口的浅拷贝、
+ * 配置字符串副本、线程锁和当前会话执行状态；调用方用
+ * cc_agent_runtime_destroy 释放。
+ */
 typedef struct cc_agent_runtime cc_agent_runtime_t;
 
+/**
+ * cc_agent_runtime_deps — 创建 runtime 时注入的外部依赖集合。
+ *
+ * 端口值字段（llm/store/policy/sandbox）会被 runtime 浅拷贝，底层 self
+ * 的最终所有权仍由 runtime_builder 或调用方管理。指针字段（registry、
+ * event_bus、logger、memory_store）均为借用指针，生命周期必须覆盖 runtime。
+ */
 typedef struct cc_agent_runtime_deps {
+    /** 借用底层 self 的 LLM provider 端口值；runtime 不负责 destroy。 */
     cc_llm_provider_t llm;
+    /** 借用的工具注册表；必须在 runtime 生命周期内保持有效且通常已 freeze。 */
     cc_tool_registry_t *tool_registry;
+    /** 借用底层 self 的会话存储端口值；runtime 只调用其 vtable。 */
     cc_session_store_t store;
+    /** 借用底层 self 的策略引擎端口值；用于工具执行前审批。 */
     cc_policy_engine_t policy;
+    /** 借用底层 self 的 sandbox 端口值；可为空 vtable 表示未启用。 */
     cc_sandbox_t sandbox;
+    /** 可选事件总线；为 NULL 时 runtime 只返回最终响应，不发布流事件。 */
     cc_event_bus_t *event_bus;
+    /** 可选 logger；为 NULL 时跳过日志输出。 */
     cc_logger_t *logger;
+    /** 可选长期记忆存储；为 NULL 时上下文构建不注入记忆。 */
     cc_memory_store_t *memory_store;
+    /** 可选人工审批回调；policy 返回需审批时由 tool executor 调用。 */
     cc_tool_approval_fn approve_tool_call;
+    /** 传给 approve_tool_call 的调用方上下文，runtime 只保存借用值。 */
     void *approval_user_data;
 } cc_agent_runtime_deps_t;
 
+/**
+ * cc_agent_runtime_options — 创建 runtime 时传入的行为选项。
+ *
+ * options 与 deps 分离：deps 描述外部端口，options 描述纯行为参数。
+ * create 会深拷贝 config 中需要长期持有的字符串，因此调用方可在创建后释放
+ * 自己的配置对象。
+ */
 typedef struct cc_agent_runtime_options {
+    /** 运行时配置；system_prompt/workspace_dir/model 会被深拷贝。 */
     cc_agent_runtime_config_t config;
+    /** 初始思考流展示开关；运行后可通过 setter 线程安全修改。 */
     int thinking_mode;
 } cc_agent_runtime_options_t;
 
@@ -134,24 +167,78 @@ cc_result_t cc_agent_runtime_create(
  */
 void cc_agent_runtime_destroy(cc_agent_runtime_t *runtime);
 
+/**
+ * cc_agent_runtime_set_thinking_mode — 线程安全地更新是否发布 thinking 流事件。
+ *
+ * @param runtime 借用的 runtime；NULL 时函数直接返回。
+ * @param enabled 非 0 表示启用 thinking 事件，0 表示隐藏 thinking 增量。
+ */
 void cc_agent_runtime_set_thinking_mode(cc_agent_runtime_t *runtime, int enabled);
 
+/**
+ * cc_agent_runtime_get_thinking_mode — 线程安全地读取 thinking 流事件开关。
+ *
+ * @param runtime 借用的 runtime；NULL 时返回 0。
+ * @return 非 0 表示启用 thinking 展示，0 表示关闭或 runtime 无效。
+ */
 int cc_agent_runtime_get_thinking_mode(cc_agent_runtime_t *runtime);
 
+/**
+ * cc_agent_runtime_set_tool_approval — 更新人工工具审批回调。
+ *
+ * runtime 只保存函数指针和 user_data，不取得 user_data 的所有权。该接口用于
+ * CLI gateway 在运行时注入交互式审批逻辑。
+ *
+ * @param runtime 借用的 runtime；NULL 时函数直接返回。
+ * @param approve_tool_call 可选审批回调；NULL 表示禁用人工审批。
+ * @param user_data 原样传给审批回调的借用上下文。
+ */
 void cc_agent_runtime_set_tool_approval(
     cc_agent_runtime_t *runtime,
     cc_tool_approval_fn approve_tool_call,
     void *user_data
 );
 
+/**
+ * cc_agent_runtime_event_bus — 返回 runtime 注入的事件总线借用指针，用于 gateway 订阅流式事件。
+ *
+ * @param runtime 借用的 runtime；可为 NULL。
+ * @return 注入的 event_bus 借用指针；未注入或 runtime 为 NULL 时返回 NULL。
+ */
 cc_event_bus_t *cc_agent_runtime_event_bus(cc_agent_runtime_t *runtime);
 
+/**
+ * cc_agent_runtime_tool_registry — 返回 runtime 内部使用的工具注册表借用指针，主要用于测试和诊断。
+ *
+ * @param runtime 借用的 runtime；可为 NULL。
+ * @return 工具注册表借用指针；runtime 为 NULL 时返回 NULL。
+ */
 cc_tool_registry_t *cc_agent_runtime_tool_registry(cc_agent_runtime_t *runtime);
 
+/**
+ * cc_agent_runtime_session_store — 返回 runtime 注入的会话存储接口副本，调用方只借用底层 self。
+ *
+ * @param runtime 借用的 runtime；可为 NULL。
+ * @return runtime 内部 store 字段的地址；runtime 为 NULL 时返回 NULL。
+ */
 cc_session_store_t *cc_agent_runtime_session_store(cc_agent_runtime_t *runtime);
 
+/**
+ * cc_agent_runtime_supports_stream — 查询当前 LLM provider 是否实现 chat_stream，用于选择流式或同步路径。
+ *
+ * @param runtime 借用的 runtime；可为 NULL。
+ * @return 非 0 表示 provider 支持流式输出，0 表示不支持或 runtime 无效。
+ */
 int cc_agent_runtime_supports_stream(cc_agent_runtime_t *runtime);
 
+/**
+ * cc_agent_runtime_create_session — 通过 runtime 的 session store 创建会话元数据，不触发 LLM 调用。
+ *
+ * @param runtime 借用的 runtime；不可为 NULL。
+ * @param session_id 借用的会话 ID 字符串；store 会按自身约定复制或持久化。
+ * @param workspace_dir 借用的工作目录字符串；用于写入会话元数据。
+ * @return CC_OK 表示会话创建成功；失败返回 store 或参数校验错误。
+ */
 cc_result_t cc_agent_runtime_create_session(
     cc_agent_runtime_t *runtime,
     const char *session_id,

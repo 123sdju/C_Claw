@@ -13,6 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * cc_http_llm_provider — HTTP LLM provider 私有状态。
+ *
+ * 拥有 base_url/api_key/model 字符串以及 protocol.self；destroy 时统一释放。
+ */
 typedef struct cc_http_llm_provider {
     char *base_url;
     char *api_key;
@@ -20,8 +25,14 @@ typedef struct cc_http_llm_provider {
     cc_llm_protocol_t protocol;
 } cc_http_llm_provider_t;
 
-/* 学习注释：cc_llm_http_request_cleanup 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_llm_http_request_cleanup — 释放协议 build_request 填入的 URL、API key、body 和 header 数组。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param request 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_llm_http_request_cleanup(cc_llm_http_request_t *request)
 {
     if (!request) return;
@@ -36,8 +47,18 @@ void cc_llm_http_request_cleanup(cc_llm_http_request_t *request)
     memset(request, 0, sizeof(*request));
 }
 
-/* 学习注释：http_post_json_with_headers 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * http_post_json_with_headers — 处理 HTTP 请求/响应细节，并把传输错误转换为统一结果。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param url 借用的只读字符串；函数不会释放该指针。
+ * @param headers 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param header_count 按值传入，用于控制本次操作。
+ * @param body_json 借用的只读字符串；函数不会释放该指针。
+ * @param out_response 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t http_post_json_with_headers(
     const char *url,
     const cc_http_header_t *headers,
@@ -75,6 +96,11 @@ static cc_result_t http_post_json_with_headers(
     return cc_result_ok();
 }
 
+/**
+ * cc_http_llm_stream_ctx — HTTP LLM 流式解析上下文，保存协议、回调和未解析尾部缓冲。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct cc_http_llm_stream_ctx {
     cc_llm_protocol_t protocol;
     cc_llm_stream_kind_t stream_kind;
@@ -87,8 +113,16 @@ typedef struct cc_http_llm_stream_ctx {
     int finished;
 } cc_http_llm_stream_ctx_t;
 
-/* 学习注释：stream_ctx_append 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * stream_ctx_append — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param ctx 调用上下文；只在本次函数执行期间借用。
+ * @param data 借用的只读字符串；函数不会释放该指针。
+ * @param len 按值传入，用于控制本次操作。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t stream_ctx_append(
     cc_http_llm_stream_ctx_t *ctx,
     const char *data,
@@ -110,8 +144,14 @@ static cc_result_t stream_ctx_append(
     return cc_result_ok();
 }
 
-/* 学习注释：emit_finished_once 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * emit_finished_once — 确保流式回调只收到一次 finished 事件，避免重复结束通知。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param ctx 调用上下文；只在本次函数执行期间借用。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t emit_finished_once(cc_http_llm_stream_ctx_t *ctx)
 {
     if (ctx->finished) return cc_result_ok();
@@ -121,8 +161,15 @@ static cc_result_t emit_finished_once(cc_http_llm_stream_ctx_t *ctx)
     return cc_result_ok();
 }
 
-/* 学习注释：dispatch_stream_event 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * dispatch_stream_event — 解析 provider 的一段流式事件，并通过统一 chunk 回调交给 runtime。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param ctx 调用上下文；只在本次函数执行期间借用。
+ * @param event_json 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t dispatch_stream_event(
     cc_http_llm_stream_ctx_t *ctx,
     const char *event_json
@@ -148,8 +195,15 @@ static cc_result_t dispatch_stream_event(
     return cc_result_ok();
 }
 
-/* 学习注释：process_sse_event 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * process_sse_event — 处理一条完整 SSE 事件，把 data 字段交给协议解析器并识别 [DONE] 结束标记。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param ctx 调用上下文；只在本次函数执行期间借用。
+ * @param event_text 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t process_sse_event(
     cc_http_llm_stream_ctx_t *ctx,
     char *event_text
@@ -184,8 +238,14 @@ static cc_result_t process_sse_event(
     return rc;
 }
 
-/* 学习注释：process_sse_buffer 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * process_sse_buffer — 从累积的 SSE 缓冲区中拆出完整事件，保留未收齐的尾部片段。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param ctx 调用上下文；只在本次函数执行期间借用。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t process_sse_buffer(cc_http_llm_stream_ctx_t *ctx)
 {
     char *p = ctx->buffer;
@@ -217,8 +277,14 @@ static cc_result_t process_sse_buffer(cc_http_llm_stream_ctx_t *ctx)
     return cc_result_ok();
 }
 
-/* 学习注释：process_ndjson_buffer 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * process_ndjson_buffer — 从 NDJSON 流式缓冲区中逐行取出 JSON 事件并分发给协议解析器。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param ctx 调用上下文；只在本次函数执行期间借用。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t process_ndjson_buffer(cc_http_llm_stream_ctx_t *ctx)
 {
     char *p = ctx->buffer;
@@ -245,8 +311,16 @@ static cc_result_t process_ndjson_buffer(cc_http_llm_stream_ctx_t *ctx)
     return cc_result_ok();
 }
 
-/* 学习注释：stream_body_callback 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * stream_body_callback — 维护流式输出缓冲和事件分发状态。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param data 借用的只读字符串；函数不会释放该指针。
+ * @param len 按值传入，用于控制本次操作。
+ * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t stream_body_callback(const char *data, size_t len, void *user_data)
 {
     cc_http_llm_stream_ctx_t *ctx = (cc_http_llm_stream_ctx_t *)user_data;
@@ -265,8 +339,14 @@ static cc_result_t stream_body_callback(const char *data, size_t len, void *user
     return cc_result_error(CC_ERR_PLATFORM, "Unsupported LLM stream framing");
 }
 
-/* 学习注释：flush_stream_tail 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * flush_stream_tail — 维护流式输出缓冲和事件分发状态。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param ctx 调用上下文；只在本次函数执行期间借用。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t flush_stream_tail(cc_http_llm_stream_ctx_t *ctx)
 {
     if (ctx->finished || ctx->buf_len == 0) return cc_result_ok();
@@ -279,8 +359,17 @@ static cc_result_t flush_stream_tail(cc_http_llm_stream_ctx_t *ctx)
     return cc_result_ok();
 }
 
-/* 学习注释：http_post_json_stream_with_headers 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * http_post_json_stream_with_headers — 处理 HTTP 请求/响应细节，并把传输错误转换为统一结果。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param http_req 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param protocol 按值传入，用于控制本次操作。
+ * @param on_chunk 按值传入，用于控制本次操作。
+ * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t http_post_json_stream_with_headers(
     const cc_llm_http_request_t *http_req,
     cc_llm_protocol_t protocol,
@@ -330,8 +419,16 @@ static cc_result_t http_post_json_stream_with_headers(
     return rc;
 }
 
-/* 学习注释：http_llm_chat 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * http_llm_chat — 执行一次非流式 LLM HTTP 调用，发送请求并解析完整 JSON 响应。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param request 借用的对象；函数不释放该对象本身。
+ * @param out_response 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t http_llm_chat(
     void *self,
     const cc_llm_chat_request_t *request,
@@ -374,8 +471,17 @@ static cc_result_t http_llm_chat(
     return rc;
 }
 
-/* 学习注释：http_llm_chat_stream 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * http_llm_chat_stream — 维护流式输出缓冲和事件分发状态。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param request 借用的对象；函数不释放该对象本身。
+ * @param on_chunk 按值传入，用于控制本次操作。
+ * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t http_llm_chat_stream(
     void *self,
     const cc_llm_chat_request_t *request,
@@ -412,8 +518,14 @@ static cc_result_t http_llm_chat_stream(
     return rc;
 }
 
-/* 学习注释：http_llm_destroy 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * http_llm_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void http_llm_destroy(void *self)
 {
     cc_http_llm_provider_t *provider = (cc_http_llm_provider_t *)self;
@@ -433,8 +545,18 @@ static cc_llm_provider_vtable_t http_llm_vtable = {
     http_llm_destroy
 };
 
-/* 学习注释：cc_http_llm_provider_create 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_http_llm_provider_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param base_url 借用的只读字符串；函数不会释放该指针。
+ * @param api_key 借用的只读字符串；函数不会释放该指针。
+ * @param model 借用的只读字符串；函数不会释放该指针。
+ * @param protocol 按值传入，用于控制本次操作。
+ * @param out_provider 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_http_llm_provider_create(
     const char *base_url,
     const char *api_key,

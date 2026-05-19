@@ -120,6 +120,13 @@ static int next_id = 1;
  * @param params_json  参数的 JSON 字符串表示，可为 NULL 表示无参
  * @return             堆上分配的 JSON 请求字符串，调用者负责 free()
  */
+/**
+ * cc_jsonrpc_build_request — 构造单行 JSON-RPC 2.0 请求字符串，调用方负责 free。
+ *
+ * @param method 借用的远程方法名。
+ * @param params_json 借用的参数 JSON；NULL 时使用空对象。
+ * @return 新分配请求字符串；失败返回 NULL。
+ */
 char *cc_jsonrpc_build_request(const char *method, const char *params_json)
 {
     cc_json_value_t *req = cc_json_create_object();
@@ -195,6 +202,14 @@ char *cc_jsonrpc_build_request(const char *method, const char *params_json)
  * @param out_error_json  输出：error  字段的 JSON 字符串（调用者释放）
  * @return                CC_OK — 解析过程正常（不代表调用成功，要检查 error）
  *                        其他 — JSON 解析本身错误（响应不是合法 JSON）
+ */
+/**
+ * cc_jsonrpc_parse_response — 解析插件返回的 JSON-RPC 响应并拆出 result/error 字段。
+ *
+ * @param response_json 借用的响应 JSON 文本。
+ * @param out_result_json 输出 result JSON 字符串；调用方负责 free。
+ * @param out_error_json 输出 error JSON 字符串；调用方负责 free。
+ * @return CC_OK 表示响应 JSON 可解析；调用是否失败需检查 out_error_json。
  */
 cc_result_t cc_jsonrpc_parse_response(
     const char *response_json,

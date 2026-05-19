@@ -41,13 +41,26 @@
 #include <string.h>
 #include <stdio.h>
 
+/**
+ * cc_plugin_process — 插件子进程句柄，保存进程管道和启动配置，生命周期由 plugin manager 管理。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct cc_plugin_process {
     cc_process_pipe_t *pipe;
     cc_mutex_t request_mutex;
 } cc_plugin_process_t;
 
-/* 学习注释：cc_plugin_process_start 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_process_start — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param command 借用的只读字符串；函数不会释放该指针。
+ * @param argv 命令行参数数组；只在本次调用中借用。
+ * @param out_process 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_plugin_process_start(
     const char *command,
     char *const argv[],
@@ -75,8 +88,16 @@ cc_result_t cc_plugin_process_start(
     return cc_result_ok();
 }
 
-/* 学习注释：cc_plugin_process_call 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_process_call — 按 JSON-RPC 一问一答模式写入请求并读取插件进程响应。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param process 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param request_json 借用的只读字符串；函数不会释放该指针。
+ * @param out_json 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_plugin_process_call(
     cc_plugin_process_t *process,
     const char *request_json,
@@ -94,8 +115,15 @@ cc_result_t cc_plugin_process_call(
     return rc;
 }
 
-/* 学习注释：cc_plugin_process_send 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_process_send — 向插件子进程 stdin 写入一行 JSON-RPC 文本。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param process 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param json_str 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_plugin_process_send(
     cc_plugin_process_t *process,
     const char *json_str
@@ -106,8 +134,15 @@ cc_result_t cc_plugin_process_send(
     return cc_process_pipe_write(process->pipe, json_str);
 }
 
-/* 学习注释：cc_plugin_process_receive 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_process_receive — 从插件子进程 stdout 读取一行 JSON-RPC 响应文本。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param process 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param out_json 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_plugin_process_receive(
     cc_plugin_process_t *process,
     char **out_json
@@ -118,8 +153,14 @@ cc_result_t cc_plugin_process_receive(
     return cc_process_pipe_read_line(process->pipe, out_json);
 }
 
-/* 学习注释：cc_plugin_process_stop 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_process_stop — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param process 借用的指针参数；若需要长期保存内容，函数会复制。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_plugin_process_stop(cc_plugin_process_t *process)
 {
     if (!process) return;
@@ -131,8 +172,14 @@ void cc_plugin_process_stop(cc_plugin_process_t *process)
     cc_mutex_unlock(process->request_mutex);
 }
 
-/* 学习注释：cc_plugin_process_destroy 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_process_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param process 借用的指针参数；若需要长期保存内容，函数会复制。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_plugin_process_destroy(cc_plugin_process_t *process)
 {
     if (!process) return;

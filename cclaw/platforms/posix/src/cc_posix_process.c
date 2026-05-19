@@ -63,14 +63,24 @@
 #include <time.h>
 #include <sys/select.h>
 
+/**
+ * capture_buffer_t — 进程输出捕获缓冲区，维护 data/len/capacity 不变量。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct {
     char *data;
     size_t total;
     size_t cap;
 } capture_buffer_t;
 
-/* 学习注释：sleep_10ms 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * sleep_10ms — 短暂休眠 10ms，用于轮询子进程管道时避免忙等。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void sleep_10ms(void)
 {
     struct timespec ts;
@@ -79,8 +89,14 @@ static void sleep_10ms(void)
     nanosleep(&ts, NULL);
 }
 
-/* 学习注释：set_nonblocking 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * set_nonblocking — 更新对象内部字段或输出结构，同时维护旧值释放规则。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param fd 按值传入，用于控制本次操作。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void set_nonblocking(int fd)
 {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -89,8 +105,16 @@ static void set_nonblocking(int fd)
     }
 }
 
-/* 学习注释：capture_append 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * capture_append — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param capture 借用的对象；函数不释放该对象本身。
+ * @param buf 借用的只读字符串；函数不会释放该指针。
+ * @param len 按值传入，用于控制本次操作。
+ * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
+ */
 static int capture_append(capture_buffer_t *capture, const char *buf, size_t len)
 {
     if (!capture || len == 0) return 1;
@@ -114,8 +138,15 @@ static int capture_append(capture_buffer_t *capture, const char *buf, size_t len
     return 1;
 }
 
-/* 学习注释：drain_fd 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * drain_fd — 非阻塞读取文件描述符中的可用数据并追加到捕获缓冲区。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param fd 按值传入，用于控制本次操作。
+ * @param capture 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void drain_fd(int fd, capture_buffer_t *capture)
 {
     char buf[4096];
@@ -333,8 +364,16 @@ struct cc_process_pipe {
     FILE *from_child;
 };
 
-/* 学习注释：cc_process_pipe_spawn 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_process_pipe_spawn — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param command 借用的只读字符串；函数不会释放该指针。
+ * @param argv 命令行参数数组；只在本次调用中借用。
+ * @param out_pipe 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_process_pipe_spawn(
     const char *command,
     char *const argv[],
@@ -412,8 +451,15 @@ cc_result_t cc_process_pipe_spawn(
     return cc_result_ok();
 }
 
-/* 学习注释：cc_process_pipe_write 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_process_pipe_write — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param pipe 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param data 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_process_pipe_write(cc_process_pipe_t *pipe, const char *data)
 {
     if (!pipe || !pipe->to_child || !data)
@@ -430,8 +476,15 @@ cc_result_t cc_process_pipe_write(cc_process_pipe_t *pipe, const char *data)
     return cc_result_ok();
 }
 
-/* 学习注释：cc_process_pipe_read_line 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_process_pipe_read_line — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param pipe 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param out_line 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
 {
     if (!pipe || pipe->stdout_fd < 0 || !out_line)
@@ -499,8 +552,14 @@ cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
     return cc_result_ok();
 }
 
-/* 学习注释：cc_process_pipe_stop 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_process_pipe_stop — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param pipe 借用的指针参数；若需要长期保存内容，函数会复制。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_process_pipe_stop(cc_process_pipe_t *pipe)
 {
     if (!pipe) return;
@@ -528,8 +587,14 @@ void cc_process_pipe_stop(cc_process_pipe_t *pipe)
     }
 }
 
-/* 学习注释：cc_process_pipe_destroy 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_process_pipe_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param pipe 借用的指针参数；若需要长期保存内容，函数会复制。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_process_pipe_destroy(cc_process_pipe_t *pipe)
 {
     if (!pipe) return;

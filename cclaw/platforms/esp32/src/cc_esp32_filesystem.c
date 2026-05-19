@@ -18,12 +18,25 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/**
+ * cc_esp32_filesystem — filesystem 端口私有实现对象，当前多数平台无需额外状态但仍保留 self 位置。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct cc_esp32_filesystem {
     int dummy;
 } cc_esp32_filesystem_t;
 
-/* 学习注释：esp32_read_text 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * esp32_read_text — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param path 借用的只读字符串；函数不会释放该指针。
+ * @param out_text 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t esp32_read_text(void *self, const char *path, char **out_text)
 {
     (void)self;
@@ -45,8 +58,16 @@ static cc_result_t esp32_read_text(void *self, const char *path, char **out_text
     return cc_result_ok();
 }
 
-/* 学习注释：esp32_write_text 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * esp32_write_text — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param path 借用的只读字符串；函数不会释放该指针。
+ * @param text 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t esp32_write_text(void *self, const char *path, const char *text)
 {
     (void)self;
@@ -59,8 +80,16 @@ static cc_result_t esp32_write_text(void *self, const char *path, const char *te
     return cc_result_ok();
 }
 
-/* 学习注释：esp32_exists 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * esp32_exists — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param path 借用的只读字符串；函数不会释放该指针。
+ * @param out_exists 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t esp32_exists(void *self, const char *path, int *out_exists)
 {
     (void)self;
@@ -68,8 +97,17 @@ static cc_result_t esp32_exists(void *self, const char *path, int *out_exists)
     return cc_result_ok();
 }
 
-/* 学习注释：esp32_list_dir 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * esp32_list_dir — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param path 借用的只读字符串；函数不会释放该指针。
+ * @param out_items 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_count 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t esp32_list_dir(void *self, const char *path, char ***out_items, size_t *out_count)
 {
     (void)self;
@@ -113,8 +151,15 @@ static cc_result_t esp32_list_dir(void *self, const char *path, char ***out_item
     return cc_result_ok();
 }
 
-/* 学习注释：esp32_make_dir 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * esp32_make_dir — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param path 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t esp32_make_dir(void *self, const char *path)
 {
     (void)self;
@@ -142,8 +187,15 @@ static cc_result_t esp32_make_dir(void *self, const char *path)
     return cc_result_ok();
 }
 
-/* 学习注释：esp32_remove 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * esp32_remove — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param path 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t esp32_remove(void *self, const char *path)
 {
     (void)self;
@@ -152,8 +204,14 @@ static cc_result_t esp32_remove(void *self, const char *path)
     return cc_result_ok();
 }
 
-/* 学习注释：esp32_destroy 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * esp32_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void esp32_destroy(void *self)
 {
     free(self);
@@ -169,8 +227,14 @@ static cc_filesystem_vtable_t esp32_vtable = {
     esp32_destroy
 };
 
-/* 学习注释：cc_filesystem_get_default 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_filesystem_get_default — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_fs 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_filesystem_get_default(cc_filesystem_t *out_fs)
 {
     cc_esp32_filesystem_t *self = calloc(1, sizeof(cc_esp32_filesystem_t));
@@ -180,8 +244,14 @@ cc_result_t cc_filesystem_get_default(cc_filesystem_t *out_fs)
     return cc_result_ok();
 }
 
-/* 学习注释：cc_filesystem_get_posix 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_filesystem_get_posix — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_fs 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_filesystem_get_posix(cc_filesystem_t *out_fs)
 {
     return cc_filesystem_get_default(out_fs);

@@ -46,7 +46,23 @@ static const char *QEMU_WORKSPACE_DIR = "/sdcard/cclaw/workspace";
 static const char *QEMU_DATA_DIR = "/sdcard/cclaw/data";
 static wl_handle_t s_sdcard_wl_handle = WL_INVALID_HANDLE;
 
+/**
+ * cc_memory_session_store_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_store 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
+/**
+ * cc_esp32_gpio_tool_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_esp32_gpio_tool_create(cc_tool_t *out_tool);
 
 #ifndef CCLAW_QEMU_REAL_LLM
@@ -72,8 +88,17 @@ static esp_eth_netif_glue_handle_t s_eth_glue = NULL;
 static esp_eth_mac_t *s_eth_mac = NULL;
 static esp_eth_phy_t *s_eth_phy = NULL;
 
-/* 学习注释：on_eth_got_ip 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * on_eth_got_ip — 处理 QEMU 以太网获 IP 事件，记录网络已经可用的状态。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
+ * @param event_base 按值传入，用于控制本次操作。
+ * @param event_id 按值传入，用于控制本次操作。
+ * @param event_data 借用的指针参数；若需要长期保存内容，函数会复制。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void on_eth_got_ip(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
@@ -84,8 +109,13 @@ static void on_eth_got_ip(void *arg, esp_event_base_t event_base, int32_t event_
     s_qemu_got_ip = 1;
 }
 
-/* 学习注释：qemu_network_start 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * qemu_network_start — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t qemu_network_start(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -150,14 +180,26 @@ static cc_result_t qemu_network_start(void)
 }
 #endif
 
+/**
+ * thread_probe — QEMU 自测用线程探针，主线程通过它验证 mutex 保护下的计数递增。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct thread_probe {
     cc_mutex_t mutex;
     int value;
 } thread_probe_t;
 
 #if CCLAW_QEMU_REAL_LLM
-/* 学习注释：replace_config_string 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * replace_config_string — 用测试配置值替换 cc_config_t 字符串字段，成功后字段拥有新副本。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param field 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param value 借用的只读字符串；函数不会释放该指针。
+ * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
+ */
 static int replace_config_string(char **field, const char *value)
 {
     if (!value || !value[0]) return 1;
@@ -169,8 +211,14 @@ static int replace_config_string(char **field, const char *value)
 }
 #endif
 
-/* 学习注释：worker_increment 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * worker_increment — 在线程测试中递增共享计数器，用互斥锁验证并发访问安全。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
+ * @return 返回借用对象指针；NULL 表示未注入、未找到或当前对象无效。
+ */
 static void *worker_increment(void *arg)
 {
     thread_probe_t *probe = (thread_probe_t *)arg;
@@ -180,8 +228,15 @@ static void *worker_increment(void *arg)
     return NULL;
 }
 
-/* 学习注释：require_ok 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * require_ok — 执行条件检查，用于决定后续控制流或测试断言是否继续。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param name 借用的只读字符串；函数不会释放该指针。
+ * @param rc 按值传入，用于控制本次操作。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void require_ok(const char *name, cc_result_t rc)
 {
     if (rc.code == CC_OK) {
@@ -193,8 +248,15 @@ static void require_ok(const char *name, cc_result_t rc)
     abort();
 }
 
-/* 学习注释：require_true 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * require_true — 执行条件检查，用于决定后续控制流或测试断言是否继续。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param name 借用的只读字符串；函数不会释放该指针。
+ * @param condition 按值传入，用于控制本次操作。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void require_true(const char *name, int condition)
 {
     if (condition) {
@@ -205,8 +267,13 @@ static void require_true(const char *name, int condition)
     abort();
 }
 
-/* 学习注释：test_json 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * test_json — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void test_json(void)
 {
     cc_json_value_t *root = NULL;
@@ -219,8 +286,13 @@ static void test_json(void)
     cc_json_destroy(root);
 }
 
-/* 学习注释：test_message_copy 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * test_message_copy — 复制输入数据，让目标对象拥有独立生命周期。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void test_message_copy(void)
 {
     cc_message_t message;
@@ -245,8 +317,13 @@ static void test_message_copy(void)
     cc_message_cleanup(&message);
 }
 
-/* 学习注释：test_thread_mutex 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * test_thread_mutex — 运行 ESP32/QEMU 线程互斥测试，验证多线程递增不会丢失更新。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void test_thread_mutex(void)
 {
     thread_probe_t probe;
@@ -264,8 +341,13 @@ static void test_thread_mutex(void)
     cc_mutex_destroy(probe.mutex);
 }
 
-/* 学习注释：test_tool_registry 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * test_tool_registry — 参与工具注册、工具调用或工具结果写回流程。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void test_tool_registry(void)
 {
     cc_tool_registry_t *registry = NULL;
@@ -274,8 +356,13 @@ static void test_tool_registry(void)
     cc_tool_registry_destroy(registry);
 }
 
-/* 学习注释：test_gpio_tool 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * test_gpio_tool — 参与工具注册、工具调用或工具结果写回流程。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void test_gpio_tool(void)
 {
     cc_tool_t tool;
@@ -315,8 +402,13 @@ static void test_gpio_tool(void)
     }
 }
 
-/* 学习注释：mount_qemu_sdcard 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * mount_qemu_sdcard — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void mount_qemu_sdcard(void)
 {
     const esp_vfs_fat_mount_config_t mount_config = {
@@ -358,8 +450,14 @@ static void mount_qemu_sdcard(void)
 }
 
 #if !CCLAW_QEMU_REAL_LLM
-/* 学习注释：last_user_content_from_messages 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * last_user_content_from_messages — 解析 messages JSON，提取最后一条 user 消息内容供 mock LLM 回显。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param messages_json 借用的只读字符串；函数不会释放该指针。
+ * @return 返回借用或静态只读字符串；调用方不得释放。
+ */
 static const char *last_user_content_from_messages(const char *messages_json)
 {
     static char content[512];
@@ -389,8 +487,16 @@ static const char *last_user_content_from_messages(const char *messages_json)
     return content;
 }
 
-/* 学习注释：qemu_mock_chat 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * qemu_mock_chat — ESP32/QEMU mock LLM 的同步 chat 实现，根据最后用户消息构造测试回复。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param request 借用的对象；函数不释放该对象本身。
+ * @param out 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t qemu_mock_chat(void *self, const cc_llm_chat_request_t *request, cc_llm_response_t *out)
 {
     (void)self;
@@ -413,8 +519,14 @@ static cc_result_t qemu_mock_chat(void *self, const cc_llm_chat_request_t *reque
     return cc_result_ok();
 }
 
-/* 学习注释：qemu_mock_destroy 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * qemu_mock_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void qemu_mock_destroy(void *self)
 {
     (void)self;
@@ -427,8 +539,14 @@ static cc_llm_provider_vtable_t qemu_mock_llm_vtable = {
 };
 #endif
 
-/* 学习注释：trim_line 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * trim_line — 移除行尾换行和回车，便于串口/终端输入后续解析。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param line 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void trim_line(char *line)
 {
     if (!line) return;
@@ -438,8 +556,13 @@ static void trim_line(char *line)
     }
 }
 
-/* 学习注释：run_uart_chat 是本文件内部辅助函数。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * run_uart_chat — 驱动 ESP32 QEMU UART 聊天示例，初始化配置后循环处理串口输入。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void run_uart_chat(void)
 {
 #if CCLAW_QEMU_REAL_LLM

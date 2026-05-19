@@ -180,8 +180,15 @@ static char *read_text_file(const char *path)
     return buf;
 }
 
-/* 学习注释：replace_string 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * replace_string — 用新分配字符串替换配置字段；分配失败时保留旧值并返回错误。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param field 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param value 借用的只读字符串；函数不会释放该指针。
+ * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
+ */
 static int replace_string(char **field, const char *value)
 {
     if (!value) return 1;
@@ -192,16 +199,29 @@ static int replace_string(char **field, const char *value)
     return 1;
 }
 
-/* 学习注释：json_string_field 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * json_string_field — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param obj 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param key 借用的只读字符串；函数不会释放该指针。
+ * @return 返回借用或静态只读字符串；调用方不得释放。
+ */
 static const char *json_string_field(cc_json_value_t *obj, const char *key)
 {
     if (!obj || !key) return NULL;
     return cc_json_string_value(cc_json_object_get(obj, key));
 }
 
-/* 学习注释：json_boolish_value 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * json_boolish_value — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param value 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
+ */
 static int json_boolish_value(cc_json_value_t *value)
 {
     const char *s = cc_json_string_value(value);
@@ -212,8 +232,14 @@ static int json_boolish_value(cc_json_value_t *value)
     return cc_json_bool_value(value) || cc_json_int_value(value) != 0;
 }
 
-/* 学习注释：config_required_allocs_ok 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * config_required_allocs_ok — 检查默认配置填充后的关键字符串字段是否都已成功分配。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param config 只读配置对象；函数读取字段但不保存 config 指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t config_required_allocs_ok(const cc_config_t *config)
 {
     if (!config->provider || !config->model || !config->base_url ||

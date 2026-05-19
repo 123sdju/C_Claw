@@ -122,8 +122,22 @@ void cc_message_cleanup(cc_message_t *message);
  */
 cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst);
 
+/**
+ * cc_message_set_tool_calls_json — 替换 assistant 消息中的 tool_calls JSON 副本。
+ *
+ * @param message 要更新的消息；函数释放旧 tool_calls_json。
+ * @param tool_calls_json 借用的新 JSON 文本；函数会深拷贝。
+ * @return CC_OK 表示更新成功；失败返回参数或内存错误。
+ */
 cc_result_t cc_message_set_tool_calls_json(cc_message_t *message, const char *tool_calls_json);
 
+/**
+ * cc_message_set_reasoning_content — 替换消息中的 reasoning_content 副本。
+ *
+ * @param message 要更新的消息；函数释放旧 reasoning_content。
+ * @param reasoning_content 借用的新推理内容；函数会深拷贝。
+ * @return CC_OK 表示更新成功；失败返回参数或内存错误。
+ */
 cc_result_t cc_message_set_reasoning_content(cc_message_t *message, const char *reasoning_content);
 
 /**

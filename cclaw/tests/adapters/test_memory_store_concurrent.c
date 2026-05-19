@@ -39,6 +39,14 @@
 #define THREADS 4
 #define LOOPS 100
 
+/**
+ * cc_memory_session_store_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：测试层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_store 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
 
 /* 线程上下文：持有 store 引用、线程序号（决定 session 归属）、失败标志 */
@@ -73,8 +81,13 @@ static void *worker(void *arg)
     return NULL;
 }
 
-/* 学习注释：main 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * main — 执行本文件的 Given/When/Then 回归测试，失败时以非零退出码暴露问题。
+ *
+ * 位置：测试层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @return 0 通常表示成功完成，非 0 表示失败或应向进程层传播的状态。
+ */
 int main(void)
 {
     cc_session_store_t store;

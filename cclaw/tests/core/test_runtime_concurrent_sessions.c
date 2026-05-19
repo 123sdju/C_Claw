@@ -35,6 +35,14 @@
 
 #define THREADS 4
 
+/**
+ * cc_memory_session_store_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_store 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
 
 /*
@@ -54,8 +62,13 @@ static cc_result_t fake_chat(void *self, const cc_llm_chat_request_t *request, c
     return cc_result_ok();
 }
 
-/* 学习注释：fake_destroy 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * fake_destroy — 释放本模块拥有的资源；传入的借用对象不在这里释放。
+ *
+ * Given：测试先构造最小依赖、mock 或输入数据。
+ * When：调用被验证的公开 API 或并发入口。
+ * Then：通过断言确认行为、错误路径或资源释放没有回归。
+ */
 static void fake_destroy(void *self) { (void)self; }
 
 static cc_llm_provider_vtable_t fake_vtable = {
@@ -94,8 +107,13 @@ static void *worker(void *arg)
     return NULL;
 }
 
-/* 学习注释：main 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * main — 执行本文件的 Given/When/Then 回归测试，失败时以非零退出码暴露问题。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @return 0 通常表示成功完成，非 0 表示失败或应向进程层传播的状态。
+ */
 int main(void)
 {
     cc_tool_registry_t *registry = NULL;

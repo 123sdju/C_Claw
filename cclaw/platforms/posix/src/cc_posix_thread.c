@@ -12,6 +12,14 @@
 #include <pthread.h>
 #include <stdlib.h>
 
+/**
+ * cc_thread_create — 用 pthread 创建平台线程并把句柄写入 out_thread。
+ *
+ * @param fn 线程入口函数；不可为 NULL。
+ * @param arg 传给线程入口的借用上下文。
+ * @param out_thread 输出线程句柄；调用方后续 join/destroy。
+ * @return CC_OK 表示创建成功；失败返回参数、内存或平台错误。
+ */
 cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thread)
 {
     if (!fn || !out_thread) {
@@ -32,8 +40,14 @@ cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thre
     return cc_result_ok();
 }
 
-/* 学习注释：cc_thread_join 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_thread_join — 等待平台线程结束，并把底层 join 错误转换为统一结果。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param thread 借用的对象；函数不释放该对象本身。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_thread_join(cc_thread_t thread)
 {
     if (!thread) {
@@ -50,8 +64,14 @@ cc_result_t cc_thread_join(cc_thread_t thread)
     return cc_result_ok();
 }
 
-/* 学习注释：cc_mutex_create 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_mutex_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_mutex 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
 {
     if (!out_mutex) {
@@ -78,8 +98,14 @@ cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
     return cc_result_ok();
 }
 
-/* 学习注释：cc_mutex_destroy 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_mutex_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param mutex 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_mutex_destroy(cc_mutex_t mutex)
 {
     if (!mutex) return;
@@ -87,16 +113,28 @@ void cc_mutex_destroy(cc_mutex_t mutex)
     free(mutex);
 }
 
-/* 学习注释：cc_mutex_lock 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_mutex_lock — 进入平台互斥锁临界区，保护共享状态读写。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param mutex 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_mutex_lock(cc_mutex_t mutex)
 {
     if (!mutex) return;
     pthread_mutex_lock((pthread_mutex_t *)mutex);
 }
 
-/* 学习注释：cc_mutex_unlock 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_mutex_unlock — 离开平台互斥锁临界区，让其他线程继续访问共享状态。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param mutex 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_mutex_unlock(cc_mutex_t mutex)
 {
     if (!mutex) return;

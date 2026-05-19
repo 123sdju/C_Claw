@@ -15,38 +15,75 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * cc_policy_engine_create_default — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param shell_requires_approval 按值传入，用于控制本次操作。
+ * @param out_engine 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_policy_engine_create_default(
     int shell_requires_approval,
     cc_policy_engine_t *out_engine
 );
+/**
+ * cc_memory_session_store_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_store 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
 
-/* 学习注释：fake_name 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * fake_name — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
+ *
+ * Given：测试先构造最小依赖、mock 或输入数据。
+ * When：调用被验证的公开 API 或并发入口。
+ * Then：通过断言确认行为、错误路径或资源释放没有回归。
+ */
 static const char *fake_name(void *self)
 {
     (void)self;
     return "shell_run";
 }
 
-/* 学习注释：fake_description 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * fake_description — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
+ *
+ * Given：测试先构造最小依赖、mock 或输入数据。
+ * When：调用被验证的公开 API 或并发入口。
+ * Then：通过断言确认行为、错误路径或资源释放没有回归。
+ */
 static const char *fake_description(void *self)
 {
     (void)self;
     return "fake shell tool";
 }
 
-/* 学习注释：fake_schema 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * fake_schema — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
+ *
+ * Given：测试先构造最小依赖、mock 或输入数据。
+ * When：调用被验证的公开 API 或并发入口。
+ * Then：通过断言确认行为、错误路径或资源释放没有回归。
+ */
 static const char *fake_schema(void *self)
 {
     (void)self;
     return "{}";
 }
 
-/* 学习注释：fake_call 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * fake_call — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
+ *
+ * Given：测试先构造最小依赖、mock 或输入数据。
+ * When：调用被验证的公开 API 或并发入口。
+ * Then：通过断言确认行为、错误路径或资源释放没有回归。
+ */
 static cc_result_t fake_call(
     void *self,
     const char *args_json,
@@ -72,8 +109,13 @@ static cc_tool_vtable_t fake_vtable = {
     NULL
 };
 
-/* 学习注释：approval_approve 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * approval_approve — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
+ *
+ * Given：测试先构造最小依赖、mock 或输入数据。
+ * When：调用被验证的公开 API 或并发入口。
+ * Then：通过断言确认行为、错误路径或资源释放没有回归。
+ */
 static int approval_approve(
     const char *tool_name,
     const char *arguments_json,
@@ -89,8 +131,13 @@ static int approval_approve(
     return 1;
 }
 
-/* 学习注释：approval_deny 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * approval_deny — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
+ *
+ * Given：测试先构造最小依赖、mock 或输入数据。
+ * When：调用被验证的公开 API 或并发入口。
+ * Then：通过断言确认行为、错误路径或资源释放没有回归。
+ */
 static int approval_deny(
     const char *tool_name,
     const char *arguments_json,
@@ -106,8 +153,14 @@ static int approval_deny(
     return 0;
 }
 
-/* 学习注释：clear_tool_result 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * clear_tool_result — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param result 借用的指针参数；若需要长期保存内容，函数会复制。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void clear_tool_result(cc_tool_result_t *result)
 {
     free(result->content);
@@ -116,8 +169,13 @@ static void clear_tool_result(cc_tool_result_t *result)
     memset(result, 0, sizeof(*result));
 }
 
-/* 学习注释：main 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * main — 执行本文件的 Given/When/Then 回归测试，失败时以非零退出码暴露问题。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @return 0 通常表示成功完成，非 0 表示失败或应向进程层传播的状态。
+ */
 int main(void)
 {
     cc_tool_registry_t *registry = NULL;

@@ -40,6 +40,9 @@
 /* ── 前向声明 ───────────────────────────────────────────────────────── */
 
 typedef struct cc_filesystem_vtable cc_filesystem_vtable_t;
+/**
+ * cc_filesystem_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
+ */
 typedef struct cc_filesystem cc_filesystem_t;
 
 /**

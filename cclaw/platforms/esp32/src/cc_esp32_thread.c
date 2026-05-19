@@ -15,14 +15,25 @@
 #include "freertos/semphr.h"
 #include <stdlib.h>
 
+/**
+ * cc_esp32_thread — 平台线程包装对象，用于把统一 cc_thread_t 映射到平台原生线程句柄。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct cc_esp32_thread {
     cc_thread_fn_t fn;
     void *arg;
     SemaphoreHandle_t done;
 } cc_esp32_thread_t;
 
-/* 学习注释：cc_esp32_thread_entry 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_esp32_thread_entry — 把 ESP-IDF task 入口参数还原为 C-Claw 线程启动参数并调用用户函数。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void cc_esp32_thread_entry(void *arg)
 {
     cc_esp32_thread_t *thread = (cc_esp32_thread_t *)arg;
@@ -31,8 +42,16 @@ static void cc_esp32_thread_entry(void *arg)
     vTaskDelete(NULL);
 }
 
-/* 学习注释：cc_thread_create 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_thread_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param fn 按值传入，用于控制本次操作。
+ * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
+ * @param out_thread 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thread)
 {
     if (!fn || !out_thread)
@@ -66,8 +85,14 @@ cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thre
     return cc_result_ok();
 }
 
-/* 学习注释：cc_thread_join 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_thread_join — 等待平台线程结束，并把底层 join 错误转换为统一结果。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param handle 按值传入，用于控制本次操作。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_thread_join(cc_thread_t handle)
 {
     cc_esp32_thread_t *thread = (cc_esp32_thread_t *)handle;
@@ -78,8 +103,14 @@ cc_result_t cc_thread_join(cc_thread_t handle)
     return cc_result_ok();
 }
 
-/* 学习注释：cc_mutex_create 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_mutex_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_mutex 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
 {
     if (!out_mutex) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid mutex output");
@@ -89,20 +120,37 @@ cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
     return cc_result_ok();
 }
 
-/* 学习注释：cc_mutex_destroy 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_mutex_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param mutex 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_mutex_destroy(cc_mutex_t mutex)
 {
     if (mutex) vSemaphoreDelete((SemaphoreHandle_t)mutex);
 }
 
+/**
+ * cc_mutex_lock — 获取 ESP32 FreeRTOS mutex，进入临界区。
+ *
+ * @param mutex 借用互斥锁句柄；NULL 时函数直接返回。
+ */
 void cc_mutex_lock(cc_mutex_t mutex)
 {
     if (mutex) xSemaphoreTake((SemaphoreHandle_t)mutex, portMAX_DELAY);
 }
 
-/* 学习注释：cc_mutex_unlock 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_mutex_unlock — 离开平台互斥锁临界区，让其他线程继续访问共享状态。
+ *
+ * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param mutex 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_mutex_unlock(cc_mutex_t mutex)
 {
     if (mutex) xSemaphoreGive((SemaphoreHandle_t)mutex);

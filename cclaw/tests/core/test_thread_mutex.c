@@ -60,6 +60,11 @@ static void *worker(void *arg)
     return NULL;
 }
 
+/**
+ * main — 执行本文件的 Given/When/Then 回归测试，失败时返回非零退出码。
+ *
+ * @return 0 表示断言全部通过，非 0 表示行为回归。
+ */
 int main(void)
 {
     counter_t counter = {0};

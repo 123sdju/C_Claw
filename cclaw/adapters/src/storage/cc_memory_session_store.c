@@ -62,6 +62,11 @@ typedef struct {
     char *status;
 } cc_memory_tool_call_record_t;
 
+/**
+ * cc_memory_tool_result_record_t — 结果数据结构，承载调用输出和错误信息；其中堆字符串需要由对应 free 函数释放。
+ *
+ * 资源约定：结构体内的堆字符串或数组由本模块 cleanup/free 函数释放；外部借用指针不在这里释放。
+ */
 typedef struct {
     char *id;
     char *session_id;
@@ -72,6 +77,11 @@ typedef struct {
     char *metadata_json;
 } cc_memory_tool_result_record_t;
 
+/**
+ * cc_memory_session_store_t — 纯内存 session store 私有状态，拥有消息、会话和工具记录数组。
+ *
+ * 资源约定：结构体内的堆字符串或数组由本模块 cleanup/free 函数释放；外部借用指针不在这里释放。
+ */
 typedef struct {
     cc_message_t *messages;
     size_t message_count;
@@ -92,13 +102,24 @@ typedef struct {
     cc_mutex_t mutex;
 } cc_memory_session_store_t;
 
-/* 学习注释：dup_required_string 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * dup_required_string — 复制输入数据，让目标对象拥有独立生命周期。
+ *
+ * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param value 借用的只读字符串；函数不会释放该指针。
+ * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
+ */
 static char *dup_required_string(const char *value)
 {
     return strdup(value ? value : "");
 }
 
+/**
+ * free_tool_call_record — 释放内存 session store 中一条工具调用记录的字段。
+ *
+ * @param record 要清理的记录；NULL 时直接返回。
+ */
 static void free_tool_call_record(cc_memory_tool_call_record_t *record)
 {
     if (!record) return;
@@ -110,8 +131,14 @@ static void free_tool_call_record(cc_memory_tool_call_record_t *record)
     memset(record, 0, sizeof(*record));
 }
 
-/* 学习注释：free_tool_result_record 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * free_tool_result_record — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param record 借用的指针参数；若需要长期保存内容，函数会复制。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void free_tool_result_record(cc_memory_tool_result_record_t *record)
 {
     if (!record) return;
@@ -124,8 +151,14 @@ static void free_tool_result_record(cc_memory_tool_result_record_t *record)
     memset(record, 0, sizeof(*record));
 }
 
-/* 学习注释：ensure_tool_call_capacity 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * ensure_tool_call_capacity — 确保后续操作所需的容量、状态或平台资源已经准备好。
+ *
+ * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param store 借用的对象；函数不释放该对象本身。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t ensure_tool_call_capacity(cc_memory_session_store_t *store)
 {
     if (store->tool_call_count < store->tool_call_cap) return cc_result_ok();
@@ -142,8 +175,14 @@ static cc_result_t ensure_tool_call_capacity(cc_memory_session_store_t *store)
     return cc_result_ok();
 }
 
-/* 学习注释：ensure_tool_result_capacity 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * ensure_tool_result_capacity — 确保后续操作所需的容量、状态或平台资源已经准备好。
+ *
+ * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param store 借用的对象；函数不释放该对象本身。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t ensure_tool_result_capacity(cc_memory_session_store_t *store)
 {
     if (store->tool_result_count < store->tool_result_cap) return cc_result_ok();

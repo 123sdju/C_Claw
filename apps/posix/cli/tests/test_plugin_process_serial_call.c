@@ -78,8 +78,13 @@ static void *worker(void *arg)
     return NULL;
 }
 
-/* 学习注释：main 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * main — 执行本文件的 Given/When/Then 回归测试，失败时以非零退出码暴露问题。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @return 0 通常表示成功完成，非 0 表示失败或应向进程层传播的状态。
+ */
 int main(void)
 {
     /* 启动 Python 插件子进程 */

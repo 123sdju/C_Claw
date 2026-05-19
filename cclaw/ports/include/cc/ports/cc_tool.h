@@ -37,10 +37,29 @@
 #include "cc/core/cc_result.h"
 #include "cc/core/cc_tool_call.h"
 
+/**
+ * cc_event_bus_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
+ */
 typedef struct cc_event_bus cc_event_bus_t;
+/**
+ * cc_logger_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
+ */
 typedef struct cc_logger cc_logger_t;
+/**
+ * cc_memory_store — 长期记忆端口的前向声明。
+ *
+ * 工具上下文只借用 memory store 指针，具体结构定义在 memory store 端口头文件中。
+ */
 typedef struct cc_memory_store cc_memory_store_t;
 
+/**
+ * cc_tool_approval_fn — 工具调用人工审批回调。
+ *
+ * policy engine 判定需要人工确认时，tool executor 会调用该函数。回调只读取
+ * tool_name/arguments_json/reason；user_data 由 gateway 注入并负责生命周期。
+ *
+ * @return 非 0 表示允许继续执行工具，0 表示拒绝。
+ */
 typedef int (*cc_tool_approval_fn)(
     const char *tool_name,
     const char *arguments_json,
@@ -48,11 +67,22 @@ typedef int (*cc_tool_approval_fn)(
     void *user_data
 );
 
+/**
+ * cc_runtime_services — 暴露给工具的受限 runtime 服务集合，避免工具直接持有完整 runtime。
+ *
+ * 该结构体不拥有任何字段。runtime 在执行工具时临时提供它，让工具可以发布事件、
+ * 写日志、访问长期记忆或请求人工审批，同时避免工具拿到完整 runtime。
+ */
 typedef struct cc_runtime_services {
+    /** 可选事件总线；工具可用它发布细粒度进度事件。 */
     cc_event_bus_t *event_bus;
+    /** 可选 logger；工具可用它输出诊断日志。 */
     cc_logger_t *logger;
+    /** 可选长期记忆存储；为 NULL 表示当前 profile 未启用记忆工具链。 */
     cc_memory_store_t *memory_store;
+    /** 可选人工审批回调；高风险工具可在执行前调用。 */
     cc_tool_approval_fn approve_tool_call;
+    /** 传给 approve_tool_call 的调用方上下文。 */
     void *approval_user_data;
 } cc_runtime_services_t;
 
@@ -73,6 +103,9 @@ typedef struct cc_tool_context {
 /* ── 前向声明 ───────────────────────────────────────────────────────── */
 
 typedef struct cc_tool_vtable cc_tool_vtable_t;
+/**
+ * cc_tool_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
+ */
 typedef struct cc_tool cc_tool_t;
 
 /**

@@ -143,6 +143,9 @@ typedef struct cc_sandbox_result {
 /* ── 前向声明 ───────────────────────────────────────────────────────── */
 
 typedef struct cc_sandbox_vtable cc_sandbox_vtable_t;
+/**
+ * cc_sandbox_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
+ */
 typedef struct cc_sandbox cc_sandbox_t;
 
 /**

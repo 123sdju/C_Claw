@@ -52,19 +52,35 @@
 #include <string.h>
 #include <stdio.h>
 
+/**
+ * cc_plugin_entry_t — 单个插件条目，拥有插件名并记录该插件注册出的工具数量。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct {
     char *name;
     cc_plugin_process_t *process;
     int tool_count;
 } cc_plugin_entry_t;
 
+/**
+ * cc_plugin_manager — 插件管理器状态，拥有插件进程、插件工具条目和注册时产生的资源。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 struct cc_plugin_manager {
     cc_plugin_entry_t *entries;
     int entry_count;
 };
 
-/* 学习注释：cc_plugin_manager_create 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_manager_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_manager 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_plugin_manager_create(cc_plugin_manager_t **out_manager)
 {
     cc_plugin_manager_t *manager = calloc(1, sizeof(cc_plugin_manager_t));
@@ -73,6 +89,19 @@ cc_result_t cc_plugin_manager_create(cc_plugin_manager_t **out_manager)
     return cc_result_ok();
 }
 
+/**
+ * cc_plugin_tool_create_full — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param plugin_name 借用的只读字符串；函数不会释放该指针。
+ * @param tool_name 借用的只读字符串；函数不会释放该指针。
+ * @param tool_description 借用的只读字符串；函数不会释放该指针。
+ * @param tool_schema_json 借用的只读字符串；函数不会释放该指针。
+ * @param process 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 extern cc_result_t cc_plugin_tool_create_full(
     const char *plugin_name,
     const char *tool_name,
@@ -82,8 +111,15 @@ extern cc_result_t cc_plugin_tool_create_full(
     cc_tool_t *out_tool
 );
 
-/* 学习注释：manager_add_entry 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * manager_add_entry — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param manager 借用的对象；函数不释放该对象本身。
+ * @param entry 按值传入，用于控制本次操作。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void manager_add_entry(cc_plugin_manager_t *manager, cc_plugin_entry_t entry)
 {
     manager->entries = realloc(manager->entries,
@@ -91,8 +127,16 @@ static void manager_add_entry(cc_plugin_manager_t *manager, cc_plugin_entry_t en
     manager->entries[manager->entry_count++] = entry;
 }
 
-/* 学习注释：load_single_plugin 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * load_single_plugin — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param manager 借用的对象；函数不释放该对象本身。
+ * @param plugin_json 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param registry 借用的对象；函数不释放该对象本身。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t load_single_plugin(
     cc_plugin_manager_t *manager,
     cc_json_value_t *plugin_json,
@@ -178,8 +222,16 @@ static cc_result_t load_single_plugin(
     return cc_result_ok();
 }
 
-/* 学习注释：cc_plugin_manager_load_plugins 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_manager_load_plugins — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param manager 借用的对象；函数不释放该对象本身。
+ * @param config_json 借用的只读字符串；函数不会释放该指针。
+ * @param registry 借用的对象；函数不释放该对象本身。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_plugin_manager_load_plugins(
     cc_plugin_manager_t *manager,
     const char *config_json,
@@ -213,8 +265,14 @@ cc_result_t cc_plugin_manager_load_plugins(
     return cc_result_ok();
 }
 
-/* 学习注释：cc_plugin_manager_destroy 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_plugin_manager_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param manager 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_plugin_manager_destroy(cc_plugin_manager_t *manager)
 {
     if (!manager) return;

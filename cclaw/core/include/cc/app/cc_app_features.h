@@ -12,6 +12,15 @@
 
 #include "cc/app/cc_runtime_features.h"
 
+/**
+ * cc_app_default_features — 返回当前应用/profile 编译进来的能力表。
+ *
+ * 这个函数由具体应用层实现，例如 POSIX CLI、Windows CLI 或 ESP32 QEMU。
+ * 核心 runtime_builder 只依赖这张表来发现可用 provider、tool、store、
+ * sandbox 和插件加载器，从而避免核心层直接引用平台实现。
+ *
+ * @return 静态只读 feature set 借用指针；调用方不得修改或释放。
+ */
 const cc_runtime_feature_set_t *cc_app_default_features(void);
 
 #endif

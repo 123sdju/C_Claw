@@ -45,9 +45,21 @@
 #define LOOPS 1000
 
 /* Dummy 工具的 vtable 实现 - 提供最小化的工具接口 */
+/**
+ * dummy_name — 返回 dummy 工具名称的静态字符串。
+ */
 static const char *dummy_name(void *self) { (void)self; return "dummy"; }
+/**
+ * dummy_desc — 返回 dummy 工具描述的静态字符串。
+ */
 static const char *dummy_desc(void *self) { (void)self; return "Dummy tool"; }
+/**
+ * dummy_schema — 返回 dummy 工具 schema 的静态 JSON 字符串。
+ */
 static const char *dummy_schema(void *self) { (void)self; return "{\"type\":\"object\",\"properties\":{}}"; }
+/**
+ * dummy_call — 填充 dummy 工具成功结果，用于 registry freeze 测试。
+ */
 static cc_result_t dummy_call(void *self, const char *args, const cc_tool_context_t *ctx, cc_tool_result_t *out)
 {
     (void)self; (void)args; (void)ctx;
@@ -87,8 +99,13 @@ static void *reader(void *arg)
     return NULL;
 }
 
-/* 学习注释：main 是测试场景的一部分。先看测试准备的数据，
- * 再看触发的 API，最后看断言；这就是本测试的 Given/When/Then 主线。 */
+/**
+ * main — 执行本文件的 Given/When/Then 回归测试，失败时以非零退出码暴露问题。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @return 0 通常表示成功完成，非 0 表示失败或应向进程层传播的状态。
+ */
 int main(void)
 {
     cc_tool_registry_t *registry = NULL;

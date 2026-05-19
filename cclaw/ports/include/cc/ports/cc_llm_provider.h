@@ -63,6 +63,9 @@ typedef struct cc_llm_chat_request {
 /* ── 前向声明 ───────────────────────────────────────────────────────── */
 
 typedef struct cc_llm_provider_vtable cc_llm_provider_vtable_t;
+/**
+ * cc_llm_provider_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
+ */
 typedef struct cc_llm_provider cc_llm_provider_t;
 
 /**

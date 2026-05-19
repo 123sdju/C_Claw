@@ -139,6 +139,15 @@ static const char *plugin_tool_schema_json(void *self)
  *   - JSON-RPC 响应解析失败 → out_result->ok=0, error="Failed to parse..."
  *   - 插件返回 error → out_result->ok=0, error 为插件端返回的错误内容
  */
+/**
+ * plugin_tool_call — 把工具调用参数封装成 JSON-RPC 请求并交给插件进程执行。
+ *
+ * @param self 插件工具私有状态。
+ * @param args_json 借用的工具参数 JSON；NULL 时使用空对象。
+ * @param ctx 工具上下文；当前实现不直接使用。
+ * @param out_result 输出工具结果；插件错误通过 ok/error 表达。
+ * @return CC_OK 表示通信流程已转换成工具结果。
+ */
 static cc_result_t plugin_tool_call(
     void *self,
     const char *args_json,
@@ -246,6 +255,17 @@ static cc_tool_vtable_t plugin_tool_vtable = {
  * 设计决策：
  *   - process 指针为空时仍可成功创建，但在调用时将返回通信错误
  *   - 所有字符串均使用 strdup 深拷贝，确保工具实例独立于外部数据
+ */
+/**
+ * cc_plugin_tool_create_full — 创建一个绑定到插件进程的工具实例并深拷贝元数据。
+ *
+ * @param plugin_name 借用插件名。
+ * @param tool_name 借用工具名。
+ * @param tool_description 借用工具描述。
+ * @param tool_schema_json 借用工具 schema JSON。
+ * @param process 借用插件进程句柄；工具调用时使用。
+ * @param out_tool 输出工具端口；成功后由 registry 接管。
+ * @return CC_OK 表示创建成功；失败返回内存错误。
  */
 cc_result_t cc_plugin_tool_create_full(
     const char *plugin_name,

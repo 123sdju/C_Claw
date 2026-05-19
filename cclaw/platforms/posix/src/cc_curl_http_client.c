@@ -18,6 +18,11 @@
 #include <curl/curl.h>
 #endif
 
+/**
+ * cc_curl_write_ctx — HTTP 响应累积上下文，回调逐块追加响应体并维护长度/容量。
+ *
+ * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ */
 typedef struct cc_curl_write_ctx {
     cc_http_response_t *response;
     cc_http_body_callback_fn on_body;
@@ -25,8 +30,17 @@ typedef struct cc_curl_write_ctx {
     size_t max_response_bytes;
 } cc_curl_write_ctx_t;
 
-/* 学习注释：response_append 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * response_append — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param response 借用的对象；函数不释放该对象本身。
+ * @param data 借用的只读字符串；函数不会释放该指针。
+ * @param len 按值传入，用于控制本次操作。
+ * @param max_response_bytes 按值传入，用于控制本次操作。
+ * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
+ */
 static int response_append(
     cc_http_response_t *response,
     const char *data,
@@ -50,8 +64,17 @@ static int response_append(
 }
 
 #if CC_HAS_CURL
-/* 学习注释：cc_curl_write_body 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_curl_write_body — 执行文件系统操作，并把平台错误转换为统一结果。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param contents 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param size 按值传入，用于控制本次操作。
+ * @param nmemb 按值传入，用于控制本次操作。
+ * @param userp 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @return 返回字节数、元素数或下标；不会转移任何指针所有权。
+ */
 static size_t cc_curl_write_body(void *contents, size_t size, size_t nmemb, void *userp)
 {
     size_t real_size = size * nmemb;
@@ -75,8 +98,16 @@ static size_t cc_curl_write_body(void *contents, size_t size, size_t nmemb, void
     return real_size;
 }
 
-/* 学习注释：append_header 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * append_header — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param headers 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param name 借用的只读字符串；函数不会释放该指针。
+ * @param value 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t append_header(struct curl_slist **headers, const char *name, const char *value)
 {
     if (!name || !value) return cc_result_ok();
@@ -101,8 +132,15 @@ static cc_result_t append_header(struct curl_slist **headers, const char *name, 
 }
 #endif
 
-/* 学习注释：cc_http_client_perform 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_http_client_perform — 执行一次平台 HTTP 请求，填充状态码和响应体或触发流式回调。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param request 借用的对象；函数不释放该对象本身。
+ * @param out_response 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_http_client_perform(
     const cc_http_request_t *request,
     cc_http_response_t *out_response
@@ -181,8 +219,14 @@ cc_result_t cc_http_client_perform(
 #endif
 }
 
-/* 学习注释：cc_http_response_free 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_http_response_free — 释放结果结构体内部由平台层分配的缓冲区，并把大小/指针复位。
+ *
+ * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param response 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_http_response_free(cc_http_response_t *response)
 {
     if (!response) return;

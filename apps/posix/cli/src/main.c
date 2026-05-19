@@ -17,6 +17,18 @@
 #include <string.h>
 
 #if CC_GATEWAY_CLI
+/**
+ * cc_cli_gateway_run — 启动命令行 gateway，解析 CLI 参数并把交互或 ask 请求交给已构建的 runtime。
+ *
+ * 这里使用 extern 是为了让 main.c 只依赖 gateway 的入口签名，不暴露 CLI
+ * 内部状态结构。gateway 只借用 runtime 和 config，不负责销毁它们。
+ *
+ * @param argc 命令行参数数量。
+ * @param argv 命令行参数数组；gateway 只借用，不保存。
+ * @param runtime 已由 runtime_builder 创建的运行时借用指针。
+ * @param config 已加载的配置；gateway 可读取 CLI 行为参数。
+ * @return 进程退出码，0 表示 CLI 正常完成，非 0 表示命令处理失败。
+ */
 extern int cc_cli_gateway_run(
     int argc,
     char **argv,
@@ -29,8 +41,17 @@ extern int cc_cli_gateway_run(
 #define CC_DEFAULT_CONFIG_PATH ""
 #endif
 
-/* 学习注释：main 是 CLI 进程入口。
- * 阅读时按“解析参数 → 加载配置 → 构建 runtime → 交给 gateway → cleanup”的顺序看资源生命周期。 */
+/**
+ * main — POSIX CLI 可执行文件入口。
+ *
+ * 启动流程按“解析 --config 覆盖项 → 加载配置 → 通过 feature set 构建 runtime
+ * → 交给 gateway → cleanup”展开。无论配置加载警告、runtime 初始化失败还是
+ * 正常退出，资源释放都集中到 cleanup 标签，方便核对生命周期。
+ *
+ * @param argc 命令行参数数量。
+ * @param argv 命令行参数数组；本函数只借用，不保存。
+ * @return 进程退出码：0 表示成功，非 0 表示初始化或 gateway 执行失败。
+ */
 int main(int argc, char **argv)
 {
     int exit_code = 1;

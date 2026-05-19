@@ -256,8 +256,14 @@ void cc_message_destroy(cc_message_t *message)
     free(message);
 }
 
-/* 学习注释：cc_message_cleanup 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_message_cleanup — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param message 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 void cc_message_cleanup(cc_message_t *message)
 {
     if (!message) return;
@@ -271,8 +277,15 @@ void cc_message_cleanup(cc_message_t *message)
     memset(message, 0, sizeof(*message));
 }
 
-/* 学习注释：cc_message_copy 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_message_copy — 复制输入数据，让目标对象拥有独立生命周期。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param src 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param dst 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst)
 {
     if (!src || !dst) {
@@ -300,8 +313,15 @@ cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst)
     return cc_result_ok();
 }
 
-/* 学习注释：cc_message_set_tool_calls_json 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_message_set_tool_calls_json — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param message 借用的对象；函数不释放该对象本身。
+ * @param tool_calls_json 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_message_set_tool_calls_json(cc_message_t *message, const char *tool_calls_json)
 {
     if (!message) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null message");
@@ -314,8 +334,15 @@ cc_result_t cc_message_set_tool_calls_json(cc_message_t *message, const char *to
     return cc_result_ok();
 }
 
-/* 学习注释：cc_message_set_reasoning_content 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_message_set_reasoning_content — 处理消息对象的创建、复制、字段更新或序列化。
+ *
+ * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param message 借用的对象；函数不释放该对象本身。
+ * @param reasoning_content 借用的只读字符串；函数不会释放该指针。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_message_set_reasoning_content(cc_message_t *message, const char *reasoning_content)
 {
     if (!message) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null message");

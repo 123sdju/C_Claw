@@ -15,12 +15,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * cc_esp32_gpio_tool — ESP32 GPIO 工具私有状态，记录已配置方向的引脚，避免重复配置。
+ *
+ * 资源约定：结构体内的堆字符串或数组由本模块 cleanup/free 函数释放；外部借用指针不在这里释放。
+ */
 typedef struct cc_esp32_gpio_tool {
     int configured[GPIO_NUM_MAX];
 } cc_esp32_gpio_tool_t;
 
-/* 学习注释：gpio_allowed 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * gpio_allowed — 执行条件检查，用于决定后续控制流或测试断言是否继续。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param pin 按值传入，用于控制本次操作。
+ * @return 非 0 表示条件成立，0 表示条件不成立。
+ */
 static int gpio_allowed(int pin)
 {
     static const int allowed[] = {
@@ -34,24 +45,42 @@ static int gpio_allowed(int pin)
     return 0;
 }
 
-/* 学习注释：gpio_tool_name 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * gpio_tool_name — 返回端口、工具或协议的静态名称字符串，用于注册和日志。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @return 返回借用或静态只读字符串；调用方不得释放。
+ */
 static const char *gpio_tool_name(void *self)
 {
     (void)self;
     return "gpio";
 }
 
-/* 学习注释：gpio_tool_description 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * gpio_tool_description — 返回工具或组件的静态说明字符串，供模型理解工具用途。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @return 返回借用或静态只读字符串；调用方不得释放。
+ */
 static const char *gpio_tool_description(void *self)
 {
     (void)self;
     return "Read, write, or toggle an allowed ESP32 GPIO pin";
 }
 
-/* 学习注释：gpio_tool_schema_json 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * gpio_tool_schema_json — 返回工具参数 schema 的静态 JSON 字符串，供工具注册给 LLM。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @return 返回借用或静态只读字符串；调用方不得释放。
+ */
 static const char *gpio_tool_schema_json(void *self)
 {
     (void)self;
@@ -68,16 +97,31 @@ static const char *gpio_tool_schema_json(void *self)
     "}";
 }
 
-/* 学习注释：set_tool_error 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * set_tool_error — 更新对象内部字段或输出结构，同时维护旧值释放规则。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_result 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param message 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void set_tool_error(cc_tool_result_t *out_result, const char *message)
 {
     out_result->ok = 0;
     out_result->error = strdup(message ? message : "GPIO tool error");
 }
 
-/* 学习注释：ensure_direction 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * ensure_direction — 确保后续操作所需的容量、状态或平台资源已经准备好。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param tool 借用的对象；函数不释放该对象本身。
+ * @param pin 按值传入，用于控制本次操作。
+ * @param mode 按值传入，用于控制本次操作。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t ensure_direction(cc_esp32_gpio_tool_t *tool, int pin, gpio_mode_t mode)
 {
     esp_err_t err = gpio_reset_pin((gpio_num_t)pin);
@@ -92,8 +136,17 @@ static cc_result_t ensure_direction(cc_esp32_gpio_tool_t *tool, int pin, gpio_mo
     return cc_result_ok();
 }
 
-/* 学习注释：gpio_tool_call 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * gpio_tool_call — 参与工具注册、工具调用或工具结果写回流程。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * @param args_json 借用的只读字符串；函数不会释放该指针。
+ * @param ctx 调用上下文；只在本次函数执行期间借用。
+ * @param out_result 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 static cc_result_t gpio_tool_call(
     void *self,
     const char *args_json,
@@ -183,8 +236,14 @@ io_error:
     return cc_result_ok();
 }
 
-/* 学习注释：gpio_tool_destroy 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * gpio_tool_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void gpio_tool_destroy(void *self)
 {
     free(self);
@@ -198,8 +257,14 @@ static cc_tool_vtable_t gpio_tool_vtable = {
     gpio_tool_destroy
 };
 
-/* 学习注释：cc_esp32_gpio_tool_create 是对外可见或跨模块调用的入口。
- * 阅读时重点确认参数校验、所有权转移、错误码和清理路径是否成对出现。 */
+/**
+ * cc_esp32_gpio_tool_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ */
 cc_result_t cc_esp32_gpio_tool_create(cc_tool_t *out_tool)
 {
     cc_esp32_gpio_tool_t *self = calloc(1, sizeof(*self));

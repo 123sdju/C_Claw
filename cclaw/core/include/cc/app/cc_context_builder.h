@@ -63,6 +63,15 @@
 #include "cc/core/cc_result.h"
 #include "cc/app/cc_agent_runtime.h"
 
+/**
+ * cc_context_builder_build_messages — 从 runtime 的 store/memory 中构建发送给 LLM 的 messages JSON。
+ *
+ * @param runtime 借用 runtime，用于访问 store、memory store 和上下文配置。
+ * @param session_id 借用会话 ID。
+ * @param system_prompt 借用系统提示词；会作为首条 system 消息。
+ * @param out_messages_json 输出新分配 JSON 字符串；调用方负责 free。
+ * @return CC_OK 表示构建成功；失败返回存储、JSON 或内存错误。
+ */
 cc_result_t cc_context_builder_build_messages(
     cc_agent_runtime_t *runtime,
     const char *session_id,

@@ -117,9 +117,29 @@
  *   - 每次调用 create 都返回一个全新的空存储
  */
 #if CC_STORAGE_SQLITE
+/**
+ * cc_sqlite_session_store_create — 声明 SQLite 会话存储工厂。
+ *
+ * @param db_path 借用数据库路径。
+ * @param out_store 输出会话存储端口。
+ * @return CC_OK 表示创建成功；失败返回 SQLite/平台错误。
+ */
 cc_result_t cc_sqlite_session_store_create(const char *db_path, cc_session_store_t *out_store);
 #endif
+/**
+ * cc_json_file_store_create — 声明 JSON 文件会话存储工厂。
+ *
+ * @param file_path 借用 JSON 存储路径。
+ * @param out_store 输出会话存储端口。
+ * @return CC_OK 表示创建成功；失败返回文件系统错误。
+ */
 cc_result_t cc_json_file_store_create(const char *file_path, cc_session_store_t *out_store);
+/**
+ * cc_memory_session_store_create — 声明纯内存会话存储工厂。
+ *
+ * @param out_store 输出会话存储端口。
+ * @return CC_OK 表示创建成功；失败返回内存错误。
+ */
 cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
 
 /*

@@ -71,8 +71,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 学习注释：publish_json_event 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * publish_json_event — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param bus 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param event_type 借用的只读字符串；函数不会释放该指针。
+ * @param payload 借用的指针参数；若需要长期保存内容，函数会复制。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void publish_json_event(
     cc_event_bus_t *bus,
     const char *event_type,
@@ -90,8 +98,15 @@ static void publish_json_event(
     cc_json_destroy(payload);
 }
 
-/* 学习注释：set_policy_error_result 是本文件内部辅助函数。
- * 阅读时先看它服务哪个 public API，再看它如何处理边界条件和资源释放。 */
+/**
+ * set_policy_error_result — 更新对象内部字段或输出结构，同时维护旧值释放规则。
+ *
+ * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ *
+ * @param out_result 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param message 借用的对象；函数不释放该对象本身。
+ * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ */
 static void set_policy_error_result(
     cc_tool_result_t *out_result,
     const char *message
