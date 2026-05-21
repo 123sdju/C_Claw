@@ -69,7 +69,7 @@ typedef struct cc_message {
                             *   - system: 系统提示词 */
     char *tool_calls_json; /**< 结构化 assistant tool_calls 数组 JSON。
                             *   仅 CC_ROLE_ASSISTANT 需要调用工具时使用。
-                            *   该字段替代旧版将 tool_calls 包入 content 的做法。 */
+                            *   tool_calls 独立保存，避免和自然语言 content 混在一起。 */
     char *reasoning_content; /**< LLM 推理/思考内容，独立于用户可见 content 存储。 */
     char *tool_call_id;    /**< 关联的工具调用 ID。仅 CC_ROLE_TOOL 角色有效，
                             *   用于将工具返回结果与对应的 tool_call 请求关联 */

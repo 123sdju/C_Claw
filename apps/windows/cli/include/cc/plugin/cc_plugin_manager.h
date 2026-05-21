@@ -16,34 +16,37 @@
  * ── 使用方式 ──
  *
  *   1. cc_plugin_manager_create(&manager)         — 创建管理器
- *   2. cc_plugin_manager_load_plugins(manager, json_config, registry)
- *        — 从 JSON 配置加载所有插件，启动进程，注册工具到 ToolRegistry
+ *   2. cc_plugin_manager_load_config(manager, config, registry)
+ *        — 从 config.json 的 plugins.entries 启动进程并注册工具
  *   3. ... (Agent 运行期间，插件工具自动通过管道通信) ...
  *   4. cc_plugin_manager_destroy(manager)         — 清理所有插件进程
  *
  * ── 配置格式 ──
  *
- *   插件配置是一个 JSON 字符串（通常来自 plugins.json 文件）：
+ *   主配置入口是 config.json.plugins.entries：
  *
  *   {
- *     "plugins": [
- *       {
- *         "name": "插件人类可读名称",
- *         "command": "可执行文件路径（如 python3）",
- *         "args": ["参数1", "参数2", ...],
- *         "tools": [
- *           {
- *             "name": "工具名（LLM 可见）",
- *             "description": "工具功能描述（LLM 用于判断何时调用）",
- *             "parameters": { JSON Schema 对象 }
- *           }
- *         ]
+ *     "plugins": {
+ *       "entries": {
+ *         "weather": {
+ *           "enabled": true,
+ *           "workers": 2,
+ *           "command": "可执行文件路径（如 python3）",
+ *           "args": ["参数1", "参数2", ...],
+ *           "tools": [
+ *             {
+ *               "name": "工具名（LLM 可见）",
+ *               "description": "工具功能描述（LLM 用于判断何时调用）",
+ *               "parameters": { JSON Schema 对象 }
+ *             }
+ *           ]
+ *         }
  *       }
- *     ]
+ *     }
  *   }
  *
- *   一个插件进程可以暴露多个工具，通过不同的 method 名称区分。
- *   所有工具共享同一个子进程和管道连接。
+ *   一个插件条目可以暴露多个工具。workers=1 时同一插件内部串行；
+ *   workers>1 时工具调用会按 round-robin 分发到多个子进程。
  *
  * ── 错误处理 ──
  *
@@ -51,7 +54,7 @@
  *   - 某个插件配置格式错误 → 跳过该插件，继续加载下一个
  *   - 某个工具注册失败 → 跳过该工具，继续处理同插件的其他工具
  *   - 插件进程启动失败 → 跳过该插件
- *   - 没有 plugins.json 文件 → 静默跳过，不报错
+ *   - 没有 plugins.entries → 静默跳过，不报错
  *
  * ── 依赖 ──
  *
@@ -63,7 +66,9 @@
 #define CC_PLUGIN_MANAGER_H
 
 #include "cc/core/cc_result.h"
+#include "cc/app/cc_runtime_features.h"
 #include "cc/ports/cc_tool_registry.h"
+#include "cc/util/cc_config.h"
 
 /* opaque pointer — 实现细节隐藏在 .c 文件中 */
 typedef struct cc_plugin_manager cc_plugin_manager_t;
@@ -90,11 +95,12 @@ void cc_plugin_manager_destroy(cc_plugin_manager_t *manager);
 /**
  * 从 JSON 配置加载所有插件。
  *
- * 解析配置 JSON，为每个插件启动子进程，将其工具注册到指定的
- * ToolRegistry 中。采用 best-effort 策略，单个插件失败不影响其他。
+ * 这是面向单元测试和低层 adapter 的 JSON 入口；桌面 CLI 主路径使用
+ * cc_plugin_manager_load_config() 直接读取 config.json 的 plugins.entries。
+ * 解析配置 JSON 后会为每个插件启动子进程，将工具注册到 ToolRegistry。
  *
  * @param manager     插件管理器
- * @param config_json 插件配置 JSON 字符串（如从 plugins.json 读取的内容）
+ * @param config_json 插件配置 JSON 字符串
  * @param registry    工具注册表，插件工具将注册到这里
  * @return            CC_OK（始终返回成功，内部跳过失败的插件）
  */
@@ -102,6 +108,13 @@ cc_result_t cc_plugin_manager_load_plugins(
     cc_plugin_manager_t *manager,
     const char *config_json,
     cc_tool_registry_t *registry
+);
+
+cc_result_t cc_plugin_manager_load_config(
+    cc_plugin_manager_t *manager,
+    const cc_config_t *config,
+    cc_tool_registry_t *registry,
+    cc_runtime_diagnostics_t *diagnostics
 );
 
 #endif

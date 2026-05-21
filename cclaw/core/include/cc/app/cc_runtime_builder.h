@@ -10,6 +10,7 @@
 #ifndef CC_RUNTIME_BUILDER_H
 #define CC_RUNTIME_BUILDER_H
 
+#include "cc/app/cc_agent_manager.h"
 #include "cc/app/cc_agent_runtime.h"
 #include "cc/app/cc_runtime_features.h"
 #include "cc/util/cc_config.h"
@@ -23,6 +24,20 @@
  * 层直接理解所有释放顺序。
  */
 typedef struct cc_runtime_builder cc_runtime_builder_t;
+
+typedef struct cc_runtime_reload_report {
+    unsigned long old_generation;
+    unsigned long new_generation;
+    int tools_reloaded;
+    int plugins_reloaded;
+    int mcp_reloaded;
+    int skills_reloaded;
+    int tool_pool_reloaded;
+    int rolled_back;
+    char failed_component[32];
+    char message[160];
+    cc_runtime_diagnostics_t diagnostics;
+} cc_runtime_reload_report_t;
 
 /**
  * cc_runtime_builder_create — 根据配置和 feature set 组装 logger、store、tools、LLM provider 和 Agent runtime。
@@ -49,6 +64,55 @@ cc_result_t cc_runtime_builder_create(
  * @return builder 内部 runtime 的借用指针；builder 为 NULL 时返回 NULL。
  */
 cc_agent_runtime_t *cc_runtime_builder_runtime(cc_runtime_builder_t *builder);
+
+/**
+ * cc_runtime_builder_agent_manager — 返回 builder 持有的多 Agent 编排器借用指针。
+ *
+ * 启用 CC_ENABLE_MULTI_AGENT + CC_ENABLE_RUN_QUEUE 时，CLI 和 app 层应优先通过
+ * manager 处理用户消息，让同 session 串行、跨 lane 并发等策略统一生效。
+ * 对于裁剪 profile，该函数可能返回 NULL，调用方可退回单 runtime 路径。
+ *
+ * @param builder 借用的 builder；可为 NULL。
+ * @return builder 内部 agent manager 借用指针；未启用时返回 NULL。
+ */
+cc_agent_manager_t *cc_runtime_builder_agent_manager(cc_runtime_builder_t *builder);
+
+/**
+ * cc_runtime_builder_diagnostics — 返回最近一次启动或 reload 的非致命能力诊断。
+ *
+ * 这些诊断用于显示 plugin/MCP/tool adapter 启动失败，但 runtime 仍可继续服务。
+ * 返回指针由 builder 拥有，调用方只能读取。
+ */
+const cc_runtime_diagnostics_t *cc_runtime_builder_diagnostics(cc_runtime_builder_t *builder);
+
+/**
+ * cc_runtime_builder_reload — 重新加载可热替换的运行时资源。
+ *
+ * 当前接口固定热重载边界：只替换后续 run 可见的工具/skill/MCP 快照，不杀死
+ * 已经开始的 run。app 层 watcher 和 `/reload` 命令都调用此入口。
+ *
+ * @param builder 借用的 builder。
+ * @param config 新配置对象；调用方负责在 reload 返回后销毁。
+ * @return CC_OK 表示新 generation 可供后续 run 使用；失败时旧 generation 保持可用。
+ */
+cc_result_t cc_runtime_builder_reload(
+    cc_runtime_builder_t *builder,
+    const cc_config_t *config
+);
+
+cc_result_t cc_runtime_builder_reload_with_report(
+    cc_runtime_builder_t *builder,
+    const cc_config_t *config,
+    cc_runtime_reload_report_t *out_report
+);
+
+/**
+ * cc_runtime_builder_request_shutdown — 请求 builder 拥有的后台资源停止。
+ *
+ * 这是给 watcher、plugin supervisor、MCP runtime cache 预留的统一关闭入口。
+ * destroy 会隐式调用它；显式调用主要服务于 CLI 收到退出命令时的有序收尾。
+ */
+void cc_runtime_builder_request_shutdown(cc_runtime_builder_t *builder);
 
 /**
  * cc_runtime_builder_logger — 返回 builder 持有的 logger 借用指针，用于 gateway 输出或诊断。

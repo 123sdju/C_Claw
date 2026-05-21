@@ -53,6 +53,22 @@ typedef struct cc_logger cc_logger_t;
 typedef struct cc_memory_store cc_memory_store_t;
 
 /**
+ * cc_tool_executor_pool — 工具并发池的前向声明。
+ *
+ * pool 的完整定义在 app/core 层，端口层只保存借用指针。这样工具上下文可以
+ * 看到“当前调用受哪个并发池约束”，但端口层不反向依赖 app 头文件。
+ */
+typedef struct cc_tool_executor_pool cc_tool_executor_pool_t;
+
+/**
+ * cc_cancel_token — core SDK 取消令牌的前向声明。
+ *
+ * 工具上下文只借用 token 指针。工具可以查询它决定是否提前退出，但不能销毁
+ * token，也不能假设取消会强制终止其他线程。
+ */
+typedef struct cc_cancel_token cc_cancel_token_t;
+
+/**
  * cc_tool_approval_fn — 工具调用人工审批回调。
  *
  * policy engine 判定需要人工确认时，tool executor 会调用该函数。回调只读取
@@ -80,6 +96,8 @@ typedef struct cc_runtime_services {
     cc_logger_t *logger;
     /** 可选长期记忆存储；为 NULL 表示当前 profile 未启用记忆工具链。 */
     cc_memory_store_t *memory_store;
+    /** 可选工具并发池；tool executor 负责 acquire/release，工具本身只借用查看。 */
+    cc_tool_executor_pool_t *tool_pool;
     /** 可选人工审批回调；高风险工具可在执行前调用。 */
     cc_tool_approval_fn approve_tool_call;
     /** 传给 approve_tool_call 的调用方上下文。 */
@@ -98,6 +116,10 @@ typedef struct cc_tool_context {
     const char *workspace_dir; /**< 当前工作区目录，文件操作应限定在此路径下 */
     const char *user_id;      /**< 调用用户的标识符（留作将来扩展） */
     const cc_runtime_services_t *services; /**< 受限运行时服务，避免工具拿到完整 runtime */
+    cc_cancel_token_t *cancel_token; /**< 借用的取消令牌；工具应在长耗时步骤之间查询。 */
+    int timeout_ms; /**< 本次工具调用的策略 timeout；0 表示未配置。 */
+    const char *lane_name; /**< 本次调用进入的 tool executor lane 名称，借用临时字符串。 */
+    unsigned long generation; /**< runtime/tool snapshot generation，用于诊断 reload 边界。 */
 } cc_tool_context_t;
 
 /* ── 前向声明 ───────────────────────────────────────────────────────── */

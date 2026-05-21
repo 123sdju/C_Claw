@@ -27,6 +27,7 @@ struct cc_agent_runtime {
     cc_event_bus_t *event_bus;
     cc_logger_t *logger;
     cc_memory_store_t *memory_store;
+    cc_tool_executor_pool_t *tool_pool;
     cc_runtime_services_t services;
     int thinking_mode;
     cc_mutex_t mutex;
@@ -47,7 +48,8 @@ cc_result_t cc_agent_runtime_execute_tool_step(
     cc_agent_runtime_t *runtime,
     const char *session_id,
     const cc_tool_call_t *call,
-    const char *reasoning_content
+    const char *reasoning_content,
+    cc_cancel_token_t *cancel_token
 );
 
 /**

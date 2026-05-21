@@ -20,6 +20,54 @@
 #include "cc/ports/cc_tool.h"
 #include "cc/ports/cc_tool_registry.h"
 #include "cc/util/cc_config.h"
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+#define CC_RUNTIME_DIAGNOSTICS_MAX 32
+
+typedef struct cc_runtime_diagnostic {
+    char kind[24];
+    char id[80];
+    char message[192];
+} cc_runtime_diagnostic_t;
+
+/**
+ * cc_runtime_diagnostics_t — 启动/reload 期间的非致命能力诊断列表。
+ *
+ * 该结构不分配内存，方便 main、CLI 和 reload report 直接按值复制。它只用于
+ * “外部 tool/plugin/MCP 无法启动但 runtime 可以继续服务”的场景；配置解析、
+ * 内存分配或基础 runtime 创建失败仍然通过 cc_result_t 阻止启动。
+ */
+typedef struct cc_runtime_diagnostics {
+    cc_runtime_diagnostic_t items[CC_RUNTIME_DIAGNOSTICS_MAX];
+    size_t count;
+    int truncated;
+} cc_runtime_diagnostics_t;
+
+static inline void cc_runtime_diagnostics_reset(cc_runtime_diagnostics_t *diagnostics)
+{
+    if (!diagnostics) return;
+    memset(diagnostics, 0, sizeof(*diagnostics));
+}
+
+static inline void cc_runtime_diagnostics_add(
+    cc_runtime_diagnostics_t *diagnostics,
+    const char *kind,
+    const char *id,
+    const char *message
+)
+{
+    if (!diagnostics) return;
+    if (diagnostics->count >= CC_RUNTIME_DIAGNOSTICS_MAX) {
+        diagnostics->truncated = 1;
+        return;
+    }
+    cc_runtime_diagnostic_t *item = &diagnostics->items[diagnostics->count++];
+    snprintf(item->kind, sizeof(item->kind), "%s", kind ? kind : "tool");
+    snprintf(item->id, sizeof(item->id), "%s", id ? id : "(unknown)");
+    snprintf(item->message, sizeof(item->message), "%s", message ? message : "unavailable");
+}
 
 /**
  * cc_runtime_llm_create_fn — LLM provider 工厂函数类型。
@@ -144,7 +192,8 @@ typedef cc_result_t (*cc_runtime_tool_create_fn)(
 typedef cc_result_t (*cc_runtime_plugin_load_fn)(
     const cc_config_t *config,
     cc_tool_registry_t *registry,
-    void **out_state
+    void **out_state,
+    cc_runtime_diagnostics_t *diagnostics
 );
 
 /**
@@ -153,6 +202,26 @@ typedef cc_result_t (*cc_runtime_plugin_load_fn)(
  * @param state load_plugins 写入的状态指针；无状态或未加载插件时可能为 NULL。
  */
 typedef void (*cc_runtime_plugin_destroy_fn)(void *state);
+
+/**
+ * cc_runtime_mcp_load_fn — profile 的 MCP transport 注入入口。
+ *
+ * MCP 协议状态机、TTL、tool bridge 位于 core SDK 的 cc_mcp_runtime_manager。
+ * app 层回调只创建当前平台支持的 transport factory，并把 MCP server 暴露的
+ * tools 注册到 registry。POSIX/Windows 通常提供 stdio、HTTP、SSE、
+ * streamable HTTP；ESP profile 默认不注册该回调。
+ */
+typedef cc_result_t (*cc_runtime_mcp_load_fn)(
+    const cc_config_t *config,
+    cc_tool_registry_t *registry,
+    void **out_state,
+    cc_runtime_diagnostics_t *diagnostics
+);
+
+/**
+ * cc_runtime_mcp_destroy_fn — 释放 load_mcp 返回的 MCP manager/transport 状态。
+ */
+typedef void (*cc_runtime_mcp_destroy_fn)(void *state);
 
 /**
  * cc_llm_provider_descriptor — 注册描述符，把名称和工厂函数配对，供 runtime_builder 统一枚举和创建。
@@ -214,6 +283,10 @@ typedef struct cc_runtime_feature_set {
     cc_runtime_plugin_load_fn load_plugins;
     /** 可选：释放 load_plugins 返回的 plugin_state。 */
     cc_runtime_plugin_destroy_fn destroy_plugins;
+    /** 可选：加载 MCP server 暴露的工具；stdio/HTTP/SSE/streamable HTTP transport 由应用层实现。 */
+    cc_runtime_mcp_load_fn load_mcp;
+    /** 可选：释放 load_mcp 返回的 MCP runtime/cache 状态。 */
+    cc_runtime_mcp_destroy_fn destroy_mcp;
 } cc_runtime_feature_set_t;
 
 #endif

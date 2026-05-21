@@ -36,6 +36,8 @@
 #include "cc/core/cc_tool_call.h"
 #include "cc/core/cc_stream_chunk.h"
 
+typedef struct cc_cancel_token cc_cancel_token_t;
+
 /**
  * cc_llm_chat_request_t — LLM 聊天请求
  *
@@ -58,6 +60,7 @@ typedef struct cc_llm_chat_request {
                              *   默认 0.7。设为 0 表示贪婪解码（最确定）。 */
     int thinking_mode;      /**< 是否启用思维链模式：1 = LLM 输出 CoT 推理内容,
                              *   0 = 仅输出最终回答。需要模型支持。 */
+    cc_cancel_token_t *cancel_token; /**< 借用的取消令牌；LLM adapter 应在网络等待或流式回调之间检查。 */
 } cc_llm_chat_request_t;
 
 /* ── 前向声明 ───────────────────────────────────────────────────────── */

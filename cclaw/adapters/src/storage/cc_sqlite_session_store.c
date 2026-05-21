@@ -20,7 +20,7 @@
  *   - tool_calls：工具调用记录（名称、参数JSON、状态、时间戳）
  *   - tool_results：工具调用结果（成功标志、内容、错误信息、元数据JSON）
  *
- * 完整实现 cc_session_store_vtable 中的全部 7 个虚函数：
+ * 完整实现 cc_session_store_vtable 中的全部 8 个虚函数：
  *   create_session / append_message / load_messages / append_tool_call /
  *   append_tool_result / list_sessions / destroy
  *
@@ -624,6 +624,72 @@ static cc_result_t sqlite_list_sessions(
     return cc_result_ok();
 }
 
+static cc_result_t sqlite_exec_bound_delete(
+    cc_sqlite_session_store_t *store,
+    const char *sql,
+    const char *session_id
+)
+{
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return cc_result_error(CC_ERR_STORAGE, sqlite3_errmsg(store->db));
+    }
+    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        return cc_result_error(CC_ERR_STORAGE, sqlite3_errmsg(store->db));
+    }
+    return cc_result_ok();
+}
+
+/**
+ * sqlite_clear_session — 删除 session 的消息和工具审计历史，保留 sessions 行。
+ *
+ * 删除顺序很重要：tool_results 通过 tool_call_id 关联 tool_calls，所以先根据
+ * 当前 session 的 tool_calls 子查询删结果，再删 tool_calls，最后删 messages。
+ * 整个过程放在一个事务里，避免 reset 到一半时留下不一致的审计记录。
+ */
+static cc_result_t sqlite_clear_session(void *self, const char *session_id)
+{
+    if (!self || !session_id) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid session clear request");
+    }
+    cc_sqlite_session_store_t *store = (cc_sqlite_session_store_t *)self;
+    cc_mutex_lock(store->mutex);
+    char *errmsg = NULL;
+    if (sqlite3_exec(store->db, "BEGIN IMMEDIATE", NULL, NULL, &errmsg) != SQLITE_OK) {
+        cc_result_t rc = cc_result_error(CC_ERR_STORAGE, errmsg ? errmsg : sqlite3_errmsg(store->db));
+        sqlite3_free(errmsg);
+        cc_mutex_unlock(store->mutex);
+        return rc;
+    }
+
+    cc_result_t rc = sqlite_exec_bound_delete(
+        store,
+        "DELETE FROM tool_results WHERE tool_call_id IN "
+        "(SELECT id FROM tool_calls WHERE session_id=?1)",
+        session_id
+    );
+    if (rc.code == CC_OK) {
+        rc = sqlite_exec_bound_delete(
+            store, "DELETE FROM tool_calls WHERE session_id=?1", session_id);
+    }
+    if (rc.code == CC_OK) {
+        rc = sqlite_exec_bound_delete(
+            store, "DELETE FROM messages WHERE session_id=?1", session_id);
+    }
+
+    if (rc.code == CC_OK) {
+        sqlite3_exec(store->db, "COMMIT", NULL, NULL, NULL);
+    } else {
+        sqlite3_exec(store->db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    cc_mutex_unlock(store->mutex);
+    return rc;
+}
+
 /**
  * @brief vtable 函数：销毁存储实例，释放所有资源
  *
@@ -649,7 +715,7 @@ static void sqlite_destroy(void *self)
 /**
  * @brief SQLite 会话存储的虚函数表
  *
- * 将全部 7 个 vtable 函数绑定到对应的 SQLite 实现：
+ * 将全部 8 个 vtable 函数绑定到对应的 SQLite 实现：
  *   create_session → sqlite_create_session
  *   append_message → sqlite_append_message
  *   load_messages  → sqlite_load_messages
@@ -665,6 +731,7 @@ static cc_session_store_vtable_t sqlite_vtable = {
     sqlite_append_tool_call,
     sqlite_append_tool_result,
     sqlite_list_sessions,
+    sqlite_clear_session,
     sqlite_destroy
 };
 

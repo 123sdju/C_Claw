@@ -104,7 +104,7 @@
  * 存储策略：
  *   - tool_call 场景：reasoning_content 与 tool_calls 一起打包存入
  *     {"tool_calls":[...], "reasoning_content":"..."}
- *     这样 context_builder 在后续迭代中能将其还原为 assistant 消息的
+ *     这样 context_builder 在下一轮 ReAct 循环中能将其还原为 assistant 消息的
  *     reasoning_content 字段，LLM 可以继续之前的推理链。
  *   - 纯文本场景：reasoning_content 与 text 一起打包存入
  *     {"text":"...", "reasoning_content":"..."}
@@ -173,11 +173,160 @@ static char *generate_id(void)
 {
     char buf[64];
     ensure_id_mutex();
-    cc_mutex_lock(g_id_mutex);
-    unsigned long next = ++g_id_counter;
-    cc_mutex_unlock(g_id_mutex);
+    unsigned long next = 0;
+    if (g_id_mutex) {
+        cc_mutex_lock(g_id_mutex);
+        next = ++g_id_counter;
+        cc_mutex_unlock(g_id_mutex);
+    } else {
+        /*
+         * 极端内存不足时互斥锁可能创建失败。这里退化为无锁递增，让调用方
+         * 至少能继续拿到格式正确的 ID；正常路径 runtime 创建阶段会提前初始化锁。
+         */
+        next = ++g_id_counter;
+    }
     snprintf(buf, sizeof(buf), "msg_%ld_%lu", (long)time(NULL), next);
     return strdup(buf);
+}
+
+/**
+ * active_memory_after_run — run 成功结束后，把本轮输入/输出写成可检索摘要。
+ *
+ * 这是 active memory 的第一层实现：不在 core 里引入额外 LLM 摘要调用，也不
+ * 假设桌面线程池存在，而是把当前 user input 与 assistant final text 组成一条
+ * bounded key-value 记忆。这样 POSIX/Windows 可以开启自动沉淀，ESP profile
+ * 通过 CC_ENABLE_ACTIVE_MEMORY=OFF 完全不编译这段路径。
+ *
+ * 写入失败会被吞掉：memory 是增强能力，不能因为磁盘满或后端不可用而让主对话
+ * 失败。需要诊断时可以通过 memory tool 或存储后端日志观察。
+ */
+static void active_memory_after_run(
+    cc_agent_runtime_t *runtime,
+    const char *session_id,
+    const char *user_input,
+    const char *assistant_text
+)
+{
+#if CC_ENABLE_ACTIVE_MEMORY
+    if (!runtime || !runtime->memory_store || !runtime->memory_store->vtable) return;
+    if (!runtime->config.active_memory_enabled ||
+        !runtime->config.active_memory_write_summary) return;
+    if ((!user_input || !user_input[0]) && (!assistant_text || !assistant_text[0])) return;
+
+    cc_string_builder_t sb;
+    if (cc_string_builder_init(&sb).code != CC_OK) return;
+    cc_string_builder_append(&sb, "User: ");
+    cc_string_builder_append(&sb, user_input ? user_input : "");
+    cc_string_builder_append(&sb, "\nAssistant: ");
+    cc_string_builder_append(&sb, assistant_text ? assistant_text : "");
+    char *value = cc_string_builder_take(&sb);
+    if (!value) {
+        cc_string_builder_deinit(&sb);
+        return;
+    }
+
+    int max_chars = runtime->config.active_memory_max_value_chars > 0 ?
+        runtime->config.active_memory_max_value_chars : 1600;
+    if ((int)strlen(value) > max_chars) value[max_chars] = '\0';
+
+    char *id = generate_id();
+    if (!id) {
+        free(value);
+        return;
+    }
+    size_t key_len = strlen("active.") + strlen(id) + 1;
+    char *key = malloc(key_len);
+    if (!key) {
+        free(id);
+        free(value);
+        return;
+    }
+    snprintf(key, key_len, "active.%s", id);
+    free(id);
+
+    cc_result_t rc = cc_memory_store_set(
+        runtime->memory_store,
+        key,
+        value,
+        runtime->config.active_memory_category ?
+            runtime->config.active_memory_category : "active_summary",
+        session_id
+    );
+    cc_result_free(&rc);
+    free(key);
+    free(value);
+#else
+    (void)runtime;
+    (void)session_id;
+    (void)user_input;
+    (void)assistant_text;
+#endif
+}
+
+static cc_cancel_token_t *run_cancel_token(const cc_agent_runtime_run_options_t *options)
+{
+    return options ? options->cancel_token : NULL;
+}
+
+static cc_result_t check_run_cancelled(const cc_agent_runtime_run_options_t *options, const char *message)
+{
+    if (cc_cancel_token_is_cancelled(run_cancel_token(options))) {
+        return cc_result_error(CC_ERR_CANCELLED, message ? message : "Agent run cancelled");
+    }
+    return cc_result_ok();
+}
+
+static cc_result_t cc_agent_runtime_handle_stream_fallback(
+    cc_agent_runtime_t *runtime,
+    const char *session_id,
+    const char *user_input,
+    const cc_agent_runtime_run_options_t *options,
+    char **out_response
+)
+{
+    char *sync_response = NULL;
+    cc_result_t rc = cc_agent_runtime_handle_message_with_options(
+        runtime, session_id, user_input, options, &sync_response);
+
+    /*
+     * 降级路径只负责“把同步结果模拟成流事件”。用户消息的写入由
+     * cc_agent_runtime_handle_message 统一完成，避免 stream fallback 重复追加。
+     */
+    if (sync_response && runtime->event_bus) {
+        const char *p = sync_response;
+        const char *start = p;
+        while (*p) {
+            if (*p == ' ' || *p == '\n') {
+                if (p > start) {
+                    char word[256] = {0};
+                    size_t wlen = (size_t)(p - start);
+                    if (wlen > 255) wlen = 255;
+                    strncpy(word, start, wlen);
+                    word[wlen] = *p;
+                    word[wlen + 1] = '\0';
+                    cc_event_bus_publish(runtime->event_bus, CC_EVENT_STREAM_TEXT, word);
+                }
+                start = p + 1;
+            }
+            p++;
+        }
+        if (p > start) {
+            char word[256] = {0};
+            size_t wlen = (size_t)(p - start);
+            if (wlen > 255) wlen = 255;
+            strncpy(word, start, wlen);
+            word[wlen] = '\0';
+            cc_event_bus_publish(runtime->event_bus, CC_EVENT_STREAM_TEXT, word);
+        }
+    }
+
+    if (sync_response) {
+        *out_response = sync_response;
+    }
+    if (runtime->event_bus) {
+        cc_event_bus_publish(runtime->event_bus, CC_EVENT_STREAM_FINISHED, "{}");
+    }
+    return rc;
 }
 
 /**
@@ -218,6 +367,7 @@ cc_result_t cc_agent_runtime_create(
     if (!deps || !options || !out_runtime) {
         return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null runtime create argument");
     }
+    ensure_id_mutex();
     cc_agent_runtime_config_t config = options->config;
     cc_agent_runtime_t *runtime = calloc(1, sizeof(cc_agent_runtime_t));
     if (!runtime) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create agent runtime");
@@ -236,6 +386,8 @@ cc_result_t cc_agent_runtime_create(
         runtime->config.workspace_dir = strdup(config.workspace_dir);
     if (runtime->config.model)
         runtime->config.model = strdup(config.model);
+    if (runtime->config.active_memory_category)
+        runtime->config.active_memory_category = strdup(config.active_memory_category);
 
     /* 组装所有依赖组件 — 依赖注入模式 */
     runtime->llm = deps->llm;
@@ -246,10 +398,12 @@ cc_result_t cc_agent_runtime_create(
     runtime->event_bus = deps->event_bus;
     runtime->logger = deps->logger;
     runtime->memory_store = deps->memory_store;
+    runtime->tool_pool = deps->tool_pool;
     runtime->thinking_mode = options->thinking_mode;
     runtime->services.event_bus = deps->event_bus;
     runtime->services.logger = deps->logger;
     runtime->services.memory_store = deps->memory_store;
+    runtime->services.tool_pool = deps->tool_pool;
     runtime->services.approve_tool_call = deps->approve_tool_call;
     runtime->services.approval_user_data = deps->approval_user_data;
 
@@ -338,7 +492,8 @@ cc_result_t cc_agent_runtime_execute_tool_step(
     cc_agent_runtime_t *runtime,
     const char *session_id,
     const cc_tool_call_t *call,
-    const char *reasoning_content
+    const char *reasoning_content,
+    cc_cancel_token_t *cancel_token
 )
 {
     if (!runtime || !session_id || !call) {
@@ -373,7 +528,17 @@ cc_result_t cc_agent_runtime_execute_tool_step(
 
     cc_tool_result_t tool_result;
     memset(&tool_result, 0, sizeof(tool_result));
-    cc_tool_executor_execute(runtime, session_id, call, &tool_result);
+    cc_tool_executor_options_t exec_options;
+    memset(&exec_options, 0, sizeof(exec_options));
+    exec_options.cancel_token = cancel_token;
+    rc = cc_tool_executor_execute_with_options(
+        runtime, session_id, call, &exec_options, &tool_result);
+    if (rc.code != CC_OK) {
+        free(tool_result.content);
+        free(tool_result.error);
+        free(tool_result.metadata_json);
+        return rc;
+    }
 
     if (runtime->store.vtable && runtime->store.vtable->append_tool_call) {
         runtime->store.vtable->append_tool_call(runtime->store.self, session_id, call);
@@ -441,6 +606,8 @@ typedef struct {
     char *cur_tool_id;
     int has_tool_call;
     int finished;
+    int cancelled;
+    cc_cancel_token_t *cancel_token;
     char *response_text;
 } stream_loop_ctx_t;
 
@@ -497,6 +664,10 @@ typedef struct {
 static void execute_pending_tool(stream_loop_ctx_t *ctx)
 {
     if (!ctx->cur_tool_name) return;
+    if (cc_cancel_token_is_cancelled(ctx->cancel_token)) {
+        ctx->cancelled = 1;
+        return;
+    }
 
     const char *arguments = cc_string_builder_cstr(&ctx->args_builder);
     if (!arguments || strlen(arguments) == 0) {
@@ -555,7 +726,21 @@ static void execute_pending_tool(stream_loop_ctx_t *ctx)
     }
 
     cc_tool_result_t tres = {0};
-    cc_tool_executor_execute(ctx->runtime, ctx->session_id, &call, &tres);
+    cc_tool_executor_options_t exec_options;
+    memset(&exec_options, 0, sizeof(exec_options));
+    exec_options.cancel_token = ctx->cancel_token;
+    cc_result_t exec_rc = cc_tool_executor_execute_with_options(
+        ctx->runtime, ctx->session_id, &call, &exec_options, &tres);
+    if (exec_rc.code != CC_OK) {
+        ctx->cancelled = exec_rc.code == CC_ERR_CANCELLED;
+        cc_result_free(&exec_rc);
+        free(ctx->cur_tool_name);
+        ctx->cur_tool_name = NULL;
+        free(ctx->cur_tool_id);
+        ctx->cur_tool_id = NULL;
+        cc_string_builder_clear(&ctx->args_builder);
+        return;
+    }
 
     char *tool_result_content = NULL;
     if (tres.ok) {
@@ -638,6 +823,11 @@ static void stream_loop_callback(const cc_stream_chunk_t *chunk, void *user_data
 {
     stream_loop_ctx_t *ctx = (stream_loop_ctx_t *)user_data;
     if (!ctx || !ctx->runtime) return;
+    if (cc_cancel_token_is_cancelled(ctx->cancel_token)) {
+        ctx->cancelled = 1;
+        ctx->finished = 1;
+        return;
+    }
 
     ctx->chunk_count++;
     cc_event_bus_t *bus = ctx->runtime->event_bus;
@@ -771,17 +961,24 @@ static void stream_loop_callback(const cc_stream_chunk_t *chunk, void *user_data
  *
  *   这样 CLI Gateway 无需感知降级是否发生，始终从事件总线获取相同的事件序列。
  */
-cc_result_t cc_agent_runtime_handle_message_stream(
+cc_result_t cc_agent_runtime_handle_message_stream_with_options(
     cc_agent_runtime_t *runtime,
     const char *session_id,
     const char *user_input,
+    const cc_agent_runtime_run_options_t *options,
     char **out_response
 )
 {
-    *out_response = NULL;
-
-    if (!runtime || !session_id || !user_input) {
+    if (!runtime || !session_id || !user_input || !out_response) {
         return cc_result_error(CC_ERR_INVALID_ARGUMENT, "NULL argument");
+    }
+    *out_response = NULL;
+    cc_result_t cancel_rc = check_run_cancelled(options, "Agent stream run cancelled before start");
+    if (cancel_rc.code != CC_OK) return cancel_rc;
+
+    if (!runtime->llm.vtable || !runtime->llm.vtable->chat_stream) {
+        return cc_agent_runtime_handle_stream_fallback(
+            runtime, session_id, user_input, options, out_response);
     }
 
     /*
@@ -808,62 +1005,6 @@ cc_result_t cc_agent_runtime_handle_message_stream(
     cc_message_destroy(user_msg);
 
     /*
-     * 降级检查：如果 LLM Provider 不支持 chat_stream，
-     * 回退到同步 chat 模式并通过事件总线模拟流式事件。
-     */
-    if (!runtime->llm.vtable || !runtime->llm.vtable->chat_stream) {
-        char *sync_response = NULL;
-        cc_result_t rc = cc_agent_runtime_handle_message(
-            runtime, session_id, user_input, &sync_response);
-
-        /*
-         * 将同步回复逐字分割为流式事件，保持 CLI Gateway 等
-         * 订阅方无需感知降级是否发生。
-         */
-        if (sync_response && runtime->event_bus) {
-            /*
-             * 为简单起见，按词而非按字符分割：
-             * 在空格处切分，每个词作为一次 stream.text 事件。
-             * 对于中文等无空格语言，回退为逐字符发送。
-             */
-            const char *p = sync_response;
-            const char *start = p;
-            while (*p) {
-                if (*p == ' ' || *p == '\n') {
-                    if (p > start) {
-                        char word[256] = {0};
-                        size_t wlen = p - start;
-                        if (wlen > 255) wlen = 255;
-                        strncpy(word, start, wlen + 1);
-                        word[wlen] = ' ';
-                        word[wlen + 1] = '\0';
-                        cc_event_bus_publish(runtime->event_bus, CC_EVENT_STREAM_TEXT, word);
-                    }
-                    start = p + 1;
-                }
-                p++;
-            }
-            if (p > start) {
-                char word[256] = {0};
-                size_t wlen = p - start;
-                if (wlen > 255) wlen = 255;
-                strncpy(word, start, wlen);
-                word[wlen] = '\0';
-                cc_event_bus_publish(runtime->event_bus, CC_EVENT_STREAM_TEXT, word);
-            }
-        }
-
-        if (sync_response) {
-            *out_response = sync_response;
-        }
-
-        if (runtime->event_bus) {
-            cc_event_bus_publish(runtime->event_bus, CC_EVENT_STREAM_FINISHED, "{}");
-        }
-        return rc;
-    }
-
-    /*
      * 流式 Agent 循环
      *
      * 使用 stream_loop_ctx_t 在每次 chat_stream 调用之间保持状态。
@@ -873,11 +1014,21 @@ cc_result_t cc_agent_runtime_handle_message_stream(
     memset(&ctx, 0, sizeof(ctx));
     ctx.runtime = runtime;
     ctx.session_id = session_id;
+    ctx.cancel_token = run_cancel_token(options);
     cc_string_builder_init(&ctx.text_builder);
     cc_string_builder_init(&ctx.thinking_builder);
     cc_string_builder_init(&ctx.args_builder);
 
     for (int step = 0; step < runtime->config.max_steps; step++) {
+        rc = check_run_cancelled(options, "Agent stream run cancelled");
+        if (rc.code != CC_OK) {
+            free(ctx.cur_tool_name);
+            free(ctx.cur_tool_id);
+            cc_string_builder_deinit(&ctx.text_builder);
+            cc_string_builder_deinit(&ctx.thinking_builder);
+            cc_string_builder_deinit(&ctx.args_builder);
+            return rc;
+        }
         ctx.step = step + 1;
         ctx.finished = 0;
         ctx.has_tool_call = 0;
@@ -926,6 +1077,7 @@ cc_result_t cc_agent_runtime_handle_message_stream(
         req.temperature = runtime->config.temperature;
         req.stream = 1;
         req.thinking_mode = cc_agent_runtime_get_thinking_mode(runtime);
+        req.cancel_token = run_cancel_token(options);
 
         if (tools_json && strlen(tools_json) > 2) {
             req.tools_json = tools_json;
@@ -960,6 +1112,14 @@ cc_result_t cc_agent_runtime_handle_message_stream(
             *out_response = strdup("Streaming error");
             return rc;
         }
+        if (ctx.cancelled || cc_cancel_token_is_cancelled(run_cancel_token(options))) {
+            free(ctx.cur_tool_name);
+            free(ctx.cur_tool_id);
+            cc_string_builder_deinit(&ctx.text_builder);
+            cc_string_builder_deinit(&ctx.thinking_builder);
+            cc_string_builder_deinit(&ctx.args_builder);
+            return cc_result_error(CC_ERR_CANCELLED, "Agent stream run cancelled");
+        }
 
         /*
          * Step ⑤: 检查本轮结果
@@ -973,6 +1133,7 @@ cc_result_t cc_agent_runtime_handle_message_stream(
 
             cc_agent_runtime_store_assistant_text(
                 runtime, session_id, final_text, thinking);
+            active_memory_after_run(runtime, session_id, user_input, final_text);
 
             *out_response = final_text ? strdup(final_text) : strdup("");
             free(ctx.cur_tool_name);
@@ -1014,6 +1175,17 @@ cc_result_t cc_agent_runtime_handle_message_stream(
     return cc_result_ok();
 }
 
+cc_result_t cc_agent_runtime_handle_message_stream(
+    cc_agent_runtime_t *runtime,
+    const char *session_id,
+    const char *user_input,
+    char **out_response
+)
+{
+    return cc_agent_runtime_handle_message_stream_with_options(
+        runtime, session_id, user_input, NULL, out_response);
+}
+
 /**
  * cc_agent_runtime_destroy — 销毁 Agent 运行时实例
  *
@@ -1037,6 +1209,7 @@ void cc_agent_runtime_destroy(cc_agent_runtime_t *runtime)
     free(runtime->config.system_prompt);
     free(runtime->config.workspace_dir);
     free(runtime->config.model);
+    free(runtime->config.active_memory_category);
     cc_mutex_unlock(runtime->mutex);
     cc_mutex_destroy(runtime->mutex);
     free(runtime);
@@ -1404,13 +1577,21 @@ cc_result_t cc_agent_runtime_create_session(
  * @param out_response 输出最终回答字符串；调用方负责 free。
  * @return CC_OK 表示主循环完成；失败返回存储、LLM、工具或内存错误。
  */
-cc_result_t cc_agent_runtime_handle_message(
+cc_result_t cc_agent_runtime_handle_message_with_options(
     cc_agent_runtime_t *runtime,
     const char *session_id,
     const char *user_input,
+    const cc_agent_runtime_run_options_t *options,
     char **out_response
 )
 {
+    if (!runtime || !session_id || !user_input || !out_response) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "NULL argument");
+    }
+    *out_response = NULL;
+    cc_result_t cancel_rc = check_run_cancelled(options, "Agent run cancelled before start");
+    if (cancel_rc.code != CC_OK) return cancel_rc;
+
     cc_message_t *user_msg = NULL;
     char *msg_id = generate_id();
     cc_result_t rc = cc_message_create(msg_id, session_id, CC_ROLE_USER, user_input, NULL, &user_msg);
@@ -1446,6 +1627,8 @@ cc_result_t cc_agent_runtime_handle_message(
      *   4. LLM 返回空响应（无 text 也无 tool_call） → break 后走超限路径
      */
     for (int step = 0; step < runtime->config.max_steps; ++step) {
+        rc = check_run_cancelled(options, "Agent run cancelled");
+        if (rc.code != CC_OK) return rc;
         char *messages_json = NULL;
         char *tools_json = NULL;
 
@@ -1534,6 +1717,7 @@ cc_result_t cc_agent_runtime_handle_message(
         request.max_tokens = runtime->config.max_tokens;
         request.temperature = runtime->config.temperature;
         request.thinking_mode = cc_agent_runtime_get_thinking_mode(runtime);
+        request.cancel_token = run_cancel_token(options);
 
         /* 发布 LLM 请求开始事件（供 UI 显示"思考中..."等状态） */
         if (runtime->event_bus) {
@@ -1576,6 +1760,11 @@ cc_result_t cc_agent_runtime_handle_message(
             cc_llm_response_free(&response);
             return rc;
         }
+        rc = check_run_cancelled(options, "Agent run cancelled after LLM response");
+        if (rc.code != CC_OK) {
+            cc_llm_response_free(&response);
+            return rc;
+        }
 
         /*
          * ╔═════════════════════════════════════════════════════════╗
@@ -1600,140 +1789,11 @@ cc_result_t cc_agent_runtime_handle_message(
          */
         if (response.has_tool_call) {
             rc = cc_agent_runtime_execute_tool_step(
-                runtime, session_id, &response.tool_call, response.reasoning_content);
+                runtime, session_id, &response.tool_call, response.reasoning_content,
+                run_cancel_token(options));
             cc_llm_response_free(&response);
             if (rc.code != CC_OK) return rc;
             continue;
-
-            cc_tool_result_t tool_result;
-            memset(&tool_result, 0, sizeof(tool_result));
-
-            /*
-             * Step ⑤a: 先持久化 assistant 消息（含 tool_calls JSON）
-             *
-             * 这条消息的 content 存储格式：
-             *   {
-             *     "tool_calls": [
-             *       {
-             *         "id": "call_xxxx",        // LLM 返回的调用 ID
-             *         "type": "function",
-             *         "function": {
-             *           "name": "get_weather",   // 工具名称
-             *           "arguments": "{\"city\":\"北京\"}"  // JSON 字符串参数
-             *         }
-             *       }
-             *     ],
-             *     "reasoning_content": "..."     // 可选：LLM 的思维链
-             *   }
-             *
-             * 为什么将 tool_calls 包装为 JSON 存入 content：
-             *   cc_message_t 只有一个 content 字段（char*），而 tool_calls
-             *   是一个数组结构。用 JSON 序列化后可以完整保留结构信息。
-             *   context_builder 在加载时会检测 content 是否以 '{' 开头且
-             *   消息角色为 assistant + tool_call_id 非空，从而按 tool_calls
-             *   格式还原为 API 标准的 "content":null + "tool_calls":[...]。
-             *
-             * reasoning_content 的关联存储：
-             *   如果 LLM 同时返回了 reasoning_content，它与 tool_calls 一起
-             *   打包存入同一 JSON 对象中。这样 context_builder 在还原时能够
-             *   同时还原 reasoning_content 字段给 LLM，保持推理的连续性。
-             */
-            {
-                cc_json_value_t *tcs = cc_json_create_array();
-                cc_json_value_t *tc = cc_json_create_object();
-                cc_json_object_set(tc, "id", cc_json_create_string(
-                    response.tool_call.id ? response.tool_call.id : ""));
-                cc_json_object_set(tc, "type", cc_json_create_string("function"));
-                cc_json_value_t *func = cc_json_create_object();
-                cc_json_object_set(func, "name", cc_json_create_string(
-                    response.tool_call.name ? response.tool_call.name : ""));
-                cc_json_object_set(func, "arguments", cc_json_create_string(
-                    response.tool_call.arguments_json ? response.tool_call.arguments_json : "{}"));
-                cc_json_object_set(tc, "function", func);
-                cc_json_array_append(tcs, tc);
-
-                cc_json_value_t *wrapper = cc_json_create_object();
-                cc_json_object_set(wrapper, "tool_calls", tcs);
-                if (response.reasoning_content) {
-                    cc_json_object_set(wrapper, "reasoning_content",
-                        cc_json_create_string(response.reasoning_content));
-                }
-
-                char *tcs_json = cc_json_stringify(wrapper);
-                cc_json_destroy(wrapper);
-
-                cc_message_t *asst_msg = NULL;
-                char *aid = generate_id();
-                cc_message_create(aid, session_id, CC_ROLE_ASSISTANT,
-                    tcs_json, response.tool_call.id, &asst_msg);
-                free(aid);
-                free(tcs_json);
-                if (runtime->store.vtable && runtime->store.vtable->append_message) {
-                    runtime->store.vtable->append_message(runtime->store.self, asst_msg);
-                }
-                cc_message_destroy(asst_msg);
-            }
-
-            /* Step ⑤b: 执行工具（内部完成查找+策略+事件发布） */
-            cc_tool_executor_execute(runtime, session_id, &response.tool_call, &tool_result);
-
-            /* Step ⑥: 持久化 tool_call 记录（审计用途） */
-            if (runtime->store.vtable && runtime->store.vtable->append_tool_call) {
-                runtime->store.vtable->append_tool_call(
-                    runtime->store.self, session_id, &response.tool_call);
-            }
-
-            /* Step ⑦: 持久化 tool_result 记录（审计用途） */
-            if (runtime->store.vtable && runtime->store.vtable->append_tool_result) {
-                runtime->store.vtable->append_tool_result(
-                    runtime->store.self, session_id,
-                    response.tool_call.id, &tool_result);
-            }
-
-            /*
-             * Step ⑧: 将工具执行结果作为 CC_ROLE_TOOL 消息持久化
-             *
-             * 这条消息的关键字段：
-             *   - role: "tool"
-             *   - tool_call_id: 与 LLM 原始 tool_call.id 相同，用于关联
-             *   - content: 工具执行成功时 = tool_result.content（JSON 字符串）
-             *              工具执行失败时 = tool_result.error（错误描述）
-             *
-             * 为什么失败时的 error 也填到 content 中：
-             *   LLM 的标准 tool 消息格式中只有一个 content 字段，没有 error 字段。
-             *   将错误描述放入 content，LLM 可以看到错误信息并尝试：
-             *     - 调整参数后再次调用同一工具
-             *     - 换用其他工具
-             *     - 直接告知用户失败原因
-             *
-             * 下一轮循环中 cc_context_builder 加载消息时会包含这条 tool 消息，
-             * LLM 看到工具结果后可以选择：
-             *   - 再次发起 tool_call（多步骤推理链）
-             *   - 基于工具结果给出最终自然语言回答
-             */
-            cc_message_t *tool_msg = NULL;
-            char *tci = response.tool_call.id ? strdup(response.tool_call.id) : NULL;
-            char *tid = generate_id();
-            cc_message_create(tid, session_id, CC_ROLE_TOOL,
-                tool_result.ok ? tool_result.content : tool_result.error, tci, &tool_msg);
-            free(tid);
-            free(tci);
-
-            if (runtime->store.vtable && runtime->store.vtable->append_message) {
-                runtime->store.vtable->append_message(runtime->store.self, tool_msg);
-            }
-
-            /* Step ⑨: 释放本轮资源
-             *   - tool_msg: 消息对象（已持久化到 storage）
-             *   - tool_result.content/error/metadata_json: 工具返回的字符串
-             *   - response: LLM 响应（含 tool_call 字段）
-             */
-            cc_message_destroy(tool_msg);
-            free(tool_result.content);
-            free(tool_result.error);
-            free(tool_result.metadata_json);
-            cc_llm_response_free(&response);
-            continue; /* ← 回到 for 循环顶部，LLM 在下一轮会看到工具结果 */
         }
 
         /*
@@ -1762,63 +1822,12 @@ cc_result_t cc_agent_runtime_handle_message(
                 cc_llm_response_free(&response);
                 return rc;
             }
+            active_memory_after_run(runtime, session_id, user_input, response.text);
             *out_response = strdup(response.text ? response.text : "");
             cc_llm_response_free(&response);
             if (runtime->event_bus) {
                 cc_event_bus_publish(runtime->event_bus, "agent.finished", "{}");
             }
-            return cc_result_ok();
-
-            cc_message_t *assistant_msg = NULL;
-            char *aid = generate_id();
-
-            /*
-             * reasoning_content 存在时，用 JSON 包装存储以便 context_builder
-             * 在后续请求中还原 reasoning_content 字段。
-             *
-             * 存储格式：{"text":"...", "reasoning_content":"..."}
-             *
-             * 为什么存入 content 字段而非创建独立字段：
-             *   cc_message_t 只有一个 content 字段（char*），且消息会序列化
-             *   为 JSON 数组。在 JSON 中将 text 和 reasoning_content 合并
-             *   成一个 JSON 对象存入 content，context_builder 加载时可以
-             *   通过 { 开头检测到这是包装格式并正确拆解。
-             *
-             * 如果 reasoning_content 为空：
-             *   直接存储纯文本，减少一次 JSON 序列化/反序列化开销。
-             */
-            char *stored_content = NULL;
-            if (response.reasoning_content) {
-                cc_json_value_t *wrap = cc_json_create_object();
-                cc_json_object_set(wrap, "text",
-                    cc_json_create_string(response.text ? response.text : ""));
-                cc_json_object_set(wrap, "reasoning_content",
-                    cc_json_create_string(response.reasoning_content));
-                stored_content = cc_json_stringify(wrap);
-                cc_json_destroy(wrap);
-            }
-
-            cc_message_create(aid, session_id, CC_ROLE_ASSISTANT,
-                stored_content ? stored_content : response.text, NULL, &assistant_msg);
-            free(aid);
-            free(stored_content);
-
-            /* Step ⑧: 持久化 assistant 消息到 storage */
-            if (runtime->store.vtable && runtime->store.vtable->append_message) {
-                runtime->store.vtable->append_message(runtime->store.self, assistant_msg);
-            }
-            cc_message_destroy(assistant_msg);
-
-            /* Step ⑨: 将最终回复写入输出参数 */
-            *out_response = strdup(response.text);
-            cc_llm_response_free(&response);
-
-            /* Step ⑩: 发布 Agent 完成事件（正常的文本回复结束） */
-            if (runtime->event_bus) {
-                cc_event_bus_publish(runtime->event_bus, "agent.finished", "{}");
-            }
-
-            /* Step ⑪: 正常退出主循环，返回响应 */
             return cc_result_ok();
         }
 
@@ -1859,4 +1868,15 @@ cc_result_t cc_agent_runtime_handle_message(
             "{\"reason\":\"max_steps_reached\"}");
     }
     return cc_result_ok();
+}
+
+cc_result_t cc_agent_runtime_handle_message(
+    cc_agent_runtime_t *runtime,
+    const char *session_id,
+    const char *user_input,
+    char **out_response
+)
+{
+    return cc_agent_runtime_handle_message_with_options(
+        runtime, session_id, user_input, NULL, out_response);
 }

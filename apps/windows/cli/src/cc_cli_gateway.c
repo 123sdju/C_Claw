@@ -24,6 +24,8 @@
  *****************************************************************************/
 
 #include "cc/app/cc_agent_runtime.h"
+#include "cc/app/cc_agent_manager.h"
+#include "cc/app/cc_runtime_builder.h"
 #include "cc/app/cc_session_manager.h"
 #include "cc/util/cc_config.h"
 #include "cc/util/cc_json.h"
@@ -308,6 +310,26 @@ static int g_stream_seen_thinking = 0;
 static int g_stream_seen_text = 0;
 static int g_stream_seen_tool = 0;
 
+static void print_runtime_diagnostics(
+    const char *prefix,
+    const cc_runtime_diagnostics_t *diagnostics
+)
+{
+    if (!diagnostics || diagnostics->count == 0) return;
+    printf("%s\n", prefix ? prefix : "[diagnostics] 外部工具加载问题:");
+    for (size_t i = 0; i < diagnostics->count; i++) {
+        const cc_runtime_diagnostic_t *item = &diagnostics->items[i];
+        printf("  - [%s] %s: %s\n",
+            item->kind[0] ? item->kind : "tool",
+            item->id[0] ? item->id : "(unknown)",
+            item->message[0] ? item->message : "unavailable");
+    }
+    if (diagnostics->truncated) {
+        printf("  - ... 还有更多诊断被截断\n");
+    }
+    printf("\n");
+}
+
 /**
  * stream_render_reset — 重置 CLI 流式渲染状态，准备显示下一次模型输出。
  *
@@ -416,7 +438,7 @@ static void stream_event_handler(const char *event, const char *payload, void *u
  * @param runtime 借用的对象；函数不释放该对象本身。
  * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
-static void run_chat_loop(cc_agent_runtime_t *runtime)
+static void run_chat_loop(cc_agent_runtime_t *runtime, cc_agent_manager_t *manager)
 {
     /*
      * 订阅流式事件（一次性，调用时通过 g_stream_mode 控制是否输出）
@@ -533,8 +555,9 @@ static void run_chat_loop(cc_agent_runtime_t *runtime)
             rc = cc_agent_runtime_handle_message_stream(
                 runtime, g_session_id, line, &response);
         } else {
-            rc = cc_agent_runtime_handle_message(
-                runtime, g_session_id, line, &response);
+            rc = manager ?
+                cc_agent_manager_handle_message(manager, NULL, g_session_id, line, &response) :
+                cc_agent_runtime_handle_message(runtime, g_session_id, line, &response);
         }
 
         if (rc.code != CC_OK) {
@@ -562,11 +585,12 @@ static void run_chat_loop(cc_agent_runtime_t *runtime)
  * @param runtime  已完成装配的 Agent Runtime 实例
  * @param query    用户输入的查询字符串
  */
-static void run_single_ask(cc_agent_runtime_t *runtime, const char *query)
+static void run_single_ask(cc_agent_runtime_t *runtime, cc_agent_manager_t *manager, const char *query)
 {
     char *response = NULL;
-    cc_result_t rc = cc_agent_runtime_handle_message(
-        runtime, g_session_id, query, &response);
+    cc_result_t rc = manager ?
+        cc_agent_manager_handle_message(manager, NULL, g_session_id, query, &response) :
+        cc_agent_runtime_handle_message(runtime, g_session_id, query, &response);
 
     if (rc.code != CC_OK) {
         fprintf(stderr, "Error: %s\n", rc.message ? rc.message : "Unknown error");
@@ -590,12 +614,22 @@ static void run_single_ask(cc_agent_runtime_t *runtime, const char *query)
  *
  * @param argc     命令行参数个数（透传自 main）
  * @param argv     命令行参数数组（透传自 main）
- * @param runtime  已完成依赖装配的 Agent Runtime 实例指针
- * @param config   系统配置实例
+ * @param builder     已完成依赖装配的组合根。
+ * @param config      当前系统配置；Windows gateway 当前只借用读取 CLI 行为。
+ * @param config_path 配置文件路径；保留在入口签名中以便桌面 app 行为对齐。
  * @return         退出码，0 表示正常退出，1 表示用法错误
  */
-int cc_cli_gateway_run(int argc, char **argv, cc_agent_runtime_t *runtime, cc_config_t *config)
+int cc_cli_gateway_run(
+    int argc,
+    char **argv,
+    cc_runtime_builder_t *builder,
+    cc_config_t *config,
+    const char *config_path
+)
 {
+    cc_agent_runtime_t *runtime = cc_runtime_builder_runtime(builder);
+    cc_agent_manager_t *manager = cc_runtime_builder_agent_manager(builder);
+    (void)config_path;
     if (argc >= 2 &&
         (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0 ||
          strcmp(argv[1], "help") == 0)) {
@@ -607,6 +641,9 @@ int cc_cli_gateway_run(int argc, char **argv, cc_agent_runtime_t *runtime, cc_co
     if (config && config->debug_mode) {
         setenv("CCLAW_DEBUG", "1", 1);
     }
+    print_runtime_diagnostics(
+        "[startup] 部分外部工具不可用:",
+        cc_runtime_builder_diagnostics(builder));
 
     g_session_id = generate_session_id();
 
@@ -614,7 +651,7 @@ int cc_cli_gateway_run(int argc, char **argv, cc_agent_runtime_t *runtime, cc_co
 
     if (argc >= 2 && strcmp(argv[1], "ask") == 0) {
         if (argc >= 3) {
-            run_single_ask(runtime, argv[2]);
+            run_single_ask(runtime, manager, argv[2]);
         } else {
             fprintf(stderr, "Usage: c-claw ask \"your question\"\n");
             free(g_session_id);
@@ -622,7 +659,7 @@ int cc_cli_gateway_run(int argc, char **argv, cc_agent_runtime_t *runtime, cc_co
             return 1;
         }
     } else {
-        run_chat_loop(runtime);
+        run_chat_loop(runtime, manager);
     }
 
     free(g_session_id);

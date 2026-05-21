@@ -41,7 +41,7 @@
  *   第2步：框架分发工具调用
  *     根据 tool_call.name 在 Tool Registry 中查找对应的工具实现
  *     → cc_tool_registry_find(registry, tool_call.name, &tool)
- *     → 调用工具虚表中的 execute 函数：tool.vtable->execute(tool.self, ...)
+ *     → tool executor 构造 cc_tool_context_t，再调用 tool.vtable->call(...)
  *
  *   第3步：工具执行并生成结果
  *     工具执行完毕，生成 cc_tool_result_t：

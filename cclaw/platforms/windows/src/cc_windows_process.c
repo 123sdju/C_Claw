@@ -77,6 +77,7 @@
  *   - _open_osfhandle / _fdopen — 句柄到 C 运行库文件描述符转换
  */
 
+#include "cc/app/cc_cancel_token.h"
 #include "cc/ports/cc_process.h"
 
 #ifdef _WIN32
@@ -656,13 +657,16 @@ cc_result_t cc_process_pipe_write(cc_process_pipe_t *pipe, const char *data)
 }
 
 /*
- * cc_process_pipe_read_line — 从管道子进程读取一行数据
+ * cc_process_pipe_read_line_timeout_cancel — 从管道子进程读取一行数据
  *
- * 通过 from_child 流（子进程的 stdout）阻塞读取一行数据，
- * 自动去除行尾的换行符（'\n' 和 '\r\n' 都正确处理）。
+ * 使用 PeekNamedPipe + 短 sleep 轮询读取 stdout，因此可以观察上层
+ * cancel token。取消后只返回 CC_ERR_CANCELLED；是否重启/关闭子进程由
+ * plugin process 层决定，因为那里知道请求是否已经写出。
  *
  * 参数：
  *   pipe     — 管道进程句柄
+ *   timeout_ms — 最大等待毫秒数
+ *   cancel_token — 借用取消令牌；NULL 表示不启用取消
  *   out_line — 输出参数，指向读取到的行内容（由调用者 free 释放）
  *
  * 返回值：
@@ -673,10 +677,16 @@ cc_result_t cc_process_pipe_write(cc_process_pipe_t *pipe, const char *data)
  *   - 自动处理 CRLF（'\r\n'）到 LF（'\n'）的转换
  *   - 读取失败（子进程关闭 stdout 或管道出错）时返回 CC_ERR_PLATFORM
  */
-cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
+cc_result_t cc_process_pipe_read_line_timeout_cancel(
+    cc_process_pipe_t *pipe,
+    int timeout_ms,
+    cc_cancel_token_t *cancel_token,
+    char **out_line
+)
 {
     if (!pipe || !pipe->hStdoutRead || !out_line)
         return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid pipe read arguments");
+    if (timeout_ms <= 0) timeout_ms = 30000;
 
     size_t cap = 256;
     size_t len = 0;
@@ -685,6 +695,11 @@ cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
 
     DWORD elapsed = 0;
     while (1) {
+        if (cc_cancel_token_is_cancelled(cancel_token)) {
+            free(line);
+            return cc_result_error(CC_ERR_CANCELLED, "Pipe process read cancelled");
+        }
+
         DWORD available = 0;
         if (!PeekNamedPipe(pipe->hStdoutRead, NULL, 0, NULL, &available, NULL)) {
             free(line);
@@ -697,7 +712,7 @@ cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
                 free(line);
                 return cc_result_error(CC_ERR_PLATFORM, "Pipe process closed stdout");
             }
-            if (elapsed >= 30000) {
+            if (elapsed >= (DWORD)timeout_ms) {
                 free(line);
                 return cc_result_error(CC_ERR_TIMEOUT, "Timed out waiting for pipe process line");
             }
@@ -729,6 +744,20 @@ cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
     line[len] = '\0';
     *out_line = line;
     return cc_result_ok();
+}
+
+cc_result_t cc_process_pipe_read_line_timeout(
+    cc_process_pipe_t *pipe,
+    int timeout_ms,
+    char **out_line
+)
+{
+    return cc_process_pipe_read_line_timeout_cancel(pipe, timeout_ms, NULL, out_line);
+}
+
+cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
+{
+    return cc_process_pipe_read_line_timeout(pipe, 30000, out_line);
 }
 
 /*

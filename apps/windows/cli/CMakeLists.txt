@@ -26,8 +26,13 @@ if(CC_ENABLE_PLUGIN)
     list(APPEND C_CLAW_APP_FEATURE_SOURCES
         src/tools/cc_plugin_tool.c
         src/plugin/cc_plugin_process.c
-        src/plugin/cc_jsonrpc_client.c
         src/plugin/cc_plugin_manager.c
+    )
+endif()
+
+if(CC_ENABLE_MCP AND (CC_ENABLE_MCP_STDIO OR CC_ENABLE_MCP_HTTP))
+    list(APPEND C_CLAW_APP_FEATURE_SOURCES
+        ../../posix/cli/src/mcp/cc_mcp_manager.c
     )
 endif()
 
@@ -35,6 +40,7 @@ endif()
 add_library(c_claw_app_features STATIC ${C_CLAW_APP_FEATURE_SOURCES})
 target_include_directories(c_claw_app_features PUBLIC
     "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${CMAKE_CURRENT_LIST_DIR}/../../posix/cli/include"
 )
 target_link_libraries(c_claw_app_features PUBLIC
     c_claw_runtime
@@ -49,5 +55,8 @@ if(CC_ENABLE_CLI)
     target_link_libraries(c-claw PRIVATE
         c_claw_runtime
         c_claw_app_features
+    )
+    set_target_properties(c-claw PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
 endif()

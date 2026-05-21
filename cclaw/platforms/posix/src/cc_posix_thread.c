@@ -9,8 +9,10 @@
 
 #include "cc/ports/cc_thread.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <time.h>
 
 /**
  * cc_thread_create — 用 pthread 创建平台线程并把句柄写入 out_thread。
@@ -139,4 +141,71 @@ void cc_mutex_unlock(cc_mutex_t mutex)
 {
     if (!mutex) return;
     pthread_mutex_unlock((pthread_mutex_t *)mutex);
+}
+
+cc_result_t cc_cond_create(cc_cond_t *out_cond)
+{
+    if (!out_cond) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null condition output");
+    }
+
+    pthread_cond_t *cond = malloc(sizeof(pthread_cond_t));
+    if (!cond) {
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate condition");
+    }
+    if (pthread_cond_init(cond, NULL) != 0) {
+        free(cond);
+        return cc_result_error(CC_ERR_PLATFORM, "Failed to initialize condition");
+    }
+    *out_cond = cond;
+    return cc_result_ok();
+}
+
+void cc_cond_destroy(cc_cond_t cond)
+{
+    if (!cond) return;
+    pthread_cond_destroy((pthread_cond_t *)cond);
+    free(cond);
+}
+
+void cc_cond_wait(cc_cond_t cond, cc_mutex_t mutex)
+{
+    if (!cond || !mutex) return;
+    pthread_cond_wait((pthread_cond_t *)cond, (pthread_mutex_t *)mutex);
+}
+
+int cc_cond_timedwait(cc_cond_t cond, cc_mutex_t mutex, int timeout_ms)
+{
+    if (!cond || !mutex) return 0;
+    if (timeout_ms <= 0) {
+        pthread_cond_wait((pthread_cond_t *)cond, (pthread_mutex_t *)mutex);
+        return 1;
+    }
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += deadline.tv_nsec / 1000000000L;
+        deadline.tv_nsec %= 1000000000L;
+    }
+
+    int rc = pthread_cond_timedwait(
+        (pthread_cond_t *)cond,
+        (pthread_mutex_t *)mutex,
+        &deadline);
+    return rc != ETIMEDOUT;
+}
+
+void cc_cond_signal(cc_cond_t cond)
+{
+    if (!cond) return;
+    pthread_cond_signal((pthread_cond_t *)cond);
+}
+
+void cc_cond_broadcast(cc_cond_t cond)
+{
+    if (!cond) return;
+    pthread_cond_broadcast((pthread_cond_t *)cond);
 }

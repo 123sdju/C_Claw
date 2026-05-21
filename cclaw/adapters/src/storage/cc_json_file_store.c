@@ -14,7 +14,7 @@
  * 基于单个 JSON 文件实现会话状态的持久化存储。所有数据以 JSON 对象组织，
  * 包含 sessions、messages、tool_calls、tool_results 四个顶层数组。
  *
- * 完整实现 cc_session_store_vtable 中的全部 7 个虚函数：
+ * 完整实现 cc_session_store_vtable 中的全部 8 个虚函数：
  *   create_session / append_message / load_messages / append_tool_call /
  *   append_tool_result / list_sessions / destroy
  *
@@ -552,6 +552,118 @@ static cc_result_t json_file_list_sessions(
     return cc_result_ok();
 }
 
+static void json_copy_string_field(cc_json_value_t *dst, cc_json_value_t *src, const char *key)
+{
+    const char *value = cc_json_string_value(cc_json_object_get(src, key));
+    if (value) cc_json_object_set(dst, key, cc_json_create_string(value));
+}
+
+static cc_json_value_t *json_clone_message_record(cc_json_value_t *src)
+{
+    cc_json_value_t *dst = cc_json_create_object();
+    if (!dst) return NULL;
+    json_copy_string_field(dst, src, "id");
+    json_copy_string_field(dst, src, "session_id");
+    json_copy_string_field(dst, src, "role");
+    json_copy_string_field(dst, src, "content");
+    json_copy_string_field(dst, src, "tool_calls_json");
+    json_copy_string_field(dst, src, "reasoning_content");
+    json_copy_string_field(dst, src, "tool_call_id");
+    return dst;
+}
+
+static cc_json_value_t *json_clone_tool_call_record(cc_json_value_t *src)
+{
+    cc_json_value_t *dst = cc_json_create_object();
+    if (!dst) return NULL;
+    json_copy_string_field(dst, src, "id");
+    json_copy_string_field(dst, src, "session_id");
+    json_copy_string_field(dst, src, "name");
+    json_copy_string_field(dst, src, "arguments_json");
+    json_copy_string_field(dst, src, "status");
+    return dst;
+}
+
+static cc_json_value_t *json_clone_tool_result_record(cc_json_value_t *src)
+{
+    cc_json_value_t *dst = cc_json_create_object();
+    if (!dst) return NULL;
+    json_copy_string_field(dst, src, "id");
+    json_copy_string_field(dst, src, "session_id");
+    json_copy_string_field(dst, src, "tool_call_id");
+    cc_json_object_set(dst, "ok",
+        cc_json_create_bool(cc_json_bool_value(cc_json_object_get(src, "ok"))));
+    json_copy_string_field(dst, src, "content");
+    json_copy_string_field(dst, src, "error");
+    json_copy_string_field(dst, src, "metadata_json");
+    return dst;
+}
+
+static cc_result_t json_filter_session_array(
+    cc_json_value_t *root,
+    const char *array_key,
+    const char *session_id,
+    cc_json_value_t *(*clone_record)(cc_json_value_t *src)
+)
+{
+    cc_json_value_t *old_array = cc_json_object_get(root, array_key);
+    if (!old_array || !cc_json_is_array(old_array)) {
+        return cc_result_error(CC_ERR_STORAGE, "Invalid JSON store array");
+    }
+    cc_json_value_t *new_array = cc_json_create_array();
+    if (!new_array) {
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate filtered session array");
+    }
+    int count = cc_json_array_size(old_array);
+    for (int i = 0; i < count; i++) {
+        cc_json_value_t *item = cc_json_array_get(old_array, i);
+        const char *sid = cc_json_string_value(cc_json_object_get(item, "session_id"));
+        if (sid && strcmp(sid, session_id) == 0) continue;
+        cc_json_value_t *copy = clone_record(item);
+        if (!copy) {
+            cc_json_destroy(new_array);
+            return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to clone session record");
+        }
+        cc_json_array_append(new_array, copy);
+    }
+    cc_json_object_set(root, array_key, new_array);
+    return cc_result_ok();
+}
+
+/**
+ * json_file_clear_session — 清理某个 session 的历史数组。
+ *
+ * JSON 封装层没有暴露 cJSON 的 detach/remove API，因此这里按“过滤后重建数组”
+ * 的方式实现。由于 cc_json_object_set 已经具备替换语义，新的数组发布后旧数组
+ * 会随 root 的字段替换被释放，避免悬挂引用和重复释放。
+ */
+static cc_result_t json_file_clear_session(void *self, const char *session_id)
+{
+    if (!self || !session_id) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid session clear request");
+    }
+    cc_json_file_store_t *store = (cc_json_file_store_t *)self;
+    cc_mutex_lock(store->mutex);
+    cc_result_t rc = load_store(store);
+    if (rc.code == CC_OK) {
+        rc = json_filter_session_array(
+            store->root, "messages", session_id, json_clone_message_record);
+    }
+    if (rc.code == CC_OK) {
+        rc = json_filter_session_array(
+            store->root, "tool_calls", session_id, json_clone_tool_call_record);
+    }
+    if (rc.code == CC_OK) {
+        rc = json_filter_session_array(
+            store->root, "tool_results", session_id, json_clone_tool_result_record);
+    }
+    if (rc.code == CC_OK) {
+        rc = save_store(store);
+    }
+    cc_mutex_unlock(store->mutex);
+    return rc;
+}
+
 /**
  * @brief vtable 函数：销毁存储实例
  *
@@ -573,7 +685,7 @@ static void json_file_destroy(void *self)
 /**
  * @brief JSON 文件存储的虚函数表
  *
- * 将全部 7 个 vtable 函数绑定到对应的 JSON 文件实现。
+ * 将全部 8 个 vtable 函数绑定到对应的 JSON 文件实现。
  */
 static cc_session_store_vtable_t json_file_vtable = {
     json_file_create_session,
@@ -582,6 +694,7 @@ static cc_session_store_vtable_t json_file_vtable = {
     json_file_append_tool_call,
     json_file_append_tool_result,
     json_file_list_sessions,
+    json_file_clear_session,
     json_file_destroy
 };
 

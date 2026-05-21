@@ -14,7 +14,7 @@
  * 基于动态数组在进程堆内存中存储会话和消息数据。所有数据在进程退出后丢失，
  * 不依赖任何外部存储（无文件 I/O、无数据库）。
  *
- * 完整实现 cc_session_store_vtable 中的全部 7 个虚函数：
+ * 完整实现 cc_session_store_vtable 中的全部 8 个虚函数：
  *   create_session / append_message / load_messages / append_tool_call /
  *   append_tool_result / list_sessions / destroy
  *
@@ -487,6 +487,70 @@ static cc_result_t memory_list_sessions(
 }
 
 /**
+ * memory_clear_session — 删除指定 session 的 turn 历史，保留 session 元数据。
+ *
+ * reset session 的语义不是销毁会话对象，而是让下一轮对话从空上下文开始。
+ * 因此这里清理 messages/tool_calls/tool_results 三组历史数组；sessions 数组
+ * 不动，CLI 仍可继续复用同一个 session id。
+ */
+static cc_result_t memory_clear_session(void *self, const char *session_id)
+{
+    if (!self || !session_id) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid session clear request");
+    }
+    cc_memory_session_store_t *store = (cc_memory_session_store_t *)self;
+    cc_mutex_lock(store->mutex);
+
+    size_t write = 0;
+    for (size_t read = 0; read < store->message_count; read++) {
+        cc_message_t *message = &store->messages[read];
+        if (message->session_id && strcmp(message->session_id, session_id) == 0) {
+            cc_message_cleanup(message);
+            continue;
+        }
+        if (write != read) store->messages[write] = store->messages[read];
+        write++;
+    }
+    for (size_t i = write; i < store->message_count; i++) {
+        memset(&store->messages[i], 0, sizeof(store->messages[i]));
+    }
+    store->message_count = write;
+
+    write = 0;
+    for (size_t read = 0; read < store->tool_call_count; read++) {
+        cc_memory_tool_call_record_t *record = &store->tool_calls[read];
+        if (record->session_id && strcmp(record->session_id, session_id) == 0) {
+            free_tool_call_record(record);
+            continue;
+        }
+        if (write != read) store->tool_calls[write] = store->tool_calls[read];
+        write++;
+    }
+    for (size_t i = write; i < store->tool_call_count; i++) {
+        memset(&store->tool_calls[i], 0, sizeof(store->tool_calls[i]));
+    }
+    store->tool_call_count = write;
+
+    write = 0;
+    for (size_t read = 0; read < store->tool_result_count; read++) {
+        cc_memory_tool_result_record_t *record = &store->tool_results[read];
+        if (record->session_id && strcmp(record->session_id, session_id) == 0) {
+            free_tool_result_record(record);
+            continue;
+        }
+        if (write != read) store->tool_results[write] = store->tool_results[read];
+        write++;
+    }
+    for (size_t i = write; i < store->tool_result_count; i++) {
+        memset(&store->tool_results[i], 0, sizeof(store->tool_results[i]));
+    }
+    store->tool_result_count = write;
+
+    cc_mutex_unlock(store->mutex);
+    return cc_result_ok();
+}
+
+/**
  * @brief vtable 函数：销毁内存存储，释放所有资源
  *
  * 依次遍历 messages 和 sessions 数组，对每个元素调用 cc_message_destroy / cc_session_destroy
@@ -529,7 +593,7 @@ static void memory_destroy(void *self)
 /**
  * @brief 内存会话存储的虚函数表
  *
- * 将全部 7 个 vtable 函数绑定到对应的内存实现。
+ * 将全部 8 个 vtable 函数绑定到对应的内存实现。
  */
 static cc_session_store_vtable_t memory_vtable = {
     memory_create_session,
@@ -538,6 +602,7 @@ static cc_session_store_vtable_t memory_vtable = {
     memory_append_tool_call,
     memory_append_tool_result,
     memory_list_sessions,
+    memory_clear_session,
     memory_destroy
 };
 

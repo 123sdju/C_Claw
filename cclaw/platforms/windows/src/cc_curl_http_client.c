@@ -9,6 +9,7 @@
 
 #include "cc/ports/cc_http_client.h"
 #include "cc/ports/cc_platform.h"
+#include "cc/app/cc_cancel_token.h"
 #include "cc/util/cc_string_builder.h"
 
 #include <stdlib.h>
@@ -28,6 +29,13 @@ typedef struct cc_curl_write_ctx {
     cc_http_body_callback_fn on_body;
     void *user_data;
     size_t max_response_bytes;
+    cc_cancel_token_t *cancel_token;
+    /*
+     * libcurl collapses callback aborts into CURLE_WRITE_ERROR. Preserving
+     * the original result keeps cancellation/parse failures visible to the
+     * SDK layer instead of turning them into anonymous network errors.
+     */
+    cc_result_t callback_error;
 } cc_curl_write_ctx_t;
 
 /**
@@ -63,6 +71,62 @@ static int response_append(
     return 1;
 }
 
+static char *copy_trimmed_header_piece(const char *data, size_t len)
+{
+    while (len > 0 && (*data == ' ' || *data == '\t' || *data == '\r' || *data == '\n')) {
+        data++;
+        len--;
+    }
+    while (len > 0) {
+        char ch = data[len - 1];
+        if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') break;
+        len--;
+    }
+
+    char *copy = malloc(len + 1);
+    if (!copy) return NULL;
+    memcpy(copy, data, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+static cc_result_t response_header_append(
+    cc_http_response_t *response,
+    const char *line,
+    size_t len
+)
+{
+    if (!response || !line || len == 0) return cc_result_ok();
+
+    const char *colon = memchr(line, ':', len);
+    if (!colon) return cc_result_ok();
+
+    size_t name_len = (size_t)(colon - line);
+    size_t value_len = len - name_len - 1;
+    char *name = copy_trimmed_header_piece(line, name_len);
+    char *value = copy_trimmed_header_piece(colon + 1, value_len);
+    if (!name || !value) {
+        free(name);
+        free(value);
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to copy HTTP response header");
+    }
+
+    cc_http_header_t *next = realloc(
+        response->headers,
+        (response->header_count + 1) * sizeof(*response->headers));
+    if (!next) {
+        free(name);
+        free(value);
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to grow HTTP response headers");
+    }
+
+    response->headers = next;
+    response->headers[response->header_count].name = name;
+    response->headers[response->header_count].value = value;
+    response->header_count++;
+    return cc_result_ok();
+}
+
 #if CC_HAS_CURL
 /**
  * cc_curl_write_body — 执行文件系统操作，并把平台错误转换为统一结果。
@@ -79,11 +143,18 @@ static size_t cc_curl_write_body(void *contents, size_t size, size_t nmemb, void
 {
     size_t real_size = size * nmemb;
     cc_curl_write_ctx_t *ctx = (cc_curl_write_ctx_t *)userp;
+    if (cc_cancel_token_is_cancelled(ctx->cancel_token)) {
+        if (ctx->callback_error.code == CC_OK) {
+            ctx->callback_error = cc_result_error(CC_ERR_CANCELLED, "HTTP request cancelled");
+        }
+        return 0;
+    }
 
     if (ctx->on_body) {
         cc_result_t rc = ctx->on_body((const char *)contents, real_size, ctx->user_data);
         if (rc.code != CC_OK) {
-            cc_result_free(&rc);
+            if (ctx->callback_error.code == CC_OK) ctx->callback_error = rc;
+            else cc_result_free(&rc);
             return 0;
         }
     }
@@ -91,11 +162,52 @@ static size_t cc_curl_write_body(void *contents, size_t size, size_t nmemb, void
     if (!ctx->on_body || ctx->max_response_bytes > 0) {
         if (!response_append(ctx->response, (const char *)contents, real_size,
                              ctx->max_response_bytes)) {
+            if (ctx->callback_error.code == CC_OK) {
+                ctx->callback_error = cc_result_error(
+                    ctx->max_response_bytes > 0 ? CC_ERR_INVALID_ARGUMENT : CC_ERR_OUT_OF_MEMORY,
+                    "HTTP response body could not be buffered");
+            }
             return 0;
         }
     }
 
     return real_size;
+}
+
+static size_t cc_curl_write_header(void *contents, size_t size, size_t nmemb, void *userp)
+{
+    size_t real_size = size * nmemb;
+    cc_curl_write_ctx_t *ctx = (cc_curl_write_ctx_t *)userp;
+    if (cc_cancel_token_is_cancelled(ctx->cancel_token)) {
+        if (ctx->callback_error.code == CC_OK) {
+            ctx->callback_error = cc_result_error(CC_ERR_CANCELLED, "HTTP request cancelled");
+        }
+        return 0;
+    }
+    cc_result_t rc = response_header_append(ctx->response, (const char *)contents, real_size);
+    if (rc.code != CC_OK) {
+        if (ctx->callback_error.code == CC_OK) ctx->callback_error = rc;
+        else cc_result_free(&rc);
+        return 0;
+    }
+    return real_size;
+}
+
+static int cc_curl_progress(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                            curl_off_t ultotal, curl_off_t ulnow)
+{
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    cc_curl_write_ctx_t *ctx = (cc_curl_write_ctx_t *)clientp;
+    if (cc_cancel_token_is_cancelled(ctx ? ctx->cancel_token : NULL)) {
+        if (ctx && ctx->callback_error.code == CC_OK) {
+            ctx->callback_error = cc_result_error(CC_ERR_CANCELLED, "HTTP request cancelled");
+        }
+        return 1;
+    }
+    return 0;
 }
 
 /**
@@ -193,15 +305,28 @@ cc_result_t cc_http_client_perform(
     write_ctx.on_body = request->on_body;
     write_ctx.user_data = request->user_data;
     write_ctx.max_response_bytes = request->max_response_bytes;
+    write_ctx.cancel_token = request->cancel_token;
 
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, cc_curl_write_body);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_ctx);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, cc_curl_write_header);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &write_ctx);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, cc_curl_progress);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &write_ctx);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
     CURLcode res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &out_response->status_code);
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
+
+    if (write_ctx.callback_error.code != CC_OK) {
+        cc_result_t rc = write_ctx.callback_error;
+        memset(&write_ctx.callback_error, 0, sizeof(write_ctx.callback_error));
+        cc_http_response_free(out_response);
+        return rc;
+    }
 
     if (res != CURLE_OK) {
         cc_http_response_free(out_response);
@@ -230,6 +355,11 @@ cc_result_t cc_http_client_perform(
 void cc_http_response_free(cc_http_response_t *response)
 {
     if (!response) return;
+    for (size_t i = 0; i < response->header_count; i++) {
+        free((char *)response->headers[i].name);
+        free((char *)response->headers[i].value);
+    }
+    free(response->headers);
     free(response->body);
     memset(response, 0, sizeof(*response));
 }

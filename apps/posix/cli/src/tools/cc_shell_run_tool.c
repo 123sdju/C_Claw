@@ -143,7 +143,7 @@ static cc_result_t shell_run_call(
     memset(&sandbox_cmd, 0, sizeof(sandbox_cmd));
     sandbox_cmd.command = (char *)command;
     sandbox_cmd.working_dir = (char *)ctx->workspace_dir;
-    sandbox_cmd.timeout_ms = 0;
+    sandbox_cmd.timeout_ms = ctx && ctx->timeout_ms > 0 ? ctx->timeout_ms : 0;
 
     cc_sandbox_result_t sandbox_result;
     rc = tool->sandbox.vtable->run(tool->sandbox.self, &sandbox_cmd, &sandbox_result);

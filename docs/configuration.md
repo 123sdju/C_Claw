@@ -1,40 +1,32 @@
 # 配置项说明
 
-配置文件路径：`config.json`。所有字段都是可选的，缺失字段会使用默认值。
-默认值会受编译 profile 影响，例如 `CC_ENABLE_SQLITE=OFF` 时默认存储类型是
-`json`，而不是 `sqlite`。
+配置文件路径：`config.json`。主配置模型把 `model`、`storage`、`agents`、
+`queue`、`tools`、`plugins`、`skills`、`mcp`、`memory`、`sandbox`、`cli`
+放在同一个文件里。运行时能力首先由 CMake 决定：未编译进来的能力不能靠
+`config.json` 打开。
 
-## 构建配置
+## 构建裁剪
 
-运行时能力首先由 CMake 决定。未编入的能力无法通过 `config.json` 开启。
+| CMake 选项 | 桌面默认 | ESP 默认 | 说明 |
+|------------|----------|----------|------|
+| `CC_ENABLE_MULTI_AGENT` | 开 | 开 | 多 agent manager 核心映射 |
+| `CC_ENABLE_RUN_QUEUE` | 开 | 开 | 同 session 串行、跨 lane 并发的 run queue |
+| `CC_ENABLE_TOOL_POOL` | 开 | 关 | tool/plugin/MCP lane 并发池 |
+| `CC_ENABLE_SKILLS` | 开 | 开 | 静态 skill catalog 能力 |
+| `CC_ENABLE_SKILL_WATCHER` | 开 | 关 | 文件 watcher，属于 app 层 |
+| `CC_ENABLE_PLUGIN` | 开 | 关 | 外部进程 plugin 工具 |
+| `CC_ENABLE_PLUGIN_HOT_RELOAD` | 开 | 关 | plugin generation 热重载 |
+| `CC_ENABLE_PLUGIN_WORKERS` | 开 | 关 | plugin worker pool |
+| `CC_ENABLE_MCP` | 开 | 关 | MCP runtime/tool bridge |
+| `CC_ENABLE_MCP_STDIO` | 开 | 关 | stdio MCP transport |
+| `CC_ENABLE_MCP_HTTP` | 开 | 关 | HTTP/SSE/streamable HTTP transport |
+| `CC_ENABLE_SUBAGENTS` | 开 | 关 | subagent service |
+| `CC_ENABLE_ACTIVE_MEMORY` | 开 | 关 | active memory hook，run 后写入摘要或事实 |
+| `CC_ENABLE_SHELL` | 开 | 关 | shell 工具和 local sandbox |
+| `CC_ENABLE_SQLITE` | POSIX 开 | 关 | SQLite 存储 |
 
-| CMake 选项 | 默认值 | 说明 |
-|------------|--------|------|
-| `CC_TARGET_PLATFORM` | `auto` | 目标平台：`auto`、`posix`、`windows`、`esp32` |
-| `CC_ENABLE_CLI` | 桌面开，ESP32 关 | 是否构建 CLI gateway 和 `c-claw` 可执行文件 |
-| `CC_ENABLE_SHELL` | 桌面开，ESP32 关 | 是否编入 `shell_run` 和 local sandbox |
-| `CC_ENABLE_PLUGIN` | 桌面开，ESP32 关 | 是否编入外部进程插件系统 |
-| `CC_ENABLE_DOCKER_SANDBOX` | POSIX 开，其他关 | 是否编入 Docker sandbox 适配器 |
-| `CC_ENABLE_SQLITE` | POSIX 开，MSVC/ESP32 关 | 是否编入 SQLite 会话存储和记忆存储 |
-| `CC_ENABLE_OPENAI` | 桌面开，ESP32 关 | 是否编入 OpenAI 兼容 LLM 适配器 |
-| `CC_ENABLE_OLLAMA` | 桌面开，ESP32 关 | 是否编入 Ollama LLM 适配器 |
-| `CC_ENABLE_ANTHROPIC` | 桌面开，ESP32 关 | 是否编入 Anthropic LLM 适配器 |
-| `CC_ENABLE_FILE_TOOLS` | 开 | 是否编入文件读写工具 |
-| `CC_ENABLE_HTTP_TOOL` | 开 | 是否编入 `http.request` 工具 |
-| `CC_ENABLE_MEMORY` | 开 | 是否编入长期记忆工具和记忆存储 |
-
-示例：
-
-```bash
-cmake -S . -B build-min \
-  -DCC_ENABLE_SHELL=OFF \
-  -DCC_ENABLE_PLUGIN=OFF \
-  -DCC_ENABLE_SQLITE=OFF \
-  -DCC_ENABLE_DOCKER_SANDBOX=OFF
-```
-
-`CC_TARGET_PLATFORM=esp32` 需要从 ESP-IDF 环境配置；普通主机 CMake 会直接报错，
-避免误把 POSIX 实现当作设备端实现。
+ESP profile 默认关闭 plugin、hot reload、stdio MCP、watcher、shell、SQLite，
+只保留轻量 core runtime、JSON/in-memory 存储、可选静态 skills 和 memory。
 
 ## config.json 示例
 
@@ -44,205 +36,168 @@ cmake -S . -B build-min \
     "provider": "openai",
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com",
-    "api_key": "sk-...",
+    "api_key": "",
     "max_tokens": 4096,
     "temperature": 0.7,
-    "thinking_mode": 0
+    "thinking_mode": 0,
+    "stream_mode": 0
   },
   "storage": {
-    "type": "sqlite",
-    "path": "./data/c-claw.db"
+    "type": "sqlite"
   },
-  "workspace": {
-    "path": "./workspace"
+  "agents": {
+    "defaults": {
+      "id": "default",
+      "workspace": "./workspace",
+      "agentDir": ".agents/default",
+      "systemPromptFile": "soul.md",
+      "skills": ["core"]
+    },
+    "list": []
+  },
+  "queue": {
+    "lanes": { "main": 4, "subagent": 8, "plugin": 4, "mcp": 4 },
+    "perSessionConcurrency": 1,
+    "mode": "steer",
+    "debounceMs": 500,
+    "maxPendingPerSession": 20
+  },
+  "tools": {
+    "enabled": ["read", "write", "shell", "memory"],
+    "defaultTimeoutMs": 30000,
+    "perTool": {
+      "shell_run": { "concurrency": 1, "timeoutMs": 30000 }
+    }
+  },
+  "plugins": {
+    "hotReload": true,
+    "reloadDebounceMs": 300,
+    "entries": {
+      "weather": {
+        "enabled": true,
+        "command": "python3",
+        "args": ["./plugins/weather.py"],
+        "workers": 1,
+        "timeoutMs": 30000,
+        "maxInFlight": 1,
+        "restartOnCrash": true,
+        "skills": ["./plugins/weather/skills"],
+        "tools": [
+          {
+            "name": "weather.query",
+            "description": "查询城市天气",
+            "parameters": {
+              "type": "object",
+              "properties": { "city": { "type": "string" } },
+              "required": ["city"]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "skills": {
+    "load": {
+      "watch": true,
+      "watchDebounceMs": 250,
+      "extraDirs": [".agents/skills", "~/.cclaw/skills"]
+    }
+  },
+  "mcp": {
+    "enabled": false,
+    "sessionIdleTtlMs": 600000,
+    "servers": {}
+  },
+  "memory": {
+    "backend": "json_file",
+    "path": "./data/memory.json",
+    "active": {
+      "enabled": true,
+      "writeSummary": true,
+      "maxValueChars": 1600,
+      "category": "active_summary"
+    }
   },
   "sandbox": {
     "type": "local",
     "timeout_ms": 30000,
     "shell_requires_approval": true
   },
-  "memory": {
-    "backend": "json_file",
-    "path": "./data/memory.json"
-  },
-  "tools": {
-    "enabled": ["read", "write", "shell", "memory"]
-  },
   "system": {
     "max_steps": 10,
-    "soul_file": "soul.md",
-    "user_file": "user.md",
-    "system_prompt": null,
     "context_window_tokens": 8192,
     "context_compress_threshold": 80,
     "context_keep_recent": 20,
     "summary_max_tokens": 1024,
     "summary_temperature": 0.3
+  },
+  "cli": {
+    "debug_mode": false
   }
 }
 ```
 
-## model 段
+## 分段说明
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `provider` | string | `openai`、`anthropic`、`ollama` 或 `none` | 由编译开关决定，桌面默认优先 `openai` |
-| `model` | string | 随 provider 变化 | 默认模型名随 provider 变化 |
-| `base_url` | string | 随 provider 变化 | API 基础地址，不包含 provider 自己追加的 endpoint path |
-| `api_key` | string/null | `null` | 远程 provider 通常需要，Ollama 可为空 |
-| `max_tokens` | int | `4096` | 主对话单次回复最大 token 数 |
-| `temperature` | number | `0.7` | 主对话生成温度；`0.0` 更确定，较高值更随机 |
-| `thinking_mode` | int | `0` | 是否启用思考模式，`0` 关闭，`1` 开启 |
+`model`：LLM provider、模型名、API 地址、token、temperature、thinking/stream 开关。
+`thinking_mode=1` 时 loader 会强制打开 `stream_mode`，方便 CLI 展示推理增量。
 
-OpenAI 兼容配置示例：
+`storage`：会话存储。`type` 支持 `sqlite`、`json`、`memory` 等 profile 可用后端。
+`sqlite` 只在 `CC_ENABLE_SQLITE=ON` 时可用；ESP 通常用 `json` 或 `memory`。
+`data_dir`、`path` 可选，缺失时使用编译 profile 的默认运行期目录。POSIX CLI
+默认在 `build/app/posix/cli/runtime` 下生成数据，ESP32 QEMU 默认在 `/sdcard/cclaw`。
 
-```json
-{
-  "model": {
-    "provider": "openai",
-    "model": "gpt-4o-mini",
-    "base_url": "https://api.openai.com",
-    "api_key": "sk-..."
-  }
-}
-```
+`agents`：多 agent 配置。当前代码字段名是 `defaults` 和 `list`：`defaults`
+描述默认 agent，`list` 声明具名 agent。`skills` 是 per-agent allowlist，
+skill catalog 只把允许的 skill 注入 prompt。
 
-Anthropic 配置示例：
+`queue`：run queue 配置。`perSessionConcurrency=1` 表示同 session 串行；`lanes`
+控制 main/subagent/plugin/mcp 的并发上限。
 
-```json
-{
-  "model": {
-    "provider": "anthropic",
-    "model": "claude-3-5-haiku-latest",
-    "base_url": "https://api.anthropic.com",
-    "api_key": "sk-ant-..."
-  }
-}
-```
+`tools`：内置工具过滤和执行策略。`enabled` 为空或缺失时表示注册所有已编入工具；
+`perTool` 记录并发与 timeout，供 tool executor pool 和 adapter 使用。
 
-## storage 段
+`plugins`：外部进程插件主配置入口。POSIX/Windows app 从 `plugins.entries` 加载。
+热重载会以 registry generation 方式替换：新 run 使用新快照，旧 run 继续持有旧快照。
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `type` | string | `sqlite`、`json` 或 `memory` | `sqlite` 仅在 `CC_ENABLE_SQLITE=ON` 时可用 |
-| `path` | string | `./data/c-claw.db` 或 `./data/sessions.json` | 存储文件路径 |
+`skills`：AgentSkills 风格 `SKILL.md` 加载路径。桌面可以打开 watcher；ESP 默认只
+使用静态目录，避免引入文件监听。
 
-可选值：
+`mcp`：MCP client 配置。core SDK 负责 `initialize`、`tools/list`、
+`tools/call`、session cache、TTL 和 tool bridge；POSIX/Windows app 只提供
+transport factory。`servers` 支持：
 
-- `sqlite`：SQLite 会话存储。若编译时禁用或初始化失败，会降级到 JSON 文件存储。
-- `json` / `local_file`：JSON 文件会话存储。
-- `memory`：纯内存会话存储，进程退出后丢失。
+- `stdio`：单管道串行 worker，适合本机 MCP server。
+- `http`：普通 JSON-RPC request/response。
+- `sse`：`text/event-stream` 响应，SDK SSE parser 会跨 chunk 合并 `data:`，
+  并挑出匹配当前 JSON-RPC id 的 response。
+- `streamable_http`：POST JSON-RPC request，`Accept: application/json, text/event-stream`；
+  响应为 JSON 时按普通 JSON 解析，响应为 SSE 时按 event stream 解析。若 server
+  返回 `Mcp-Session-Id`，transport 会缓存并在后续请求中带上；`sessionIdleTtlMs`
+  到期或 reload dispose 会 reset 对应 session。
 
-## workspace 段
+`memory`：长期记忆后端。桌面可用 `json_file`/`sqlite`/`inmem`；`active`
+控制 run 后是否把当前输入/输出沉淀为可检索摘要。ESP 默认 `json_file` 或
+`inmem`，并关闭 active memory。
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `path` | string | `./workspace` | 文件工具限定访问的工作区路径 |
+`sandbox`：只影响 shell 等高风险工具。ESP profile 应使用 `none`。
 
-## sandbox 段
+`cli`：桌面 CLI 交互选项，不属于核心 SDK。
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `type` | string | `local` | `local`、`docker` 或 `none`；所选 sandbox 必须已编入 |
-| `timeout_ms` | int | `30000` | 命令默认超时时间 |
-| `shell_requires_approval` | bool | `true` | Shell 命令是否需要策略审批 |
+## 错误行为
 
-注意：sandbox 只有在 `CC_ENABLE_SHELL=ON` 时才会实际创建并注册给 `shell_run`。
-`docker` 需要 `CC_ENABLE_DOCKER_SANDBOX=ON`，`none` 适合无 shell 的裁剪 profile。
+`config.json` 解析后会在 core SDK 中做统一语义校验。校验失败时启动或 reload
+返回 `CC_ERR_INVALID_ARGUMENT`，不会进入 app 层半加载状态。当前固定的错误包括：
 
-## memory 段
+- `queue.lanes` 并发数必须为正数，queue cap/debounce 必须非负。
+- `plugins.entries.*` 启用时必须有 `command`，`workers`/`maxInFlight` 必须为正数。
+- `mcp.servers.*.transport` 只能是 `stdio`、`http`、`sse`、`streamable_http`。
+- `stdio` MCP server 必须有 `command`；HTTP/SSE/streamable HTTP server 必须有 `url`。
+- timeout、TTL、watch debounce、active memory value cap 不能为负数。
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `backend` | string | `json_file` 或 `noop` | `CC_ENABLE_MEMORY=OFF` 时默认 `noop` |
-| `path` | string | `./data/memory.json` | 持久化文件或数据库路径 |
+外部能力启动失败与配置错误分开处理：
 
-可选值：
-
-- `json_file`：JSON 文件长期记忆。
-- `sqlite`：SQLite 长期记忆，仅 `CC_ENABLE_SQLITE=ON` 可用。
-- `inmem`：纯内存长期记忆。
-- `noop`：禁用长期记忆。当前实现会返回禁用错误，主程序会降级为不注册 memory 工具。
-- `none`：`noop` 的兼容别名。
-
-## tools 段
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | string[]/null | `null` | 为 `null` 或空时注册所有已编入工具；非空时只注册列表中的工具 |
-
-支持的工具名和别名：
-
-| 配置值 | 对应工具 |
-|--------|----------|
-| `file_read` 或 `read` | 文件读取 |
-| `file_write` 或 `write` | 文件写入 |
-| `shell_run` 或 `shell` | Shell 执行 |
-| `memory` | 长期记忆 |
-| `http.request` 或 `http` | HTTP 请求 |
-
-插件工具由 `plugins.json` 声明；`tools.enabled` 当前只过滤主程序内置注册路径。
-
-## system 段
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `soul_file` | string | `soul.md` | Agent 人格定义文件路径 |
-| `user_file` | string | `user.md` | 用户偏好文件路径 |
-| `system_prompt` | string/null | `null` | 显式 system prompt。非空时优先于 `soul_file` 和 `user_file` |
-| `max_steps` | int | `10` | Agent 最大推理步数 |
-| `context_window_tokens` | int | `8192` | LLM 上下文 token 预算；`0` 表示不限制 |
-| `context_compress_threshold` | int | `80` | 压缩触发百分比；`0` 禁用压缩 |
-| `context_keep_recent` | int | `20` | 压缩时保留最近 N 条原始消息 |
-| `summary_max_tokens` | int | `1024` | 上下文摘要压缩请求的最大生成 token 数 |
-| `summary_temperature` | number | `0.3` | 上下文摘要压缩请求的生成温度，默认低于主对话以提高稳定性 |
-
-## 上下文窗口管理
-
-当历史消息较长时，`cc_context_builder` 使用两层策略：
-
-1. Token 预算截断：超过 `context_window_tokens` 时优先丢弃旧消息。
-2. LLM 摘要压缩：超过阈值时把旧消息压缩成摘要，再保留最近消息原文。
-
-示例：
-
-```json
-{
-  "system": {
-    "context_window_tokens": 128000,
-    "context_compress_threshold": 80,
-    "context_keep_recent": 30,
-    "summary_max_tokens": 1024,
-    "summary_temperature": 0.3
-  }
-}
-```
-
-## plugins.json
-
-插件配置独立于 `config.json`，仅在 `CC_ENABLE_PLUGIN=ON` 时加载。
-
-```json
-{
-  "plugins": [
-    {
-      "name": "weather",
-      "command": "python3",
-      "args": ["./plugins/weather_tool.py"],
-      "tools": [
-        {
-          "name": "weather_query",
-          "description": "查询指定城市的天气信息",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "city": { "type": "string" }
-            },
-            "required": ["city"]
-          }
-        }
-      ]
-    }
-  ]
-}
-```
+- JSON 语法错误、非法并发/timeout、重复 id、基础 runtime 创建失败会阻止启动或 reload。
+- 单个 plugin 进程、MCP transport、MCP initialize/listTools 启动失败会记录到
+  runtime diagnostics，但程序继续运行，失败 tool 不注册。
+- 后续调用未注册 tool 时返回标准工具错误 `Tool not found: <name>`，Agent 主循环继续。

@@ -27,14 +27,10 @@
  *      内存预算控制（"限制单次请求不超过 X MB"）和离线分析都很有价值。
  *      直接使用 malloc 无法获得这些信息。
  *
- *   2. 未来可扩展性（Future Extensibility）：
- *      如果未来需要添加以下功能，只需修改本模块即可：
- *        - 线程安全的内存追踪（Atomic counter / per-thread stats）
- *        - 分配失败时的自动日志记录
- *        - 内存池（Memory Pool）替代 malloc 以提升性能
- *        - 分配限额（Quota）控制
- *        - 调试模式下的 guard bytes（检测缓冲区溢出）
- *      如果上层模块直接调用 malloc，每个功能都需要全局代码修改。
+ *   2. 统一扩展点（Single Allocation Boundary）：
+ *      所有上层模块通过同一组包装函数分配和释放内存，诊断能力可以集中在
+ *      本模块维护，例如累计分配计数、分配失败日志、内存池、限额控制或
+ *      调试 guard bytes。上层直接散落 malloc/free 会让这些能力难以统一。
  *
  *   3. 可测试性（Testability）：
  *      通过统一的分配接口，在单元测试中可以注入 Mock 分配器

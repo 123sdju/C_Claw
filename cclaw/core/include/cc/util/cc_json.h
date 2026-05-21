@@ -112,6 +112,35 @@ void cc_json_destroy(cc_json_value_t *value);
 cc_json_value_t *cc_json_object_get(const cc_json_value_t *obj, const char *key);
 
 /**
+ * cc_json_object_size — 获取对象字段数量。
+ *
+ * @param obj JSON 对象
+ * @return    字段数量，不是对象时为 0
+ */
+int cc_json_object_size(const cc_json_value_t *obj);
+
+/**
+ * cc_json_object_key_at — 获取对象第 index 个字段名。
+ *
+ * 返回值是借用指针，生命周期跟随 obj。
+ * 这个接口主要服务 config.json 中 entries 这种“以 id 为 key 的对象”。
+ *
+ * @param obj   JSON 对象
+ * @param index 从 0 开始的字段索引
+ * @return      字段名，不存在时返回 NULL
+ */
+const char *cc_json_object_key_at(const cc_json_value_t *obj, int index);
+
+/**
+ * cc_json_object_value_at — 获取对象第 index 个字段值。
+ *
+ * @param obj   JSON 对象
+ * @param index 从 0 开始的字段索引
+ * @return      字段值借用指针，不存在时返回 NULL
+ */
+cc_json_value_t *cc_json_object_value_at(const cc_json_value_t *obj, int index);
+
+/**
  * cc_json_string_value — 从 JSON 值中提取字符串
  *
  * 如果 value 不是字符串类型，返回 NULL。

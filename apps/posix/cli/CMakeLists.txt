@@ -26,8 +26,15 @@ if(CC_ENABLE_PLUGIN)
     list(APPEND C_CLAW_APP_FEATURE_SOURCES
         src/tools/cc_plugin_tool.c
         src/plugin/cc_plugin_process.c
-        src/plugin/cc_jsonrpc_client.c
         src/plugin/cc_plugin_manager.c
+    )
+endif()
+
+# MCP app 层只提供 stdio/HTTP/SSE/streamable HTTP transport factory；
+# 协议状态机和 tool bridge 在 core SDK 中。
+if(CC_ENABLE_MCP AND (CC_ENABLE_MCP_STDIO OR CC_ENABLE_MCP_HTTP))
+    list(APPEND C_CLAW_APP_FEATURE_SOURCES
+        src/mcp/cc_mcp_manager.c
     )
 endif()
 
@@ -49,5 +56,8 @@ if(CC_ENABLE_CLI)
     target_link_libraries(c-claw PRIVATE
         c_claw_runtime
         c_claw_app_features
+    )
+    set_target_properties(c-claw PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
 endif()

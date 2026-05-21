@@ -330,7 +330,7 @@ int cc_tool_registry_is_frozen(cc_tool_registry_t *registry)
  *
  *   这是工具调用流程中的关键步骤——LLM 返回 {name: "file_read"}，
  *   框架通过 find("file_read") 获取对应的工具实现，然后调用
- *   tool.vtable->execute(tool.self, ...) 执行。
+ *   tool.vtable->call(tool.self, args_json, &ctx, &result) 执行。
  *
  * 参数：
  *   @param registry — 注册表，不可为 NULL
@@ -345,7 +345,7 @@ int cc_tool_registry_is_frozen(cc_tool_registry_t *registry)
  *
  * 返回浅拷贝（而非指针）的原因：
  *   返回 cc_tool_t 的副本（两个指针：vtable 和 self）让调用者可以
- *   直接通过 out_tool->vtable->execute(out_tool->self, ...) 调用工具，
+ *   直接通过 out_tool->vtable->call(out_tool->self, ...) 调用工具，
  *   无需持有注册表的锁。如果在锁内返回指针，调用者在锁外使用该指针
  *   时注册表可能被并发修改。返回副本消除了这种竞态条件——调用者持有
  *   自己的 tool 副本，不依赖注册表的内部状态。

@@ -29,7 +29,7 @@
 -->
 
 - CMake 是构建系统——使用 `cmake -B build -S . && cmake --build build`
-- 测试运行命令：`ctest --test-dir build/posix-cli --output-on-failure`
+- 测试运行命令：`ctest --test-dir build/app/posix/cli --output-on-failure`
 - 项目遵循 Ports & Adapters 架构——遵循 vtable 模式
 - 所有公共头文件放在 `include/cc/` 下对应的子目录
 - 源文件放在 `src/` 下匹配的目录结构中

@@ -218,4 +218,52 @@ void cc_mutex_unlock(cc_mutex_t mutex)
     LeaveCriticalSection((CRITICAL_SECTION *)mutex);
 }
 
+cc_result_t cc_cond_create(cc_cond_t *out_cond)
+{
+    if (!out_cond) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null condition output");
+    }
+    CONDITION_VARIABLE *cond = malloc(sizeof(CONDITION_VARIABLE));
+    if (!cond) {
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate condition");
+    }
+    InitializeConditionVariable(cond);
+    *out_cond = cond;
+    return cc_result_ok();
+}
+
+void cc_cond_destroy(cc_cond_t cond)
+{
+    free(cond);
+}
+
+void cc_cond_wait(cc_cond_t cond, cc_mutex_t mutex)
+{
+    if (!cond || !mutex) return;
+    SleepConditionVariableCS((CONDITION_VARIABLE *)cond, (CRITICAL_SECTION *)mutex, INFINITE);
+}
+
+int cc_cond_timedwait(cc_cond_t cond, cc_mutex_t mutex, int timeout_ms)
+{
+    if (!cond || !mutex) return 0;
+    DWORD timeout = timeout_ms > 0 ? (DWORD)timeout_ms : INFINITE;
+    BOOL ok = SleepConditionVariableCS(
+        (CONDITION_VARIABLE *)cond,
+        (CRITICAL_SECTION *)mutex,
+        timeout);
+    return ok ? 1 : 0;
+}
+
+void cc_cond_signal(cc_cond_t cond)
+{
+    if (!cond) return;
+    WakeConditionVariable((CONDITION_VARIABLE *)cond);
+}
+
+void cc_cond_broadcast(cc_cond_t cond)
+{
+    if (!cond) return;
+    WakeAllConditionVariable((CONDITION_VARIABLE *)cond);
+}
+
 #endif

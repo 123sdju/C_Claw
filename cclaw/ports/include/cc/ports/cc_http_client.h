@@ -20,10 +20,13 @@
 #include "cc/core/cc_result.h"
 #include <stddef.h>
 
+typedef struct cc_cancel_token cc_cancel_token_t;
+
 /**
  * cc_http_header — 单个 HTTP header 名值对。
  *
- * 该结构体不拥有字符串；request 发送期间调用方必须保证 name/value 有效。
+ * request 中的 header 不拥有字符串；发送期间调用方必须保证 name/value 有效。
+ * response 中的 header 由平台 HTTP client 分配，随 cc_http_response_free 释放。
  */
 typedef struct cc_http_header {
     /** header 名称，例如 "Content-Type"。 */
@@ -74,6 +77,8 @@ typedef struct cc_http_request {
     cc_http_body_callback_fn on_body;
     /** 传给 on_body 的调用方上下文。 */
     void *user_data;
+    /** 借用的取消令牌；平台实现应在 body 回调和长等待之间尽快中止。 */
+    cc_cancel_token_t *cancel_token;
 } cc_http_request_t;
 
 /**
@@ -85,6 +90,15 @@ typedef struct cc_http_request {
 typedef struct cc_http_response {
     /** HTTP 状态码；传输层失败时可能保持为 0。 */
     long status_code;
+    /**
+     * 响应 header 表。平台实现按收到的 header 行复制 name/value。
+     *
+     * 生命周期：调用方只借用读取；cc_http_response_free 会释放数组和内部字符串。
+     * ESP profile 如果底层 SDK 没有暴露 header 事件，可以返回空表，但字段仍保留。
+     */
+    cc_http_header_t *headers;
+    /** headers 的元素数量。 */
+    size_t header_count;
     /** 堆上分配的响应体，可能为 NULL；由 cc_http_response_free 释放。 */
     char *body;
     /** body 的字节数，不含结尾 '\0'。 */

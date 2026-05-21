@@ -51,6 +51,7 @@
  *   - usleep() — 微秒级休眠（超时轮询间隔）
  */
 
+#include "cc/app/cc_cancel_token.h"
 #include "cc/ports/cc_process.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -477,32 +478,55 @@ cc_result_t cc_process_pipe_write(cc_process_pipe_t *pipe, const char *data)
 }
 
 /**
- * cc_process_pipe_read_line — 执行文件系统操作，并把平台错误转换为统一结果。
+ * cc_process_pipe_read_line_timeout_cancel — 从持久子进程 stdout 读取一行。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * 读取过程中以短 select 超时片段轮询，因此可以观察上层 cancel token。
+ * 取消后只返回 CC_ERR_CANCELLED；是否重启/关闭子进程由 plugin process 层决定，
+ * 因为那里知道请求是否已经写出以及 JSON-RPC 是否可能串线。
  *
- * @param pipe 借用的指针参数；若需要长期保存内容，函数会复制。
+ * @param pipe 借用的 pipe 句柄；函数不取得所有权。
+ * @param timeout_ms 最大等待毫秒数；<=0 时使用默认值。
+ * @param cancel_token 借用取消令牌；NULL 表示不启用取消。
  * @param out_line 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
-cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
+cc_result_t cc_process_pipe_read_line_timeout_cancel(
+    cc_process_pipe_t *pipe,
+    int timeout_ms,
+    cc_cancel_token_t *cancel_token,
+    char **out_line
+)
 {
     if (!pipe || pipe->stdout_fd < 0 || !out_line)
         return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid pipe read arguments");
+    if (timeout_ms <= 0) timeout_ms = 30000;
 
     size_t cap = 256;
     size_t len = 0;
     char *line = malloc(cap);
     if (!line) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate pipe line");
 
+    int waited_ms = 0;
     while (1) {
+        if (cc_cancel_token_is_cancelled(cancel_token)) {
+            free(line);
+            return cc_result_error(CC_ERR_CANCELLED, "Pipe process read cancelled");
+        }
+
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(pipe->stdout_fd, &readfds);
 
+        int wait_ms = timeout_ms - waited_ms;
+        if (wait_ms > 50) wait_ms = 50;
+        if (wait_ms <= 0) {
+            free(line);
+            return cc_result_error(CC_ERR_TIMEOUT, "Timed out waiting for pipe process line");
+        }
+
         struct timeval tv;
-        tv.tv_sec = 30;
-        tv.tv_usec = 0;
+        tv.tv_sec = wait_ms / 1000;
+        tv.tv_usec = (wait_ms % 1000) * 1000;
 
         int ready = select(pipe->stdout_fd + 1, &readfds, NULL, NULL, &tv);
         if (ready < 0) {
@@ -511,8 +535,8 @@ cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
             return cc_result_error(CC_ERR_PLATFORM, "Pipe process stdout select failed");
         }
         if (ready == 0) {
-            free(line);
-            return cc_result_error(CC_ERR_TIMEOUT, "Timed out waiting for pipe process line");
+            waited_ms += wait_ms;
+            continue;
         }
 
         char ch;
@@ -550,6 +574,20 @@ cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
 
     *out_line = line;
     return cc_result_ok();
+}
+
+cc_result_t cc_process_pipe_read_line_timeout(
+    cc_process_pipe_t *pipe,
+    int timeout_ms,
+    char **out_line
+)
+{
+    return cc_process_pipe_read_line_timeout_cancel(pipe, timeout_ms, NULL, out_line);
+}
+
+cc_result_t cc_process_pipe_read_line(cc_process_pipe_t *pipe, char **out_line)
+{
+    return cc_process_pipe_read_line_timeout(pipe, 30000, out_line);
 }
 
 /**

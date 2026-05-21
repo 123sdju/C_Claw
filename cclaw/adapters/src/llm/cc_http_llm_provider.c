@@ -64,6 +64,7 @@ static cc_result_t http_post_json_with_headers(
     const cc_http_header_t *headers,
     size_t header_count,
     const char *body_json,
+    cc_cancel_token_t *cancel_token,
     char **out_response
 )
 {
@@ -75,6 +76,7 @@ static cc_result_t http_post_json_with_headers(
     http_request.header_count = header_count;
     http_request.body = body_json;
     http_request.timeout_ms = 120000;
+    http_request.cancel_token = cancel_token;
 
     cc_http_response_t response;
     memset(&response, 0, sizeof(response));
@@ -373,6 +375,7 @@ static cc_result_t flush_stream_tail(cc_http_llm_stream_ctx_t *ctx)
 static cc_result_t http_post_json_stream_with_headers(
     const cc_llm_http_request_t *http_req,
     cc_llm_protocol_t protocol,
+    cc_cancel_token_t *cancel_token,
     cc_llm_stream_callback_fn on_chunk,
     void *user_data
 )
@@ -395,6 +398,7 @@ static cc_result_t http_post_json_stream_with_headers(
     http_request.max_response_bytes = 0;
     http_request.on_body = stream_body_callback;
     http_request.user_data = &ctx;
+    http_request.cancel_token = cancel_token;
 
     cc_http_response_t response;
     memset(&response, 0, sizeof(response));
@@ -457,6 +461,7 @@ static cc_result_t http_llm_chat(
         http_req.headers,
         http_req.header_count,
         http_req.body_json,
+        request->cancel_token,
         &response_json
     );
     cc_llm_http_request_cleanup(&http_req);
@@ -512,6 +517,7 @@ static cc_result_t http_llm_chat_stream(
     rc = http_post_json_stream_with_headers(
         &http_req,
         provider->protocol,
+        request->cancel_token,
         on_chunk,
         user_data);
     cc_llm_http_request_cleanup(&http_req);

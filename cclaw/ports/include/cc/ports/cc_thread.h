@@ -77,6 +77,19 @@ typedef void *cc_thread_t;
 typedef void *cc_mutex_t;
 
 /**
+ * cc_cond_t — 条件变量句柄（不透明类型）
+ *
+ * 条件变量用于“有工作才唤醒”的队列模型。和互斥锁配合使用：
+ * 调用方先持有 mutex，发现队列为空后调用 cc_cond_wait；等待期间平台层会
+ * 原子地释放 mutex，收到 signal/broadcast 后重新持有 mutex 并返回。
+ *
+ * 为什么放在 port 层：
+ *   run queue、plugin worker pool、MCP runtime sweep 都需要阻塞等待能力。
+ *   如果只用轮询 sleep，会在桌面浪费 CPU，也会让 ESP 这类设备更耗电。
+ */
+typedef void *cc_cond_t;
+
+/**
  * cc_thread_create — 创建并启动新线程
  *
  * 在新线程中执行 fn(arg)，立即返回。新线程独立调度。
@@ -138,5 +151,64 @@ void cc_mutex_lock(cc_mutex_t mutex);
  * @param mutex  互斥锁句柄
  */
 void cc_mutex_unlock(cc_mutex_t mutex);
+
+/**
+ * cc_cond_create — 创建条件变量对象。
+ *
+ * @param out_cond 输出：新条件变量句柄（调用者负责 cc_cond_destroy）
+ * @return         CC_OK 表示成功
+ */
+cc_result_t cc_cond_create(cc_cond_t *out_cond);
+
+/**
+ * cc_cond_destroy — 销毁条件变量。
+ *
+ * 调用前必须确保没有线程仍在等待该条件变量。
+ *
+ * @param cond 待销毁的条件变量句柄
+ */
+void cc_cond_destroy(cc_cond_t cond);
+
+/**
+ * cc_cond_wait — 等待条件变量被唤醒。
+ *
+ * 调用方必须在进入此函数前持有 mutex。函数返回时仍然持有 mutex。
+ * 由于所有平台都可能发生“伪唤醒”，调用方必须在 while 循环中检查条件。
+ *
+ * @param cond  条件变量句柄
+ * @param mutex 与条件变量配对使用的互斥锁
+ */
+void cc_cond_wait(cc_cond_t cond, cc_mutex_t mutex);
+
+/**
+ * cc_cond_timedwait — 带超时等待条件变量。
+ *
+ * 调用方必须在进入此函数前持有 mutex，函数返回时仍然持有 mutex。
+ * 返回 1 表示被 signal/broadcast 唤醒，返回 0 表示超时或平台无法区分的
+ * 非致命等待结束。调用方仍然必须用 while 循环重新检查自己的条件。
+ *
+ * 这个接口主要用于协作式取消：core 队列或 tool pool 可以每隔几十毫秒醒来
+ * 查询 cc_cancel_token，而不需要平台层知道上层取消令牌的具体语义。
+ *
+ * @param cond       条件变量句柄
+ * @param mutex      与条件变量配对使用的互斥锁
+ * @param timeout_ms 最大等待时间；<=0 时等价于一次普通 wait
+ * @return           1 表示被唤醒，0 表示超时/未唤醒
+ */
+int cc_cond_timedwait(cc_cond_t cond, cc_mutex_t mutex, int timeout_ms);
+
+/**
+ * cc_cond_signal — 唤醒一个等待线程。
+ *
+ * @param cond 条件变量句柄
+ */
+void cc_cond_signal(cc_cond_t cond);
+
+/**
+ * cc_cond_broadcast — 唤醒全部等待线程。
+ *
+ * @param cond 条件变量句柄
+ */
+void cc_cond_broadcast(cc_cond_t cond);
 
 #endif

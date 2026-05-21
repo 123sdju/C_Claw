@@ -21,10 +21,49 @@ set(C_CLAW_CORE_SOURCES
     src/app/cc_context_builder.c
     src/app/cc_tool_executor.c
     src/app/cc_session_manager.c
+    src/app/cc_cancel_token.c
+    src/app/cc_plugin_protocol.c
+    src/app/cc_sse_parser.c
     src/app/cc_agent_runtime.c
     src/app/cc_runtime_builder.c
     src/app/cc_memory_context.c
 )
+
+if(CC_ENABLE_RUN_QUEUE)
+    list(APPEND C_CLAW_CORE_SOURCES
+        src/app/cc_run_queue.c
+    )
+endif()
+
+if(CC_ENABLE_TOOL_POOL)
+    list(APPEND C_CLAW_CORE_SOURCES
+        src/app/cc_tool_executor_pool.c
+    )
+endif()
+
+if(CC_ENABLE_SKILLS)
+    list(APPEND C_CLAW_CORE_SOURCES
+        src/app/cc_skill_catalog.c
+    )
+endif()
+
+if(CC_ENABLE_PLUGIN_HOT_RELOAD OR CC_ENABLE_MCP OR CC_ENABLE_TOOL_POOL)
+    list(APPEND C_CLAW_CORE_SOURCES
+        src/app/cc_tool_registry_snapshot.c
+    )
+endif()
+
+if(CC_ENABLE_MCP)
+    list(APPEND C_CLAW_CORE_SOURCES
+        src/app/cc_mcp_runtime_manager.c
+    )
+endif()
+
+if(CC_ENABLE_MULTI_AGENT AND CC_ENABLE_RUN_QUEUE)
+    list(APPEND C_CLAW_CORE_SOURCES
+        src/app/cc_agent_manager.c
+    )
+endif()
 
 add_library(c_claw_core_headers INTERFACE)
 target_include_directories(c_claw_core_headers INTERFACE

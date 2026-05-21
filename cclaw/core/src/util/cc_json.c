@@ -241,6 +241,34 @@ cc_json_value_t *cc_json_object_get(const cc_json_value_t *obj, const char *key)
     return (cc_json_value_t *)cJSON_GetObjectItem((cJSON *)obj, key);
 }
 
+int cc_json_object_size(const cc_json_value_t *obj)
+{
+    if (!obj || !cJSON_IsObject((cJSON *)obj)) return 0;
+    int count = 0;
+    for (cJSON *child = ((cJSON *)obj)->child; child; child = child->next) count++;
+    return count;
+}
+
+const char *cc_json_object_key_at(const cc_json_value_t *obj, int index)
+{
+    if (!obj || !cJSON_IsObject((cJSON *)obj) || index < 0) return NULL;
+    int i = 0;
+    for (cJSON *child = ((cJSON *)obj)->child; child; child = child->next, i++) {
+        if (i == index) return child->string;
+    }
+    return NULL;
+}
+
+cc_json_value_t *cc_json_object_value_at(const cc_json_value_t *obj, int index)
+{
+    if (!obj || !cJSON_IsObject((cJSON *)obj) || index < 0) return NULL;
+    int i = 0;
+    for (cJSON *child = ((cJSON *)obj)->child; child; child = child->next, i++) {
+        if (i == index) return (cc_json_value_t *)child;
+    }
+    return NULL;
+}
+
 /*
  * cc_json_string_value — 提取 JSON 字符串值
  *
@@ -491,8 +519,13 @@ cc_json_value_t *cc_json_create_null(void)
  */
 void cc_json_object_set(cc_json_value_t *obj, const char *key, cc_json_value_t *value)
 {
-    if (obj && key && value)
-        cJSON_AddItemToObject((cJSON *)obj, key, (cJSON *)value);
+    if (!obj || !key || !value) return;
+    cJSON *object = (cJSON *)obj;
+    if (cJSON_GetObjectItemCaseSensitive(object, key)) {
+        cJSON_ReplaceItemInObjectCaseSensitive(object, key, (cJSON *)value);
+    } else {
+        cJSON_AddItemToObject(object, key, (cJSON *)value);
+    }
 }
 
 /*

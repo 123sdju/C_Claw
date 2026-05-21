@@ -205,10 +205,9 @@ int cc_token_estimate(const char *text)
  *   （花括号、引号、逗号、换行等）本身就是 ASCII，会被自动计入
  *   ASCII run 中。
  *
- *   未来可扩展：如果 JSON 中包含大量转义字符（如 \\n、\\"），
- *   可以在此处做预处理以提高精度。但当前项目的 JSON 序列化使用
- *   cc_json_stringify() 生成的是未转义的格式化 JSON，转义开销
- *   可忽略不计。
+ *   精度边界：如果 JSON 中包含大量转义字符（如 \\n、\\"），这里不会
+ *   额外按反转义后的语义重新估算。但当前项目的 JSON 序列化使用
+ *   cc_json_stringify() 生成格式化 JSON，转义开销对上下文裁剪影响很小。
  *
  * @param messages_json  JSON 格式的 messages 数组（可为 NULL）
  * @return               估算的 token 数量

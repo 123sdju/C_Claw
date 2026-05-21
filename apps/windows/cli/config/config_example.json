@@ -12,13 +12,68 @@
   "storage": {
     "type": "sqlite"
   },
+  "agents": {
+    "defaults": {
+      "id": "default",
+      "workspace": ".\\workspace",
+      "agentDir": ".agents\\default",
+      "systemPromptFile": "apps\\windows\\cli\\config\\soul.md",
+      "skills": ["core"]
+    },
+    "list": []
+  },
+  "queue": {
+    "lanes": {
+      "main": 4,
+      "subagent": 8,
+      "plugin": 4,
+      "mcp": 4
+    },
+    "perSessionConcurrency": 1,
+    "mode": "steer",
+    "debounceMs": 500,
+    "maxPendingPerSession": 20
+  },
+  "tools": {
+    "enabled": ["read", "write", "http", "shell", "memory"],
+    "defaultTimeoutMs": 30000,
+    "perTool": {
+      "shell_run": {
+        "concurrency": 1,
+        "timeoutMs": 30000
+      }
+    }
+  },
+  "plugins": {
+    "hotReload": true,
+    "reloadDebounceMs": 300,
+    "entries": {}
+  },
+  "skills": {
+    "load": {
+      "watch": true,
+      "watchDebounceMs": 250,
+      "extraDirs": [".agents\\skills", "~\\.cclaw\\skills"]
+    }
+  },
+  "mcp": {
+    "enabled": false,
+    "sessionIdleTtlMs": 600000,
+    "servers": {}
+  },
   "sandbox": {
     "type": "local",
     "shell_requires_approval": true,
     "timeout_ms": 30000
   },
   "memory": {
-    "backend": "json_file"
+    "backend": "json_file",
+    "active": {
+      "enabled": true,
+      "writeSummary": true,
+      "maxValueChars": 1600,
+      "category": "active_summary"
+    }
   },
   "system": {
     "max_steps": 10,
@@ -30,8 +85,5 @@
   },
   "cli": {
     "debug_mode": false
-  },
-  "tools": {
-    "enabled": ["read", "write", "http", "shell", "memory"]
   }
 }

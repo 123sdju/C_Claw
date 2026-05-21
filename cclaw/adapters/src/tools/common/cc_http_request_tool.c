@@ -27,7 +27,7 @@
  * 接口契约：
  *   - name() 返回工具在注册表中的唯一标识 "http.request"
  *   - description() 返回 LLM 可读的自然语言描述
- *   - schema_json() 定义参数规范：url（string，必填）、method（string，可选）
+ *   - schema_json() 定义参数规范：url（必填）、method/body/timeout_ms（可选）
  *   - call() 通过 cc_http_client_perform 执行 HTTP 请求
  *   - destroy() 释放工具实例内存
  *
@@ -35,10 +35,10 @@
  *   - cc/ports/cc_tool.h：工具端口接口定义（cc_tool_vtable_t、cc_tool_t 等）
  *   - cc/ports/cc_http_client.h：平台可替换的 HTTP client 端口
  *
- * 待实现功能（TODO）：
- *   - 支持自定义 headers 和 body
- *   - 支持响应 headers 返回
- *   - 暴露证书和重定向策略配置
+ * 当前边界：
+ *   - body 存在时默认发送 Content-Type: application/json。
+ *   - 返回值包含 status 和 body；响应 headers 暂不暴露给 LLM tool result。
+ *   - 证书、代理、重定向等策略由底层 cc_http_client_t adapter 或 profile 决定。
  */
 
 #include "cc/ports/cc_tool.h"
@@ -51,12 +51,11 @@
  * cc_http_request_tool_t — http.request 工具的内部数据结构
  *
  * 字段说明：
- *   dummy — 占位字段，当前实现不需要保存状态。
- *           后续可替换为默认 header、代理设置等实际字段。
+ *   dummy — 占位字段，当前实现不需要保存状态；所有请求参数都从 args_json 读取。
  *
  * 设计决策：
- *   - 使用 typedef struct 而非匿名结构体，便于后续扩展字段而不改变类型名称
- *   - 当前使用 calloc 零初始化，dummy 字段始终为 0
+ *   - 使用 typedef struct 而非匿名结构体，保持调试信息和类型名称稳定
+ *   - 使用 calloc 零初始化，dummy 字段始终为 0
  */
 typedef struct {
     int dummy;
@@ -96,11 +95,13 @@ static const char *http_req_description(void *self) { (void)self; return "Make H
  * @return JSON Schema 字符串，定义了以下参数：
  *         - url（string 类型，必填）：目标请求 URL
  *         - method（string 类型，可选）：HTTP 方法，如 GET/POST/PUT/DELETE
+ *         - body（string 类型，可选）：请求体；存在时默认 method 为 POST
+ *         - timeout_ms（integer 类型，可选）：本次请求 timeout
  *
  * 设计决策：
  *   - url 为必填参数，因为 HTTP 请求必须有目标地址
- *   - method 为可选参数，默认行为在下层实现中约定（通常为 GET）
- *   - 当前 Schema 为最小化版本，后续可扩展 headers、body、timeout 等参数
+ *   - method 为可选参数；未传且存在 body 时使用 POST，否则使用 GET
+ *   - 当前工具不暴露自定义 headers，避免 LLM 直接构造 Authorization 等敏感字段
  */
 static const char *http_req_schema_json(void *self)
 {
@@ -122,7 +123,8 @@ static const char *http_req_schema_json(void *self)
  *
  * @param self      工具实例指针（当前未使用）
  * @param args_json JSON 格式的调用参数
- * @param ctx       工具上下文，包含 workspace_dir 等信息（当前未使用）
+ * @param ctx       工具上下文；当前 HTTP tool 使用 args_json 自带 timeout_ms，
+ *                  不读取 workspace_dir
  * @param out_result 输出结果结构体
  */
 static cc_result_t http_req_call(
@@ -168,7 +170,9 @@ static cc_result_t http_req_call(
     request.headers = body ? headers : NULL;
     request.header_count = body ? 1 : 0;
     request.body = body;
-    request.timeout_ms = timeout_ms > 0 ? timeout_ms : 30000;
+    request.timeout_ms = timeout_ms > 0 ? timeout_ms :
+        (ctx && ctx->timeout_ms > 0 ? ctx->timeout_ms : 30000);
+    request.cancel_token = ctx ? ctx->cancel_token : NULL;
 
     cc_http_response_t response;
     rc = cc_http_client_perform(&request, &response);

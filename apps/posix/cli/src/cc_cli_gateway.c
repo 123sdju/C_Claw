@@ -24,6 +24,8 @@
  *****************************************************************************/
 
 #include "cc/app/cc_agent_runtime.h"
+#include "cc/app/cc_agent_manager.h"
+#include "cc/app/cc_runtime_builder.h"
 #include "cc/app/cc_session_manager.h"
 #include "cc/util/cc_config.h"
 #include "cc/util/cc_json.h"
@@ -34,6 +36,7 @@
 #include <time.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 /* 当前会话 ID，基于时间戳生成，全局生命周期内唯一 */
 static char *g_session_id = NULL;
@@ -42,11 +45,25 @@ static char *g_session_id = NULL;
 #define CLI_PROMPT "You> "
 static char *history[HISTORY_MAX];
 static int history_count = 0;
+static int g_stream_mode = 0;
+
+typedef struct cc_cli_reload_watcher {
+    const char *config_path;
+    time_t last_mtime;
+    long last_reload_ms;
+    int initialized;
+} cc_cli_reload_watcher_t;
 
 static const char *slash_commands[] = {
     "/exit",
     "/quit",
     "/tools",
+    "/reload",
+    "/agents",
+    "/agent",
+    "/skills",
+    "/mcp",
+    "/interrupt",
     "/thinking",
     "/thinking on",
     "/thinking off",
@@ -59,6 +76,144 @@ static const char *slash_commands[] = {
     "/help",
     NULL
 };
+
+static long cli_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return (long)time(NULL) * 1000L;
+    return (long)ts.tv_sec * 1000L + (long)(ts.tv_nsec / 1000000L);
+}
+
+static int config_file_mtime(const char *path, time_t *out_mtime)
+{
+    if (!path || !path[0] || !out_mtime) return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    *out_mtime = st.st_mtime;
+    return 1;
+}
+
+static int config_auto_reload_enabled(const cc_config_t *config)
+{
+    if (!config) return 0;
+    return config->plugins.hot_reload || config->skills.watch;
+}
+
+static int config_reload_debounce_ms(const cc_config_t *config)
+{
+    int plugin_ms = config ? config->plugins.reload_debounce_ms : 300;
+    int skill_ms = config ? config->skills.watch_debounce_ms : 250;
+    int debounce = plugin_ms > skill_ms ? plugin_ms : skill_ms;
+    return debounce > 0 ? debounce : 250;
+}
+
+static void print_runtime_diagnostics(
+    const char *prefix,
+    const cc_runtime_diagnostics_t *diagnostics
+)
+{
+    if (!diagnostics || diagnostics->count == 0) return;
+    printf("%s\n", prefix ? prefix : "[diagnostics] 外部工具加载问题:");
+    for (size_t i = 0; i < diagnostics->count; i++) {
+        const cc_runtime_diagnostic_t *item = &diagnostics->items[i];
+        printf("  - [%s] %s: %s\n",
+            item->kind[0] ? item->kind : "tool",
+            item->id[0] ? item->id : "(unknown)",
+            item->message[0] ? item->message : "unavailable");
+    }
+    if (diagnostics->truncated) {
+        printf("  - ... 还有更多诊断被截断\n");
+    }
+    printf("\n");
+}
+
+static cc_result_t reload_runtime_from_path(
+    cc_runtime_builder_t *builder,
+    cc_config_t *config,
+    const char *config_path,
+    cc_runtime_reload_report_t *out_report
+)
+{
+    cc_config_t next_config;
+    memset(&next_config, 0, sizeof(next_config));
+    cc_result_t rc = cc_config_load(config_path, &next_config);
+    if (rc.code != CC_OK) {
+        cc_config_destroy(&next_config);
+        return rc;
+    }
+
+    rc = cc_runtime_builder_reload_with_report(builder, &next_config, out_report);
+    if (rc.code != CC_OK) {
+        cc_config_destroy(&next_config);
+        return rc;
+    }
+
+    cc_config_destroy(config);
+    *config = next_config;
+    memset(&next_config, 0, sizeof(next_config));
+    g_stream_mode = config->stream_mode ? 1 : 0;
+    if (config->debug_mode) setenv("CCLAW_DEBUG", "1", 1);
+    return cc_result_ok();
+}
+
+static void reload_watcher_init(
+    cc_cli_reload_watcher_t *watcher,
+    const char *config_path
+)
+{
+    if (!watcher) return;
+    memset(watcher, 0, sizeof(*watcher));
+    watcher->config_path = config_path;
+    watcher->last_reload_ms = cli_now_ms();
+    if (config_file_mtime(config_path, &watcher->last_mtime)) {
+        watcher->initialized = 1;
+    }
+}
+
+static void reload_watcher_note_current(
+    cc_cli_reload_watcher_t *watcher
+)
+{
+    if (!watcher) return;
+    time_t mtime = 0;
+    if (config_file_mtime(watcher->config_path, &mtime)) {
+        watcher->last_mtime = mtime;
+        watcher->initialized = 1;
+    }
+    watcher->last_reload_ms = cli_now_ms();
+}
+
+static void reload_watcher_poll(
+    cc_cli_reload_watcher_t *watcher,
+    cc_runtime_builder_t *builder,
+    cc_config_t *config
+)
+{
+    if (!watcher || !builder || !config || !config_auto_reload_enabled(config)) return;
+    time_t mtime = 0;
+    if (!config_file_mtime(watcher->config_path, &mtime)) return;
+    if (!watcher->initialized) {
+        watcher->last_mtime = mtime;
+        watcher->initialized = 1;
+        return;
+    }
+    if (mtime == watcher->last_mtime) return;
+    long now = cli_now_ms();
+    if (now - watcher->last_reload_ms < config_reload_debounce_ms(config)) return;
+
+    cc_runtime_reload_report_t report;
+    cc_result_t rc = reload_runtime_from_path(builder, config, watcher->config_path, &report);
+    if (rc.code == CC_OK) {
+        watcher->last_mtime = mtime;
+        watcher->last_reload_ms = now;
+        printf("\n[reload] config.json changed; runtime generation updated\n\n");
+        print_runtime_diagnostics("[reload] 部分外部工具不可用:", &report.diagnostics);
+    } else {
+        watcher->last_reload_ms = now;
+        printf("\n[reload] 自动热重载失败: %s\n\n", rc.message ? rc.message : "unknown");
+        cc_result_free(&rc);
+    }
+}
 
 /**
  * history_add — 把用户输入追加到 CLI 历史数组，并在容量满时移除最旧记录。
@@ -229,7 +384,7 @@ static void redraw_line(const char *buf, size_t cursor)
 {
     printf("\r\033[K%s%s", CLI_PROMPT, buf);
     if (buf[0] == '/') {
-        printf("  [Tab补全: /exit /quit /tools /thinking /stream /debug /help]");
+        printf("  [Tab补全: /exit /quit /tools /reload /agents /agent /skills /mcp /interrupt /thinking /stream /debug /help]");
     }
     printf("\r%s", CLI_PROMPT);
     size_t columns = display_width_prefix(buf, cursor);
@@ -597,6 +752,12 @@ static void show_help(void)
     printf("  Slash Commands:\n");
     printf("    /exit, /quit      退出对话\n");
     printf("    /tools            列出所有可用工具\n");
+    printf("    /reload           重新加载可热替换的运行时资源\n");
+    printf("    /agents           列出当前 manager 中的 Agent\n");
+    printf("    /agent <id>       切换当前 Agent\n");
+    printf("    /skills           显示 skills 配置摘要\n");
+    printf("    /mcp              显示 MCP server 配置摘要\n");
+    printf("    /interrupt        标记当前 session 中断\n");
     printf("    /thinking on      开启思考模式 (DeepSeek reasoning)\n");
     printf("    /thinking off     关闭思考模式\n");
     printf("    /stream on        开启流式输出模式\n");
@@ -609,7 +770,6 @@ static void show_help(void)
     printf("\n");
 }
 
-static int g_stream_mode = 0;
 static int g_stream_seen_thinking = 0;
 static int g_stream_seen_text = 0;
 static int g_stream_seen_tool = 0;
@@ -722,7 +882,43 @@ static void stream_event_handler(const char *event, const char *payload, void *u
  * @param runtime 借用的对象；函数不释放该对象本身。
  * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
-static void run_chat_loop(cc_agent_runtime_t *runtime)
+static void print_configured_skills(const cc_config_t *config)
+{
+    printf("\nSkills:\n");
+    printf("  watch: %s\n", config && config->skills.watch ? "on" : "off");
+    printf("  extraDirs (%zu):\n", config ? config->skills.extra_dirs.count : 0);
+    if (config) {
+        for (size_t i = 0; i < config->skills.extra_dirs.count; i++) {
+            printf("    - %s\n", config->skills.extra_dirs.items[i]);
+        }
+    }
+    printf("\n");
+}
+
+static void print_configured_mcp(const cc_config_t *config)
+{
+    printf("\nMCP servers:\n");
+    printf("  enabled: %s\n", config && config->mcp.enabled ? "yes" : "no");
+    printf("  idle TTL: %d ms\n", config ? config->mcp.session_idle_ttl_ms : 0);
+    printf("  entries (%zu):\n", config ? config->mcp.server_count : 0);
+    if (config) {
+        for (size_t i = 0; i < config->mcp.server_count; i++) {
+            const cc_config_mcp_server_t *server = &config->mcp.servers[i];
+            printf("    - %s [%s]\n",
+                server->name ? server->name : "(unnamed)",
+                server->transport ? server->transport : "stdio");
+        }
+    }
+    printf("\n");
+}
+
+static void run_chat_loop(
+    cc_runtime_builder_t *builder,
+    cc_agent_runtime_t *runtime,
+    cc_agent_manager_t *manager,
+    cc_config_t *config,
+    const char *config_path
+)
 {
     /*
      * 订阅流式事件（一次性，调用时通过 g_stream_mode 控制是否输出）
@@ -754,9 +950,13 @@ static void run_chat_loop(cc_agent_runtime_t *runtime)
     }
     printf("\n\n");
 
+    cc_cli_reload_watcher_t reload_watcher;
+    reload_watcher_init(&reload_watcher, config_path);
+
     char line[4096];
     while (1) {
         if (cli_readline(line, sizeof(line)) != 0) break;
+        reload_watcher_poll(&reload_watcher, builder, config);
 
         if (line[0] == '\0') continue;
 
@@ -785,6 +985,81 @@ static void run_chat_loop(cc_agent_runtime_t *runtime)
                 }
                 free(names);
                 printf("\n");
+                continue;
+            }
+
+            if (strcmp(line, "/reload") == 0) {
+                cc_runtime_reload_report_t report;
+                cc_result_t rc = reload_runtime_from_path(builder, config, config_path, &report);
+                if (rc.code == CC_OK) {
+                    reload_watcher_note_current(&reload_watcher);
+                    printf("[reload] 已重新读取 config.json，后续 run 会使用可用的新快照\n\n");
+                    print_runtime_diagnostics("[reload] 部分外部工具不可用:", &report.diagnostics);
+                } else {
+                    printf("[reload] 失败: %s\n\n", rc.message ? rc.message : "unknown");
+                    cc_result_free(&rc);
+                }
+                continue;
+            }
+
+            if (strcmp(line, "/agents") == 0) {
+                char **ids = NULL;
+                size_t count = 0;
+                cc_result_t rc = manager ?
+                    cc_agent_manager_list_agents(manager, &ids, &count) :
+                    cc_result_error(CC_ERR_PLATFORM, "Agent manager is disabled");
+                if (rc.code != CC_OK) {
+                    printf("[agents] %s\n\n", rc.message ? rc.message : "unavailable");
+                    cc_result_free(&rc);
+                } else {
+                    const char *current = cc_agent_manager_current_agent(manager);
+                    printf("\nAgents (%zu):\n", count);
+                    for (size_t i = 0; i < count; i++) {
+                        printf("  %s %s\n",
+                            current && strcmp(current, ids[i]) == 0 ? "*" : "-",
+                            ids[i]);
+                        free(ids[i]);
+                    }
+                    free(ids);
+                    printf("\n");
+                }
+                continue;
+            }
+
+            if (strncmp(line, "/agent ", 7) == 0) {
+                const char *agent_id = line + 7;
+                cc_result_t rc = manager ?
+                    cc_agent_manager_set_current_agent(manager, agent_id) :
+                    cc_result_error(CC_ERR_PLATFORM, "Agent manager is disabled");
+                if (rc.code == CC_OK) {
+                    printf("[agent] 当前 Agent: %s\n\n", agent_id);
+                } else {
+                    printf("[agent] 切换失败: %s\n\n", rc.message ? rc.message : "unknown");
+                    cc_result_free(&rc);
+                }
+                continue;
+            }
+
+            if (strcmp(line, "/skills") == 0) {
+                print_configured_skills(config);
+                continue;
+            }
+
+            if (strcmp(line, "/mcp") == 0) {
+                print_configured_mcp(config);
+                continue;
+            }
+
+            if (strcmp(line, "/interrupt") == 0) {
+                cc_result_t rc = manager ?
+                    cc_agent_manager_interrupt(manager, NULL, g_session_id) :
+                    cc_result_error(CC_ERR_PLATFORM, "Agent manager is disabled");
+                if (rc.code == CC_OK) {
+                    printf("[interrupt] 当前 session 已标记中断\n\n");
+                } else {
+                    printf("[interrupt] 失败: %s\n\n", rc.message ? rc.message : "unknown");
+                    cc_result_free(&rc);
+                }
                 continue;
             }
 
@@ -828,7 +1103,7 @@ static void run_chat_loop(cc_agent_runtime_t *runtime)
             }
 
             printf("未知命令: %s\n", line);
-            printf("可用命令: /exit /quit /tools /thinking on|off /stream on|off /debug on|off /help\n\n");
+            printf("可用命令: /exit /quit /tools /reload /agents /agent <id> /skills /mcp /interrupt /thinking on|off /stream on|off /debug on|off /help\n\n");
             continue;
         }
 
@@ -839,8 +1114,9 @@ static void run_chat_loop(cc_agent_runtime_t *runtime)
             rc = cc_agent_runtime_handle_message_stream(
                 runtime, g_session_id, line, &response);
         } else {
-            rc = cc_agent_runtime_handle_message(
-                runtime, g_session_id, line, &response);
+            rc = manager ?
+                cc_agent_manager_handle_message(manager, NULL, g_session_id, line, &response) :
+                cc_agent_runtime_handle_message(runtime, g_session_id, line, &response);
         }
 
         if (rc.code != CC_OK) {
@@ -868,11 +1144,16 @@ static void run_chat_loop(cc_agent_runtime_t *runtime)
  * @param runtime  已完成装配的 Agent Runtime 实例
  * @param query    用户输入的查询字符串
  */
-static void run_single_ask(cc_agent_runtime_t *runtime, const char *query)
+static void run_single_ask(
+    cc_agent_runtime_t *runtime,
+    cc_agent_manager_t *manager,
+    const char *query
+)
 {
     char *response = NULL;
-    cc_result_t rc = cc_agent_runtime_handle_message(
-        runtime, g_session_id, query, &response);
+    cc_result_t rc = manager ?
+        cc_agent_manager_handle_message(manager, NULL, g_session_id, query, &response) :
+        cc_agent_runtime_handle_message(runtime, g_session_id, query, &response);
 
     if (rc.code != CC_OK) {
         fprintf(stderr, "Error: %s\n", rc.message ? rc.message : "Unknown error");
@@ -896,12 +1177,22 @@ static void run_single_ask(cc_agent_runtime_t *runtime, const char *query)
  *
  * @param argc     命令行参数个数（透传自 main）
  * @param argv     命令行参数数组（透传自 main）
- * @param runtime  已完成依赖装配的 Agent Runtime 实例指针
- * @param config   系统配置实例
+ * @param builder     已完成依赖装配的组合根，`/reload` 通过它发布新 generation。
+ * @param config      当前系统配置；reload 成功后会原地替换为新配置对象。
+ * @param config_path 配置文件路径；reload 失败时旧 config 和旧 generation 都保留。
  * @return         退出码，0 表示正常退出，1 表示用法错误
  */
-int cc_cli_gateway_run(int argc, char **argv, cc_agent_runtime_t *runtime, cc_config_t *config)
+int cc_cli_gateway_run(
+    int argc,
+    char **argv,
+    cc_runtime_builder_t *builder,
+    cc_config_t *config,
+    const char *config_path
+)
 {
+    cc_agent_runtime_t *runtime = cc_runtime_builder_runtime(builder);
+    cc_agent_manager_t *manager = cc_runtime_builder_agent_manager(builder);
+
     if (argc >= 2 &&
         (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0 ||
          strcmp(argv[1], "help") == 0)) {
@@ -914,6 +1205,9 @@ int cc_cli_gateway_run(int argc, char **argv, cc_agent_runtime_t *runtime, cc_co
     if (config && config->debug_mode) {
         setenv("CCLAW_DEBUG", "1", 1);
     }
+    print_runtime_diagnostics(
+        "[startup] 部分外部工具不可用:",
+        cc_runtime_builder_diagnostics(builder));
 
     g_session_id = generate_session_id();
 
@@ -921,7 +1215,7 @@ int cc_cli_gateway_run(int argc, char **argv, cc_agent_runtime_t *runtime, cc_co
 
     if (argc >= 2 && strcmp(argv[1], "ask") == 0) {
         if (argc >= 3) {
-            run_single_ask(runtime, argv[2]);
+            run_single_ask(runtime, manager, argv[2]);
         } else {
             fprintf(stderr, "Usage: c-claw ask \"your question\"\n");
             free(g_session_id);
@@ -929,7 +1223,7 @@ int cc_cli_gateway_run(int argc, char **argv, cc_agent_runtime_t *runtime, cc_co
             return 1;
         }
     } else {
-        run_chat_loop(runtime);
+        run_chat_loop(builder, runtime, manager, config, config_path);
     }
 
     free(g_session_id);

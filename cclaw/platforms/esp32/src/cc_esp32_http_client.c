@@ -10,6 +10,7 @@
 
 #ifdef ESP_PLATFORM
 #include "cc/ports/cc_http_client.h"
+#include "cc/app/cc_cancel_token.h"
 #include "cc/util/cc_memory.h"
 
 #include "esp_crt_bundle.h"
@@ -28,6 +29,7 @@ typedef struct cc_esp32_http_ctx {
     cc_http_body_callback_fn on_body;
     void *user_data;
     size_t max_response_bytes;
+    cc_cancel_token_t *cancel_token;
     cc_result_t callback_error;
 } cc_esp32_http_ctx_t;
 
@@ -64,6 +66,32 @@ static int response_append(
     return 1;
 }
 
+static cc_result_t response_header_append(
+    cc_http_response_t *response,
+    const char *name,
+    const char *value
+)
+{
+    if (!response || !name || !value) return cc_result_ok();
+    cc_http_header_t *next = realloc(
+        response->headers,
+        (response->header_count + 1) * sizeof(*response->headers));
+    if (!next) {
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to grow HTTP response headers");
+    }
+    response->headers = next;
+    response->headers[response->header_count].name = cc_strdup(name);
+    response->headers[response->header_count].value = cc_strdup(value);
+    if (!response->headers[response->header_count].name ||
+        !response->headers[response->header_count].value) {
+        free((char *)response->headers[response->header_count].name);
+        free((char *)response->headers[response->header_count].value);
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to copy HTTP response header");
+    }
+    response->header_count++;
+    return cc_result_ok();
+}
+
 /**
  * http_event_handler — 处理 ESP-IDF HTTP client 事件，把响应片段追加到请求上下文。
  *
@@ -77,12 +105,25 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     cc_esp32_http_ctx_t *ctx = (cc_esp32_http_ctx_t *)evt->user_data;
     if (!ctx) return ESP_OK;
 
+    if (evt->event_id == HTTP_EVENT_ON_HEADER) {
+        if (cc_cancel_token_is_cancelled(ctx->cancel_token)) {
+            ctx->callback_error = cc_result_error(CC_ERR_CANCELLED, "HTTP request cancelled");
+            return ESP_FAIL;
+        }
+        ctx->callback_error = response_header_append(ctx->response, evt->header_key, evt->header_value);
+        return ctx->callback_error.code == CC_OK ? ESP_OK : ESP_FAIL;
+    }
+
     if (evt->event_id != HTTP_EVENT_ON_DATA || !evt->data || evt->data_len <= 0) {
         return ESP_OK;
     }
 
     const char *data = (const char *)evt->data;
     size_t len = (size_t)evt->data_len;
+    if (cc_cancel_token_is_cancelled(ctx->cancel_token)) {
+        ctx->callback_error = cc_result_error(CC_ERR_CANCELLED, "HTTP request cancelled");
+        return ESP_FAIL;
+    }
 
     if (ctx->on_body) {
         ctx->callback_error = ctx->on_body(data, len, ctx->user_data);
@@ -125,6 +166,11 @@ cc_result_t cc_http_client_perform(
     ctx.on_body = request->on_body;
     ctx.user_data = request->user_data;
     ctx.max_response_bytes = request->max_response_bytes;
+    ctx.cancel_token = request->cancel_token;
+
+    if (cc_cancel_token_is_cancelled(request->cancel_token)) {
+        return cc_result_error(CC_ERR_CANCELLED, "HTTP request cancelled before start");
+    }
 
     esp_http_client_config_t config = {
         .url = request->url,
@@ -194,6 +240,11 @@ cc_result_t cc_http_client_perform(
 void cc_http_response_free(cc_http_response_t *response)
 {
     if (!response) return;
+    for (size_t i = 0; i < response->header_count; i++) {
+        free((char *)response->headers[i].name);
+        free((char *)response->headers[i].value);
+    }
+    free(response->headers);
     free(response->body);
     memset(response, 0, sizeof(*response));
 }

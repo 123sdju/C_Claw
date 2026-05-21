@@ -10,9 +10,13 @@
 #include "cc/app/cc_app_features.h"
 #include "cc/ports/cc_memory_tool_factory.h"
 #include "cc/ports/cc_storage_factory.h"
+#include "cc/util/cc_json.h"
 
 #if CC_TOOL_PLUGIN
 #include "cc/plugin/cc_plugin_manager.h"
+#endif
+#if CC_ENABLE_MCP && (CC_ENABLE_MCP_STDIO || CC_ENABLE_MCP_HTTP)
+#include "cc/mcp/cc_mcp_manager.h"
 #endif
 
 #include <stdio.h>
@@ -332,60 +336,29 @@ static cc_result_t create_memory_tool(const cc_runtime_tool_factory_ctx_t *ctx, 
 
 #if CC_TOOL_PLUGIN
 /**
- * read_file_content — 执行文件系统操作，并把平台错误转换为统一结果。
- *
- * @param path 借用的只读字符串；函数不会释放该指针。
- * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
- */
-static char *read_file_content(const char *path)
-{
-    if (!path || !path[0]) return NULL;
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len <= 0) {
-        fclose(f);
-        return NULL;
-    }
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) {
-        fclose(f);
-        return NULL;
-    }
-    size_t n = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[n] = '\0';
-    return buf;
-}
-
-/**
- * load_plugins — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * load_plugins — 创建 plugin manager，并把单个插件启动失败记录为 diagnostics。
  *
  * @param config 只读配置对象；函数读取字段但不保存 config 指针。
  * @param registry 借用的对象；函数不释放该对象本身。
- * @param out_state 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * @param out_state 输出 manager；builder 后续通过 destroy_plugins 释放。
+ * @param diagnostics 非致命外部工具诊断列表；失败插件不会进入 registry。
+ * @return 只有 manager 创建等基础错误会返回失败；单个插件失败仍返回 CC_OK。
  */
 static cc_result_t load_plugins(
     const cc_config_t *config,
     cc_tool_registry_t *registry,
-    void **out_state
+    void **out_state,
+    cc_runtime_diagnostics_t *diagnostics
 )
 {
     *out_state = NULL;
     cc_plugin_manager_t *manager = NULL;
     cc_result_t rc = cc_plugin_manager_create(&manager);
     if (rc.code != CC_OK) return rc;
-    char *plugins_json = read_file_content(config ? config->plugin_config_path : NULL);
-    if (plugins_json) {
-        rc = cc_plugin_manager_load_plugins(manager, plugins_json, registry);
-        free(plugins_json);
-        if (rc.code != CC_OK) {
-            cc_plugin_manager_destroy(manager);
-            return rc;
-        }
+    rc = cc_plugin_manager_load_config(manager, config, registry, diagnostics);
+    if (rc.code != CC_OK) {
+        cc_plugin_manager_destroy(manager);
+        return rc;
     }
     *out_state = manager;
     return cc_result_ok();
@@ -400,6 +373,40 @@ static cc_result_t load_plugins(
 static void destroy_plugins(void *state)
 {
     cc_plugin_manager_destroy((cc_plugin_manager_t *)state);
+}
+#endif
+
+#if CC_ENABLE_MCP && (CC_ENABLE_MCP_STDIO || CC_ENABLE_MCP_HTTP)
+/**
+ * load_mcp — 创建 MCP app transport manager，并把 server 初始化/listTools 失败写入 diagnostics。
+ *
+ * core MCP runtime manager 负责协议状态机和 tool bridge；这里仅提供 POSIX
+ * stdio/HTTP/SSE/streamable HTTP transport factory。单个 server 不可用不会
+ * 阻止其它 server 或内置工具注册。
+ */
+static cc_result_t load_mcp(
+    const cc_config_t *config,
+    cc_tool_registry_t *registry,
+    void **out_state,
+    cc_runtime_diagnostics_t *diagnostics
+)
+{
+    *out_state = NULL;
+    cc_mcp_manager_t *manager = NULL;
+    cc_result_t rc = cc_mcp_manager_create(&manager);
+    if (rc.code != CC_OK) return rc;
+    rc = cc_mcp_manager_load_tools(manager, config, registry, diagnostics);
+    if (rc.code != CC_OK) {
+        cc_mcp_manager_destroy(manager);
+        return rc;
+    }
+    *out_state = manager;
+    return cc_result_ok();
+}
+
+static void destroy_mcp(void *state)
+{
+    cc_mcp_manager_destroy((cc_mcp_manager_t *)state);
 }
 #endif
 
@@ -457,6 +464,10 @@ static const cc_runtime_feature_set_t feature_set = {
 #if CC_TOOL_PLUGIN
     .load_plugins = load_plugins,
     .destroy_plugins = destroy_plugins,
+#endif
+#if CC_ENABLE_MCP && (CC_ENABLE_MCP_STDIO || CC_ENABLE_MCP_HTTP)
+    .load_mcp = load_mcp,
+    .destroy_mcp = destroy_mcp,
 #endif
 };
 

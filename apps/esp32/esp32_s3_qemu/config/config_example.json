@@ -1,11 +1,11 @@
 {
   "model": {
-    "provider": "openai",
-    "model": "gpt-4o-mini",
-    "base_url": "https://api.openai.com",
+    "provider": "none",
+    "model": "",
+    "base_url": "",
     "api_key": "",
-    "max_tokens": 4096,
-    "temperature": 0.7,
+    "max_tokens": 1024,
+    "temperature": 0.2,
     "thinking_mode": 0,
     "stream_mode": 0
   },
@@ -17,15 +17,64 @@
   "workspace": {
     "path": "/sdcard/cclaw/workspace"
   },
-  "memory": {
-    "backend": "json_file",
-    "path": "/sdcard/cclaw/data/memory.json"
+  "agents": {
+    "defaults": {
+      "id": "device",
+      "workspace": "/sdcard/cclaw/workspace",
+      "agentDir": "/sdcard/cclaw/agents/device",
+      "systemPromptFile": "/sdcard/cclaw/soul.md",
+      "skills": ["device"]
+    },
+    "list": []
   },
-  "system": {
-    "summary_max_tokens": 1024,
-    "summary_temperature": 0.3
+  "queue": {
+    "lanes": {
+      "main": 1,
+      "subagent": 1,
+      "plugin": 0,
+      "mcp": 0
+    },
+    "perSessionConcurrency": 1,
+    "mode": "steer",
+    "debounceMs": 500,
+    "maxPendingPerSession": 4
   },
   "tools": {
-    "enabled": ["read", "write", "memory", "gpio"]
+    "enabled": ["read", "write", "memory", "gpio"],
+    "defaultTimeoutMs": 10000
+  },
+  "plugins": {
+    "hotReload": false,
+    "reloadDebounceMs": 0,
+    "entries": {}
+  },
+  "skills": {
+    "load": {
+      "watch": false,
+      "watchDebounceMs": 0,
+      "extraDirs": ["/sdcard/cclaw/skills"]
+    }
+  },
+  "mcp": {
+    "enabled": false,
+    "sessionIdleTtlMs": 0,
+    "servers": {}
+  },
+  "sandbox": {
+    "type": "none"
+  },
+  "memory": {
+    "backend": "json_file",
+    "path": "/sdcard/cclaw/data/memory.json",
+    "active": {
+      "enabled": false,
+      "writeSummary": false,
+      "maxValueChars": 512,
+      "category": "active_summary"
+    }
+  },
+  "system": {
+    "summary_max_tokens": 256,
+    "summary_temperature": 0.2
   }
 }

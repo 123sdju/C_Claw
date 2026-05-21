@@ -37,6 +37,7 @@
 #ifndef CC_PLUGIN_PROCESS_H
 #define CC_PLUGIN_PROCESS_H
 
+#include "cc/app/cc_cancel_token.h"
 #include "cc/core/cc_result.h"
 
 /* opaque pointer — 实现细节隐藏在 .c 文件中 */
@@ -56,6 +57,21 @@ typedef struct cc_plugin_process cc_plugin_process_t;
 cc_result_t cc_plugin_process_start(
     const char *command,
     char *const argv[],
+    cc_plugin_process_t **out_process
+);
+
+/**
+ * 启动插件子进程并配置运行时策略。
+ *
+ * restart_on_crash 非 0 时，如果一次 JSON-RPC 调用遇到管道写入、读取或超时
+ * 失败，进程层会销毁当前 worker、按原始 argv 重启并重试当前请求一次。
+ * timeout_ms 直接传给平台 pipe read timeout，用于限制单次工具调用等待时间。
+ */
+cc_result_t cc_plugin_process_start_with_options(
+    const char *command,
+    char *const argv[],
+    int restart_on_crash,
+    int timeout_ms,
     cc_plugin_process_t **out_process
 );
 
@@ -103,6 +119,21 @@ cc_result_t cc_plugin_process_receive(
 cc_result_t cc_plugin_process_call(
     cc_plugin_process_t *process,
     const char *request_json,
+    char **out_json
+);
+
+/**
+ * 原子执行一次 JSON-RPC 请求，并把 timeout/cancel 传到底层 pipe 读取。
+ *
+ * timeout_ms <= 0 时使用插件启动配置里的默认 timeout。cancel_token 为借用
+ * 指针，函数只查询状态；取消后返回 CC_ERR_CANCELLED，不会把它伪装成普通
+ * 插件错误。
+ */
+cc_result_t cc_plugin_process_call_with_options(
+    cc_plugin_process_t *process,
+    const char *request_json,
+    int timeout_ms,
+    cc_cancel_token_t *cancel_token,
     char **out_json
 );
 

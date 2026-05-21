@@ -109,7 +109,7 @@ user input
 
 ## 6. 设备 Profile
 
-迁移到不同设备时，不应直接改 app/core，而应调整 CMake profile 和 adapter。
+适配不同设备时，不应直接改 app/core，而应调整 CMake profile 和 adapter。
 
 当前 CMake 入口：
 
@@ -212,7 +212,7 @@ main process
 - 不适合 ESP32 这类无进程模型设备。
 - 插件不自动继承主进程 sandbox，需要用户自己管理隔离。
 
-## 10. 新设备迁移步骤
+## 10. 新设备适配步骤
 
 1. 在 `cclaw/platforms/<device>` 添加平台实现：filesystem、path、thread，必要时 process/http client。
 2. 为该平台添加独立 `CMakeLists.txt`，封装源码、SDK 依赖和编译定义。

@@ -15,7 +15,7 @@
  *   Ports 层是连接 Core 层与 Platform 层的桥梁，提供横切关注点
  *   （如日志、加密、网络）的抽象接口。本模块为各业务模块提供
  *   统一的日志输出能力，所有模块通过 cc_logger_t 接口输出运行信息，
- *   无需关心底层输出目标（当前为 stderr，未来可扩展为文件/syslog/网络）。
+ *   无需关心底层输出目标；当前同步写入 stderr。
  *
  * 核心设计：
  *   - 日志级别过滤：支持 TRACE/DEBUG/INFO/WARN/ERROR/FATAL 六个级别，
@@ -204,8 +204,8 @@ void cc_logger_log(cc_logger_t *logger, cc_log_level_t level, const char *fmt, .
      *
      * 性能考虑：
      *   fprintf + fflush 在锁内执行，对于高频日志场景可能有性能影响。
-     *   但这是调试/诊断工具，而非高性能数据管道，可读性和正确性优先于性能。
-     *   未来可考虑无锁环形缓冲区 + 独立日志线程的异步方案。
+     *   但这是调试/诊断工具，而非高性能数据管道；当前实现选择同步写入，
+     *   让崩溃前的最后几条日志更容易落盘，也让多线程输出顺序更直观。
      */
     cc_mutex_lock(logger->mutex);
 

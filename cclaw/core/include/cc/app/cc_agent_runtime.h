@@ -57,6 +57,7 @@
 #include "cc/ports/cc_logger.h"
 #include "cc/ports/cc_thread.h"
 #include "cc/core/cc_stream_chunk.h"
+#include "cc/app/cc_cancel_token.h"
 
 /**
  * cc_agent_runtime_config_t — Agent 运行时行为配置
@@ -89,6 +90,10 @@ typedef struct cc_agent_runtime_config {
                           *   默认值：1024 */
     double summary_temperature; /**< 上下文摘要压缩请求温度。
                           *   默认值：0.3 */
+    int active_memory_enabled; /**< run 后主动写入长期记忆摘要；编译期由 CC_ENABLE_ACTIVE_MEMORY 裁剪。 */
+    int active_memory_write_summary; /**< 当前策略：非 0 时写入 user/assistant 摘要。 */
+    int active_memory_max_value_chars; /**< 单条写入最大字符数，避免嵌入式存储被长文本撑爆。 */
+    char *active_memory_category; /**< active memory 分类名，runtime 深拷贝并在 destroy 时释放。 */
 } cc_agent_runtime_config_t;
 
 /**
@@ -124,6 +129,8 @@ typedef struct cc_agent_runtime_deps {
     cc_logger_t *logger;
     /** 可选长期记忆存储；为 NULL 时上下文构建不注入记忆。 */
     cc_memory_store_t *memory_store;
+    /** 可选工具并发池；为 NULL 时工具调用保持原有同步直通语义。 */
+    cc_tool_executor_pool_t *tool_pool;
     /** 可选人工审批回调；policy 返回需审批时由 tool executor 调用。 */
     cc_tool_approval_fn approve_tool_call;
     /** 传给 approve_tool_call 的调用方上下文，runtime 只保存借用值。 */
@@ -143,6 +150,10 @@ typedef struct cc_agent_runtime_options {
     /** 初始思考流展示开关；运行后可通过 setter 线程安全修改。 */
     int thinking_mode;
 } cc_agent_runtime_options_t;
+
+typedef struct cc_agent_runtime_run_options {
+    cc_cancel_token_t *cancel_token;
+} cc_agent_runtime_run_options_t;
 
 /**
  * cc_agent_runtime_create — 创建 Agent 运行时实例
@@ -278,6 +289,14 @@ cc_result_t cc_agent_runtime_handle_message(
     char **out_response
 );
 
+cc_result_t cc_agent_runtime_handle_message_with_options(
+    cc_agent_runtime_t *runtime,
+    const char *session_id,
+    const char *user_input,
+    const cc_agent_runtime_run_options_t *options,
+    char **out_response
+);
+
 /**
  * cc_agent_runtime_handle_message_stream — 流式处理用户消息
  *
@@ -306,6 +325,14 @@ cc_result_t cc_agent_runtime_handle_message_stream(
     cc_agent_runtime_t *runtime,
     const char *session_id,
     const char *user_input,
+    char **out_response
+);
+
+cc_result_t cc_agent_runtime_handle_message_stream_with_options(
+    cc_agent_runtime_t *runtime,
+    const char *session_id,
+    const char *user_input,
+    const cc_agent_runtime_run_options_t *options,
     char **out_response
 );
 

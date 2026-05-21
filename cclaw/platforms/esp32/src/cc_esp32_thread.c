@@ -155,6 +155,48 @@ void cc_mutex_unlock(cc_mutex_t mutex)
 {
     if (mutex) xSemaphoreGive((SemaphoreHandle_t)mutex);
 }
+
+cc_result_t cc_cond_create(cc_cond_t *out_cond)
+{
+    if (!out_cond) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid condition output");
+    SemaphoreHandle_t cond = xSemaphoreCreateBinary();
+    if (!cond) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create condition semaphore");
+    *out_cond = cond;
+    return cc_result_ok();
+}
+
+void cc_cond_destroy(cc_cond_t cond)
+{
+    if (cond) vSemaphoreDelete((SemaphoreHandle_t)cond);
+}
+
+void cc_cond_wait(cc_cond_t cond, cc_mutex_t mutex)
+{
+    if (!cond || !mutex) return;
+    xSemaphoreGive((SemaphoreHandle_t)mutex);
+    xSemaphoreTake((SemaphoreHandle_t)cond, portMAX_DELAY);
+    xSemaphoreTake((SemaphoreHandle_t)mutex, portMAX_DELAY);
+}
+
+int cc_cond_timedwait(cc_cond_t cond, cc_mutex_t mutex, int timeout_ms)
+{
+    if (!cond || !mutex) return 0;
+    TickType_t ticks = timeout_ms > 0 ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY;
+    xSemaphoreGive((SemaphoreHandle_t)mutex);
+    BaseType_t ok = xSemaphoreTake((SemaphoreHandle_t)cond, ticks);
+    xSemaphoreTake((SemaphoreHandle_t)mutex, portMAX_DELAY);
+    return ok == pdTRUE ? 1 : 0;
+}
+
+void cc_cond_signal(cc_cond_t cond)
+{
+    if (cond) xSemaphoreGive((SemaphoreHandle_t)cond);
+}
+
+void cc_cond_broadcast(cc_cond_t cond)
+{
+    if (cond) xSemaphoreGive((SemaphoreHandle_t)cond);
+}
 #else
 #error "cc_esp32_thread.c must be built under ESP-IDF"
 #endif

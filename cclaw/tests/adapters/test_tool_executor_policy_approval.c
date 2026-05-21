@@ -256,6 +256,19 @@ int main(void)
     if (called != 1) failed = 1;
     if (approvals != 2) failed = 1;
     cc_result_free(&rc);
+    clear_tool_result(&result);
+
+    cc_tool_call_t missing_call = {
+        .id = "call_missing",
+        .name = "missing_tool",
+        .arguments_json = "{}"
+    };
+    rc = cc_tool_executor_execute(runtime, "ses_approval", &missing_call, &result);
+    if (rc.code != CC_OK) failed = 1;
+    if (result.ok != 0) failed = 1;
+    if (!result.error || !strstr(result.error, "Tool not found: missing_tool")) failed = 1;
+    if (called != 1) failed = 1;
+    cc_result_free(&rc);
 
     cc_agent_runtime_destroy(runtime);
     clear_tool_result(&result);

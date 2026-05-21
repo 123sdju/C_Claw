@@ -114,7 +114,7 @@ static void save_to_file(cc_json_memory_store_t *s)
  *   1. 打开 JSON 文件，读取全部内容到字符串缓冲区
  *   2. 解析 JSON 顶层数组，遍历每个元素
  *   3. 将每个 JSON 对象转换为 cc_memory_entry_t，填充 entries 数组
- *   4. 创建时间戳为 0 时自动设为当前时间（兼容旧数据格式）
+ *   4. 创建时间戳缺失或为 0 时自动设为当前时间，保证新写回的数据完整
  *
  * 容错机制：
  *   - 文件不存在时直接返回（fopen 失败 → return），不报错

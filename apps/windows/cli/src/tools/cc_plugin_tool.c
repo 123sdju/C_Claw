@@ -27,7 +27,7 @@
  * 设计决策：
  *   - 每个工具独立持有 process 指针（共享、不拥有），进程生命周期由
  *     cc_plugin_manager 管理
- *   - JSON-RPC 是同步阻塞调用，适配当前单线程 Agent 循环
+ *   - JSON-RPC 在单个 worker 内同步阻塞；多 worker 由 tool pool 和插件进程池并发
  *   - 插件进程崩溃时，工具调用返回错误，不会导致主进程崩溃
  *****************************************************************************/
 
@@ -37,12 +37,14 @@
  * 安全注意：
  *   - 插件进程崩溃时，工具调用返回错误，不会导致主进程崩溃
  *   - process 指针由 cc_plugin_manager 统一管理，cc_plugin_tool 不拥有其所有权
- *   - JSON-RPC 是同步阻塞调用，适配当前单线程 Agent 循环
+ *   - JSON-RPC 在单个 worker 内同步阻塞；多 worker 由 tool pool 和插件进程池并发
  */
 
+#include "cc/app/cc_cancel_token.h"
 #include "cc/ports/cc_tool.h"
+#include "cc/ports/cc_thread.h"
+#include "cc/app/cc_plugin_protocol.h"
 #include "cc/plugin/cc_plugin_process.h"
-#include "cc/plugin/cc_jsonrpc_client.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -63,7 +65,21 @@ typedef struct {
     char *tool_description;
     char *tool_schema_json;
     cc_plugin_process_t *process;
+    cc_plugin_process_t **processes;
+    size_t process_count;
+    size_t next_process;
+    cc_mutex_t process_mutex;
 } cc_plugin_tool_t;
+
+cc_result_t cc_plugin_tool_create_pool(
+    const char *plugin_name,
+    const char *tool_name,
+    const char *tool_description,
+    const char *tool_schema_json,
+    cc_plugin_process_t **processes,
+    size_t process_count,
+    cc_tool_t *out_tool
+);
 
 /*
  * plugin_tool_name — vtable 方法：返回工具名称
@@ -111,9 +127,9 @@ static const char *plugin_tool_schema_json(void *self)
 }
 
 /*
- * plugin_tool_call — vtable 方法：通过 JSON-RPC 桥接调用插件工具
+ * plugin_tool_call — vtable 方法：通过 JSON-RPC 转发调用插件工具
  *
- * 功能：这是 vtable 与插件进程之间的 JSON-RPC 桥接层。执行流程：
+ * 功能：这是 vtable 与插件进程之间的 JSON-RPC 适配层。执行流程：
  *   1. 构造 JSON-RPC 请求：cc_jsonrpc_build_request(tool_name, args_json)
  *      - 将工具名称作为 JSON-RPC method 名称
  *      - 将 LLM 传入的 args_json 作为 JSON-RPC params
@@ -127,12 +143,12 @@ static const char *plugin_tool_schema_json(void *self)
  *
  * @param self      工具实例指针
  * @param args_json LLM 传入的 JSON 格式调用参数（可含任意插件定义的结构）
- * @param ctx       工具上下文（当前插件工具未使用此参数）
+ * @param ctx       工具上下文；timeout/cancel 会传到底层 pipe 等待。
  * @param out_result 输出结果结构体：
  *                   - ok=1 表示调用成功，content 为插件返回的 result 字段
  *                   - ok=0 表示通信或执行错误，error 包含错误描述
  *
- * @return cc_result_t 始终返回 OK（插件执行错误通过 out_result->ok=0 表达）
+ * @return 插件业务错误返回 OK 并写入 out_result；取消返回 CC_ERR_CANCELLED。
  *
  * 容错机制：
  *   - 进程通信失败 → out_result->ok=0, error="Plugin communication error"
@@ -144,7 +160,7 @@ static const char *plugin_tool_schema_json(void *self)
  *
  * @param self 插件工具私有状态。
  * @param args_json 借用的工具参数 JSON；NULL 时使用空对象。
- * @param ctx 工具上下文；当前实现不直接使用。
+ * @param ctx 工具上下文；用于传递 timeout_ms 和 cancel_token。
  * @param out_result 输出工具结果；插件错误通过 ok/error 表达。
  * @return CC_OK 表示通信流程已转换成工具结果。
  */
@@ -155,19 +171,39 @@ static cc_result_t plugin_tool_call(
     cc_tool_result_t *out_result
 )
 {
-    (void)ctx;
     cc_plugin_tool_t *tool = (cc_plugin_tool_t *)self;
+    cc_plugin_process_t *process = tool->process;
+    if (tool->process_count > 0 && tool->processes) {
+        cc_mutex_lock(tool->process_mutex);
+        size_t index = tool->next_process++ % tool->process_count;
+        process = tool->processes[index];
+        cc_mutex_unlock(tool->process_mutex);
+    }
 
     memset(out_result, 0, sizeof(cc_tool_result_t));
+    if (ctx && cc_cancel_token_is_cancelled(ctx->cancel_token)) {
+        return cc_result_error(CC_ERR_CANCELLED, "Plugin tool call cancelled before request");
+    }
 
-    char *request_json = cc_jsonrpc_build_request(
+    char *request_json = cc_plugin_protocol_build_request(
         tool->tool_name, args_json ? args_json : "{}");
+    if (!request_json) {
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to build plugin JSON-RPC request");
+    }
 
     char *response_json = NULL;
-    cc_result_t rc = cc_plugin_process_call(tool->process, request_json, &response_json);
+    cc_result_t rc = cc_plugin_process_call_with_options(
+        process,
+        request_json,
+        ctx ? ctx->timeout_ms : 0,
+        ctx ? ctx->cancel_token : NULL,
+        &response_json);
     free(request_json);
 
     if (rc.code != CC_OK) {
+        if (rc.code == CC_ERR_CANCELLED) {
+            return rc;
+        }
         out_result->ok = 0;
         out_result->error = strdup(rc.message ? rc.message : "Plugin communication error");
         cc_result_free(&rc);
@@ -176,7 +212,7 @@ static cc_result_t plugin_tool_call(
 
     char *result_json = NULL;
     char *error_json = NULL;
-    rc = cc_jsonrpc_parse_response(response_json, &result_json, &error_json);
+    rc = cc_plugin_protocol_parse_response(response_json, &result_json, &error_json);
     free(response_json);
 
     if (rc.code != CC_OK) {
@@ -214,6 +250,8 @@ static void plugin_tool_destroy(void *self)
     free(tool->tool_name);
     free(tool->tool_description);
     free(tool->tool_schema_json);
+    free(tool->processes);
+    if (tool->process_mutex) cc_mutex_destroy(tool->process_mutex);
     free(tool);
 }
 
@@ -222,7 +260,7 @@ static void plugin_tool_destroy(void *self)
  *
  * 说明：将 5 个静态函数绑定为 cc_tool_vtable_t 接口的实现。
  *       插件工具的 name/description/schema 均来自插件注册信息，
- *       call 通过 JSON-RPC 桥接同步调用插件进程。
+ *       call 通过 JSON-RPC 同步转发到插件进程。
  */
 static cc_tool_vtable_t plugin_tool_vtable = {
     plugin_tool_name,
@@ -276,6 +314,20 @@ cc_result_t cc_plugin_tool_create_full(
     cc_tool_t *out_tool
 )
 {
+    return cc_plugin_tool_create_pool(plugin_name, tool_name, tool_description,
+        tool_schema_json, process ? &process : NULL, process ? 1 : 0, out_tool);
+}
+
+cc_result_t cc_plugin_tool_create_pool(
+    const char *plugin_name,
+    const char *tool_name,
+    const char *tool_description,
+    const char *tool_schema_json,
+    cc_plugin_process_t **processes,
+    size_t process_count,
+    cc_tool_t *out_tool
+)
+{
     cc_plugin_tool_t *self = calloc(1, sizeof(cc_plugin_tool_t));
     if (!self) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create plugin tool");
 
@@ -283,7 +335,21 @@ cc_result_t cc_plugin_tool_create_full(
     self->tool_name = tool_name ? strdup(tool_name) : strdup("unknown");
     self->tool_description = tool_description ? strdup(tool_description) : strdup("No description");
     self->tool_schema_json = tool_schema_json ? strdup(tool_schema_json) : strdup("{}");
-    self->process = process;
+    if (process_count > 0 && processes) {
+        self->processes = calloc(process_count, sizeof(cc_plugin_process_t *));
+        if (!self->processes) {
+            plugin_tool_destroy(self);
+            return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create plugin worker view");
+        }
+        memcpy(self->processes, processes, process_count * sizeof(cc_plugin_process_t *));
+        self->process_count = process_count;
+        self->process = processes[0];
+    }
+    cc_result_t rc = cc_mutex_create(&self->process_mutex);
+    if (rc.code != CC_OK) {
+        plugin_tool_destroy(self);
+        return rc;
+    }
 
     out_tool->self = self;
     out_tool->vtable = &plugin_tool_vtable;

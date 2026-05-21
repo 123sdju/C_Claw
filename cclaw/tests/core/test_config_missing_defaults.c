@@ -40,7 +40,7 @@ int main(void)
     if (!config.provider || !config.model || !config.storage_type ||
         !config.data_dir || !config.storage_path || !config.workspace_path ||
         !config.sandbox_type || !config.memory_backend ||
-        !config.memory_path || !config.plugin_config_path) {
+        !config.memory_path) {
         cc_config_destroy(&config);
         return 1;
     }
@@ -62,11 +62,11 @@ int main(void)
     }
 
 #if CC_PLATFORM != CC_PLATFORM_ESP32
-    const char legacy_workspace_path[] = "." "/" "workspace";
-    const char legacy_data_dir[] = "." "/" "data";
+    const char root_workspace_path[] = "." "/" "workspace";
+    const char root_data_dir[] = "." "/" "data";
 
-    if (strcmp(config.workspace_path, legacy_workspace_path) == 0 ||
-        strcmp(config.data_dir, legacy_data_dir) == 0 ||
+    if (strcmp(config.workspace_path, root_workspace_path) == 0 ||
+        strcmp(config.data_dir, root_data_dir) == 0 ||
         strstr(config.data_dir, "/runtime/") == NULL) {
         cc_config_destroy(&config);
         return 1;

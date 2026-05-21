@@ -3,8 +3,8 @@
 ## 1. 设计目标
 
 c-claw 是一个纯 C 语言 AI Agent runtime。核心目标是把 Agent 主循环、
-存储、工具、LLM、平台能力拆成稳定边界，使代码可以在桌面、服务器和受限设备
-之间迁移。
+存储、工具、LLM、平台能力拆成稳定边界，使同一套 core 可以在桌面、服务器和
+受限设备之间复用。
 
 主要原则：
 
@@ -88,7 +88,7 @@ flowchart TB
 `cc_runtime_builder`、启动 CLI gateway。LLM、storage、sandbox、内置工具和
 插件工具由 `cc_runtime_feature_set_t` descriptor / factory 路径统一装配。
 `cclaw/core` 只遍历 descriptor，不直接引用 OpenAI/Ollama/Anthropic/tool/plugin 的
-具体工厂。后续新增应用入口时，应复用 c-claw SDK 和 runtime builder，只替换
+具体工厂。新增应用入口时，应复用 c-claw SDK 和 runtime builder，只替换
 gateway、app feature set 和 profile 配置。
 
 ## 3. VTable 多态
@@ -116,7 +116,7 @@ struct cc_tool_vtable {
 ```
 
 调用方只持有 `cc_tool_t`，不知道具体实现是文件工具、Shell 工具、memory 工具还是
-插件桥接工具。
+插件适配工具。
 
 同样模式用于：
 
@@ -153,6 +153,21 @@ flowchart TD
 - 工具结果写入存储，下一轮 LLM 能看到 observation。
 - 流式路径会发布 stream 事件，并在工具调用完成后继续循环。
 - 上下文过长时由 `cc_context_builder` 做 token 截断和可选摘要压缩。
+- 多 agent 入口走 `cc_agent_manager_t` 和 `cc_run_queue_t`。队列是 core SDK
+  的真实 job queue：SDK 负责 `submit/collect/interrupt`、同 session 串行、
+  lane 并发和 cancel token 传播；POSIX/Windows CLI 只调用这些接口，不再各自
+  实现调度语义。
+- `cc_cancel_token_t` 是协作式取消边界。core 只暴露“是否已取消”的线程安全查询，
+  工具、plugin worker、MCP transport 在自己的安全点释放平台资源。tool pool
+  等待 lane 空位时也会周期性醒来检查 token；plugin pipe 若已写出请求，则在取消
+  读取后复位 worker，避免 JSON-RPC 响应串线。
+- 外部 plugin/MCP/tool adapter 的启动失败是非致命诊断。runtime builder 会继续发布
+  可用工具 generation，把失败条目写入 `cc_runtime_diagnostics_t`，CLI 负责展示；
+  只有 JSON 语法错误、严格配置校验失败、内存分配失败和基础 runtime 组件创建失败
+  会阻止启动或 reload 发布。
+- 缺失工具调用使用宽容工具错误语义：`cc_tool_executor_execute()` 返回 `CC_OK`，
+  但 `cc_tool_result_t.ok=0` 且 `error="Tool not found: <name>"`。Agent 会把错误
+  写回上下文，而不是退出程序。
 
 消息模型已经结构化：`cc_message_t` 将用户可见 `content`、assistant
 `tool_calls_json`、`reasoning_content` 和 tool `tool_call_id` 分字段存储。
@@ -171,6 +186,18 @@ cmake --preset core-minimal
 
 `CC_PROFILE` 负责选择 app/board、目标平台、默认路径和能力集合。
 
+构建目录也按层命名，避免 SDK、桌面 app 和板级工程混在一起：
+
+| Profile | 构建目录 | 产物入口 |
+|---------|----------|----------|
+| `posix-cli` | `build/app/posix/cli` | `bin/c-claw` |
+| `windows-cli` | `build/app/windows/cli` | `bin/c-claw.exe` 或 `bin/c-claw` |
+| `core-minimal` | `build/sdk/core-minimal` | 仅 SDK/测试目标 |
+| ESP32-S3 QEMU | `build/app/esp32/esp32_s3_qemu` | ESP-IDF firmware 和 QEMU 镜像 |
+
+源码目录只表达层次：`cclaw/` 是 SDK，`apps/` 是产品或板级组合；build
+目录用同样的层次镜像这些入口。
+
 核心平台值：
 
 | 平台 | `CC_PLATFORM` | 说明 |
@@ -185,6 +212,18 @@ cmake --preset core-minimal
 |------------|--------|------|
 | `CC_ENABLE_SHELL` | `CC_TOOL_SHELL_RUN`, `CC_SANDBOX_LOCAL` | Shell 工具和 local sandbox |
 | `CC_ENABLE_PLUGIN` | `CC_TOOL_PLUGIN` | 外部进程插件系统 |
+| `CC_ENABLE_MULTI_AGENT` | `CC_ENABLE_MULTI_AGENT` | 多 agent manager、agent/session key 入口 |
+| `CC_ENABLE_RUN_QUEUE` | `CC_ENABLE_RUN_QUEUE` | run queue、同 session 串行、跨 lane 并发 |
+| `CC_ENABLE_TOOL_POOL` | `CC_ENABLE_TOOL_POOL` | tool executor pool、lane timeout、in-flight 计数 |
+| `CC_ENABLE_SKILLS` | `CC_ENABLE_SKILLS` | AgentSkills 风格 skill catalog |
+| `CC_ENABLE_SKILL_WATCHER` | `CC_ENABLE_SKILL_WATCHER` | app 层 skill/config polling watcher |
+| `CC_ENABLE_PLUGIN_HOT_RELOAD` | `CC_ENABLE_PLUGIN_HOT_RELOAD` | plugin reload generation swap/rollback |
+| `CC_ENABLE_PLUGIN_WORKERS` | `CC_ENABLE_PLUGIN_WORKERS` | plugin worker pool 和 per-plugin 并发 |
+| `CC_ENABLE_MCP` | `CC_ENABLE_MCP` | MCP protocol/runtime cache/tool bridge |
+| `CC_ENABLE_MCP_STDIO` | `CC_ENABLE_MCP_STDIO` | 桌面 app stdio MCP transport |
+| `CC_ENABLE_MCP_HTTP` | `CC_ENABLE_MCP_HTTP` | HTTP/SSE/streamable HTTP MCP transport |
+| `CC_ENABLE_SUBAGENTS` | `CC_ENABLE_SUBAGENTS` | subagent service 接入点 |
+| `CC_ENABLE_ACTIVE_MEMORY` | `CC_ENABLE_ACTIVE_MEMORY` | active memory hook，run 后写入摘要或事实 |
 | `CC_ENABLE_SQLITE` | `CC_STORAGE_SQLITE` | SQLite 会话存储和记忆后端 |
 | `CC_ENABLE_OPENAI` | `CC_LLM_OPENAI` | OpenAI 兼容 provider |
 | `CC_ENABLE_OLLAMA` | `CC_LLM_OLLAMA` | Ollama provider |
@@ -241,12 +280,16 @@ HTTP client。
 | Shell | `CC_TOOL_SHELL_RUN` | `shell_run` |
 | 长期记忆 | `CC_HAS_MEMORY` | `memory` |
 | HTTP 请求 | `CC_TOOL_HTTP_REQUEST` | `http.request` |
-| 插件工具 | `CC_TOOL_PLUGIN` | 由 `plugins.json` 决定 |
+| 插件工具 | `CC_TOOL_PLUGIN` | 由 `config.json.plugins.entries` 决定 |
 | Hardware IO | app feature set | 例如 ESP32-S3 QEMU 的 `gpio` |
 
 工具实现按依赖边界分层：通用工具在 `cclaw/adapters/src/tools/common`，桌面应用工具在
 `apps/<platform>/cli/src/tools`，硬件工具在 `apps/<mcu>/<board>/main/tools`。
 `cclaw/platforms/*` 只提供 port 适配，不拥有 agent tool。
+
+工具执行前统一进入 core SDK 的 `cc_tool_executor_pool_t`。pool 只负责 lane
+并发、timeout 策略和 in-flight 计数；具体工具如何取消或释放进程/HTTP 连接，
+由工具实现根据 `cc_tool_context_t.cancel_token` 和 `timeout_ms` 决定。
 
 运行时 `tools.enabled` 可以进一步过滤内置工具。常用别名：
 
@@ -265,7 +308,7 @@ flowchart LR
     CONFIG["应用插件配置"] --> MGR["cc_plugin_manager"]
     MGR --> PROC["cc_plugin_process"]
     PROC --> CHILD["外部进程"]
-    TOOL["cc_plugin_tool"] --> RPC["cc_jsonrpc_client"]
+    TOOL["cc_plugin_tool"] --> RPC["cc_plugin_protocol"]
     RPC --> PROC
 ```
 
@@ -274,10 +317,41 @@ flowchart LR
 - 每行一个 JSON-RPC 2.0 请求或响应。
 - 主进程写 stdin，插件写 stdout。
 - 插件 stderr 不作为协议通道。
+- JSON-RPC envelope 编解码在 core SDK 的 `cc_plugin_protocol` 中，避免
+  POSIX/Windows 各自维护协议细节。
+- 外部进程、worker restart、管道 timeout 和 stderr 捕获仍属于 POSIX/Windows
+  app 层，因为它们依赖平台进程模型。
 
-插件的解释器和运行环境由 app 私有 `plugins.json` 的 `command` 和 `args` 决定，例如
+插件的解释器和运行环境由 app 私有 `config.json.plugins.entries` 的 `command` 和 `args` 决定，例如
 `python3 apps/posix/cli/plugins/weather_tool.py`。插件不共享主进程 sandbox，需要依赖操作系统权限
 和用户自己的隔离策略。
+
+## 8.1 SDK 与 App 边界
+
+主线边界按“语义进 SDK，平台细节留 app/platform”划分：
+
+| 能力 | 所属层 | 原因 |
+|------|--------|------|
+| run queue、worker/job 状态、lane 并发、session 串行 | core SDK | 只依赖 `cc_thread`/`cc_mutex`/`cc_cond` |
+| cancel token | core SDK | interrupt、timeout、shutdown 需要统一语义 |
+| tool pool、tool snapshot generation | core SDK | 所有工具共享的生命周期和并发规则 |
+| skill catalog 解析、allowlist、prompt snapshot | core SDK | 与文件监听无关，可被 ESP 复用 |
+| plugin JSON-RPC envelope | core SDK | 协议稳定且不依赖进程 |
+| MCP protocol/runtime cache/tool bridge | core SDK | transport 可替换，session/TTL/JSON-RPC id 匹配语义应统一 |
+| SSE parser | core SDK | 纯文本增量解析，不依赖 curl/ESP/Win32，可复用到 HTTP MCP transport |
+| plugin process、stdio pipe、worker restart | POSIX/Windows app | 依赖平台进程和管道 |
+| MCP stdio/HTTP/SSE/streamable HTTP transport | POSIX/Windows app 或 adapters | 依赖具体 IO/HTTP 能力 |
+| CLI 命令、config polling watcher | app | 只属于交互入口 |
+| shell/local/Docker sandbox | app/platform | 依赖操作系统执行环境 |
+
+MCP 当前实现为 client/tool bridge。`cc_mcp_runtime_manager_t` 位于 core SDK，
+负责 MCP `initialize`、`tools/list`、`tools/call`、runtime TTL、session reset
+和 `mcp.<server>.<tool>` 工具注册。app 层通过 `cc_mcp_transport_t` vtable 提供
+具体连接：stdio transport 是串行的；HTTP transport 标记为可并发，并支持普通
+JSON response、SSE response 和 streamable HTTP。streamable HTTP 使用同一个
+HTTP POST 入口，发送 `Accept: application/json, text/event-stream`，再根据
+`Content-Type` 选择 JSON 或 SDK SSE parser；`Mcp-Session-Id` 属于 transport
+私有状态，reset/dispose 时清空。
 
 ## 9. 平台层
 
@@ -299,7 +373,8 @@ cclaw/platforms/
 ```
 
 当前 `cc_filesystem_get_default()` 返回当前平台默认文件系统实现；
-`cc_filesystem_get_posix()` 保留为兼容旧调用点的别名。
+`cc_filesystem_get_posix()` 是 POSIX 平台显式入口，方便平台专用代码表达依赖。
+跨平台代码应优先使用 `cc_filesystem_get_default()`。
 
 新增设备时优先新增平台端口 adapter 和 app feature set，而不是让 `cclaw/core`
 直接包含设备 SDK 头文件。
@@ -348,7 +423,8 @@ CLI gateway 用这些事件渲染流式输出。
 - 只启用 Ollama 时默认 provider 是 `ollama`。
 - 禁用 SQLite 时默认 storage 是 `json`。
 - 禁用 memory 时默认 memory backend 是 `noop`。
-- POSIX/Windows CLI 默认数据和工作区在 `build/<profile>/apps/<platform>/cli/runtime/...`。
+- POSIX CLI 默认数据和工作区在 `build/app/posix/cli/runtime/...`。
+- Windows CLI 默认数据和工作区在 `build/app/windows/cli/runtime/...`。
 - ESP32 QEMU 默认数据和工作区在 `/sdcard/cclaw/...`。
 
 详见 [../../apps/posix/cli/docs/config.md](../../apps/posix/cli/docs/config.md)。

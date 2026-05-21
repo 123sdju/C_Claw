@@ -35,7 +35,7 @@ if(CC_NEEDS_HTTP_CLIENT)
     endif()
 endif()
 
-if(CC_ENABLE_SHELL OR CC_ENABLE_PLUGIN OR CC_ENABLE_DOCKER_SANDBOX)
+if(CC_ENABLE_SHELL OR CC_ENABLE_PLUGIN OR CC_ENABLE_DOCKER_SANDBOX OR CC_ENABLE_MCP_STDIO)
     target_sources(c_claw_platform_windows_objects PRIVATE src/cc_windows_process.c)
 endif()
 

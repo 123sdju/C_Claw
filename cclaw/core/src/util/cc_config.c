@@ -26,8 +26,9 @@
  *   - 分层 fallback：JSON 文件读取失败 → 字段缺失（或类型不匹配）→ 硬编码默认值
  *   - 容错优先（fail-safe）：配置文件不存在或损坏时不会报错，静默使用默认配置
  *     这是刻意为之的设计选择，优先保证程序可启动，而非严格校验配置
- *   - 段式解析：将配置分为 model/storage/workspace/sandbox/tools 五个逻辑段，
- *     每段独立解析和 fallback，一个段缺失或损坏不影响其他段
+ *   - 段式解析：将配置分为 model/storage/agents/queue/tools/plugins/skills/
+ *     mcp/memory/sandbox/system/cli 等逻辑段。每段先继承 profile 默认值，
+ *     再用 JSON 中出现的字段覆盖；缺失字段不会破坏其他段。
  *   - 内存管理：所有字符串字段通过 strdup 在堆上分配，
  *     cc_config_destroy 统一释放，确保无内存泄漏
  *   - 字段语义：所有字段均设计为可选，任何字段缺失都不会导致解析失败
@@ -47,17 +48,31 @@
  *       "type":           "sqlite"     // 存储后端类型（sqlite/file/memory）
  *       "path":           profile SQLite path // 数据库文件路径
  *     },
- *     "workspace": {
- *       "path":           profile workspace path // Agent 工作目录（创建临时文件的位置）
+ *     "agents": {
+ *       "defaults": {
+ *         "id": "default",
+ *         "workspace": profile workspace path,
+ *         "agentDir": ".agents/default",
+ *         "systemPromptFile": "soul.md",
+ *         "skills": ["core"]
+ *       },
+ *       "list": []
+ *     },
+ *     "queue": {
+ *       "lanes": { "main": 4, "subagent": 8, "plugin": 4, "mcp": 4 },
+ *       "perSessionConcurrency": 1,
+ *       "mode": "steer"
  *     },
  *     "sandbox": {
  *       "type":                   "local"    // 沙箱类型（local/docker）
  *       "shell_requires_approval": true      // shell 命令是否需要用户确认
  *       "timeout_ms":             30000      // 命令执行超时（毫秒）
  *     },
- *     "tools": {
- *       "enabled": ["read", "write", "shell"] // 启用的工具列表
- *     },
+ *     "tools":   { "enabled": ["read", "write", "shell"] },
+ *     "plugins": { "entries": {} },
+ *     "skills":  { "load": { "extraDirs": [] } },
+ *     "mcp":     { "enabled": false, "servers": {} },
+ *     "memory":  { "backend": "json_file" },
  *     "system": {
  *       "summary_max_tokens": 1024,    // 上下文摘要压缩最大 token 数
  *       "summary_temperature": 0.3     // 上下文摘要压缩生成温度
@@ -121,10 +136,6 @@
 
 #ifndef CC_DEFAULT_MEMORY_PATH
 #define CC_DEFAULT_MEMORY_PATH "runtime/data/memory.json"
-#endif
-
-#ifndef CC_DEFAULT_PLUGIN_CONFIG_PATH
-#define CC_DEFAULT_PLUGIN_CONFIG_PATH ""
 #endif
 
 #ifndef CC_DEFAULT_SOUL_FILE
@@ -238,6 +249,148 @@ static int json_boolish_value(cc_json_value_t *value)
     return cc_json_bool_value(value) || cc_json_int_value(value) != 0;
 }
 
+static void free_string_list(cc_config_string_list_t *list)
+{
+    if (!list) return;
+    for (size_t i = 0; i < list->count; i++) free(list->items[i]);
+    free(list->items);
+    memset(list, 0, sizeof(*list));
+}
+
+static int append_string_to_list(cc_config_string_list_t *list, const char *value)
+{
+    if (!list || !value) return 1;
+    char **next = realloc(list->items, (list->count + 1) * sizeof(char *));
+    if (!next) return 0;
+    list->items = next;
+    list->items[list->count] = strdup(value);
+    if (!list->items[list->count]) return 0;
+    list->count++;
+    return 1;
+}
+
+static int parse_string_array(cc_json_value_t *array, cc_config_string_list_t *out)
+{
+    if (!out) return 0;
+    free_string_list(out);
+    if (!array || !cc_json_is_array(array)) return 1;
+    int count = cc_json_array_size(array);
+    for (int i = 0; i < count; i++) {
+        const char *value = cc_json_string_value(cc_json_array_get(array, i));
+        if (value && !append_string_to_list(out, value)) return 0;
+    }
+    return 1;
+}
+
+static void free_agent_profile(cc_config_agent_profile_t *profile)
+{
+    if (!profile) return;
+    free(profile->id);
+    free(profile->model);
+    free(profile->workspace);
+    free(profile->agent_dir);
+    free(profile->system_prompt_file);
+    free_string_list(&profile->skills);
+    memset(profile, 0, sizeof(*profile));
+}
+
+static void free_plugin_entry(cc_config_plugin_entry_t *entry)
+{
+    if (!entry) return;
+    free(entry->id);
+    free(entry->command);
+    for (size_t i = 0; i < entry->arg_count; i++) free(entry->args[i]);
+    free(entry->args);
+    for (size_t i = 0; i < entry->tool_count; i++) {
+        free(entry->tools[i].name);
+        free(entry->tools[i].description);
+        free(entry->tools[i].parameters_json);
+    }
+    free(entry->tools);
+    free_string_list(&entry->skill_dirs);
+    memset(entry, 0, sizeof(*entry));
+}
+
+static void free_mcp_server(cc_config_mcp_server_t *server)
+{
+    if (!server) return;
+    free(server->name);
+    free(server->command);
+    for (size_t i = 0; i < server->arg_count; i++) free(server->args[i]);
+    free(server->args);
+    free(server->cwd);
+    free(server->url);
+    free(server->transport);
+    memset(server, 0, sizeof(*server));
+}
+
+static int copy_json_string_field(cc_json_value_t *obj, const char *key, char **out)
+{
+    const char *value = json_string_field(obj, key);
+    return value ? replace_string(out, value) : 1;
+}
+
+static int copy_args_array(cc_json_value_t *array, char ***out_args, size_t *out_count)
+{
+    if (!out_args || !out_count) return 0;
+    for (size_t i = 0; i < *out_count; i++) free((*out_args)[i]);
+    free(*out_args);
+    *out_args = NULL;
+    *out_count = 0;
+    if (!array || !cc_json_is_array(array)) return 1;
+    int count = cc_json_array_size(array);
+    char **args = count > 0 ? calloc((size_t)count, sizeof(char *)) : NULL;
+    if (count > 0 && !args) return 0;
+    size_t written = 0;
+    for (int i = 0; i < count; i++) {
+        const char *value = cc_json_string_value(cc_json_array_get(array, i));
+        if (!value) continue;
+        args[written] = strdup(value);
+        if (!args[written]) {
+            for (size_t j = 0; j < written; j++) free(args[j]);
+            free(args);
+            return 0;
+        }
+        written++;
+    }
+    *out_args = args;
+    *out_count = written;
+    return 1;
+}
+
+static int parse_agent_profile(cc_json_value_t *obj, const char *fallback_id, cc_config_agent_profile_t *out)
+{
+    if (!out) return 0;
+    if (fallback_id && !out->id && !replace_string(&out->id, fallback_id)) return 0;
+    if (!obj || !cc_json_is_object(obj)) return 1;
+    if (!copy_json_string_field(obj, "id", &out->id)) return 0;
+    if (!copy_json_string_field(obj, "model", &out->model)) return 0;
+    if (!copy_json_string_field(obj, "workspace", &out->workspace)) return 0;
+    if (!copy_json_string_field(obj, "agentDir", &out->agent_dir)) return 0;
+    if (!copy_json_string_field(obj, "agent_dir", &out->agent_dir)) return 0;
+    if (!copy_json_string_field(obj, "systemPromptFile", &out->system_prompt_file)) return 0;
+    if (!copy_json_string_field(obj, "system_prompt_file", &out->system_prompt_file)) return 0;
+    if (!parse_string_array(cc_json_object_get(obj, "skills"), &out->skills)) return 0;
+    return 1;
+}
+
+static int sync_enabled_tools_cache(cc_config_t *config)
+{
+    for (size_t i = 0; i < config->enabled_tools_count; i++) free(config->enabled_tools[i]);
+    free(config->enabled_tools);
+    config->enabled_tools = NULL;
+    config->enabled_tools_count = 0;
+    if (config->tools.enabled.count == 0) return 1;
+    config->enabled_tools = calloc(config->tools.enabled.count, sizeof(char *));
+    if (!config->enabled_tools) return 0;
+    for (size_t i = 0; i < config->tools.enabled.count; i++) {
+        config->enabled_tools[i] = strdup(config->tools.enabled.items[i]);
+        if (!config->enabled_tools[i]) return 0;
+    }
+    config->enabled_tools_count = config->tools.enabled.count;
+    return 1;
+}
+
 /**
  * config_required_allocs_ok — 检查默认配置填充后的关键字符串字段是否都已成功分配。
  *
@@ -252,9 +405,378 @@ static cc_result_t config_required_allocs_ok(const cc_config_t *config)
         !config->storage_type || !config->data_dir || !config->storage_path ||
         !config->workspace_path || !config->sandbox_type ||
         !config->memory_backend || !config->memory_path ||
-        !config->plugin_config_path ||
-        !config->soul_file || !config->user_file) {
+        !config->active_memory_category ||
+        !config->soul_file || !config->user_file ||
+        !config->queue.mode) {
         return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate config defaults");
+    }
+    return cc_result_ok();
+}
+
+static int parse_queue_section(cc_config_t *config, cc_json_value_t *root)
+{
+    cc_json_value_t *queue = cc_json_object_get(root, "queue");
+    if (!queue || !cc_json_is_object(queue)) return 1;
+    cc_json_value_t *lanes = cc_json_object_get(queue, "lanes");
+    if (lanes && cc_json_is_object(lanes)) {
+        cc_json_value_t *v = cc_json_object_get(lanes, "main");
+        if (v) config->queue.main_concurrency = cc_json_int_value(v);
+        v = cc_json_object_get(lanes, "subagent");
+        if (v) config->queue.subagent_concurrency = cc_json_int_value(v);
+        v = cc_json_object_get(lanes, "plugin");
+        if (v) config->queue.plugin_concurrency = cc_json_int_value(v);
+        v = cc_json_object_get(lanes, "mcp");
+        if (v) config->queue.mcp_concurrency = cc_json_int_value(v);
+    }
+    cc_json_value_t *v = cc_json_object_get(queue, "perSessionConcurrency");
+    if (!v) v = cc_json_object_get(queue, "per_session_concurrency");
+    if (v) config->queue.per_session_concurrency = cc_json_int_value(v);
+    if (!copy_json_string_field(queue, "mode", &config->queue.mode)) return 0;
+    v = cc_json_object_get(queue, "debounceMs");
+    if (!v) v = cc_json_object_get(queue, "debounce_ms");
+    if (v) config->queue.debounce_ms = cc_json_int_value(v);
+    v = cc_json_object_get(queue, "maxPendingPerSession");
+    if (!v) v = cc_json_object_get(queue, "max_pending_per_session");
+    if (v) config->queue.max_pending_per_session = cc_json_int_value(v);
+    return 1;
+}
+
+static int parse_agents_section(cc_config_t *config, cc_json_value_t *root)
+{
+    cc_json_value_t *agents = cc_json_object_get(root, "agents");
+    if (!agents || !cc_json_is_object(agents)) return 1;
+    if (!parse_agent_profile(cc_json_object_get(agents, "defaults"), "defaults", &config->agents.defaults)) {
+        return 0;
+    }
+    cc_json_value_t *list = cc_json_object_get(agents, "list");
+    if (!list || !cc_json_is_array(list)) return 1;
+    for (size_t i = 0; i < config->agents.profile_count; i++) {
+        free_agent_profile(&config->agents.profiles[i]);
+    }
+    free(config->agents.profiles);
+    config->agents.profiles = NULL;
+    config->agents.profile_count = 0;
+    int count = cc_json_array_size(list);
+    if (count <= 0) return 1;
+    config->agents.profiles = calloc((size_t)count, sizeof(cc_config_agent_profile_t));
+    if (!config->agents.profiles) return 0;
+    for (int i = 0; i < count; i++) {
+        if (!parse_agent_profile(
+                cc_json_array_get(list, i),
+                NULL,
+                &config->agents.profiles[config->agents.profile_count])) {
+            return 0;
+        }
+        config->agents.profile_count++;
+    }
+    return 1;
+}
+
+static int parse_tools_section(cc_config_t *config, cc_json_value_t *root)
+{
+    cc_json_value_t *tools = cc_json_object_get(root, "tools");
+    if (!tools || !cc_json_is_object(tools)) return 1;
+    cc_json_value_t *enabled = cc_json_object_get(tools, "enabled");
+    if (enabled && cc_json_is_array(enabled)) {
+        if (!parse_string_array(enabled, &config->tools.enabled)) return 0;
+        if (!sync_enabled_tools_cache(config)) return 0;
+    }
+    cc_json_value_t *v = cc_json_object_get(tools, "defaultTimeoutMs");
+    if (!v) v = cc_json_object_get(tools, "default_timeout_ms");
+    if (v) config->tools.default_timeout_ms = cc_json_int_value(v);
+
+    for (size_t i = 0; i < config->tools.policy_count; i++) {
+        free(config->tools.policies[i].name);
+    }
+    free(config->tools.policies);
+    config->tools.policies = NULL;
+    config->tools.policy_count = 0;
+
+    cc_json_value_t *per_tool = cc_json_object_get(tools, "perTool");
+    if (!per_tool) per_tool = cc_json_object_get(tools, "per_tool");
+    if (!per_tool || !cc_json_is_object(per_tool)) return 1;
+    int count = cc_json_object_size(per_tool);
+    if (count <= 0) return 1;
+    config->tools.policies = calloc((size_t)count, sizeof(cc_config_tool_policy_t));
+    if (!config->tools.policies) return 0;
+    for (int i = 0; i < count; i++) {
+        const char *name = cc_json_object_key_at(per_tool, i);
+        cc_json_value_t *obj = cc_json_object_value_at(per_tool, i);
+        cc_config_tool_policy_t *policy = &config->tools.policies[config->tools.policy_count];
+        policy->name = name ? strdup(name) : NULL;
+        if (name && !policy->name) return 0;
+        v = cc_json_object_get(obj, "concurrency");
+        if (v) policy->concurrency = cc_json_int_value(v);
+        v = cc_json_object_get(obj, "timeoutMs");
+        if (!v) v = cc_json_object_get(obj, "timeout_ms");
+        if (v) policy->timeout_ms = cc_json_int_value(v);
+        config->tools.policy_count++;
+    }
+    return 1;
+}
+
+static int parse_plugin_tools(cc_json_value_t *array, cc_config_plugin_entry_t *entry)
+{
+    if (!array || !cc_json_is_array(array)) return 1;
+    int count = cc_json_array_size(array);
+    entry->tools = count > 0 ? calloc((size_t)count, sizeof(cc_config_plugin_tool_t)) : NULL;
+    if (count > 0 && !entry->tools) return 0;
+    for (int i = 0; i < count; i++) {
+        cc_json_value_t *tool = cc_json_array_get(array, i);
+        cc_config_plugin_tool_t *out = &entry->tools[entry->tool_count];
+        const char *s = json_string_field(tool, "name");
+        out->name = s ? strdup(s) : NULL;
+        s = json_string_field(tool, "description");
+        out->description = s ? strdup(s) : NULL;
+        cc_json_value_t *params = cc_json_object_get(tool, "parameters");
+        out->parameters_json = params ? cc_json_stringify_unformatted(params) : NULL;
+        if (!out->parameters_json) out->parameters_json = strdup("{\"type\":\"object\",\"properties\":{}}");
+        if (!out->name || !out->description || !out->parameters_json) return 0;
+        entry->tool_count++;
+    }
+    return 1;
+}
+
+static int parse_plugins_section(cc_config_t *config, cc_json_value_t *root)
+{
+    cc_json_value_t *plugins = cc_json_object_get(root, "plugins");
+    if (!plugins || !cc_json_is_object(plugins)) return 1;
+    cc_json_value_t *v = cc_json_object_get(plugins, "hotReload");
+    if (!v) v = cc_json_object_get(plugins, "hot_reload");
+    if (v) config->plugins.hot_reload = json_boolish_value(v);
+    v = cc_json_object_get(plugins, "reloadDebounceMs");
+    if (!v) v = cc_json_object_get(plugins, "reload_debounce_ms");
+    if (v) config->plugins.reload_debounce_ms = cc_json_int_value(v);
+
+    for (size_t i = 0; i < config->plugins.entry_count; i++) free_plugin_entry(&config->plugins.entries[i]);
+    free(config->plugins.entries);
+    config->plugins.entries = NULL;
+    config->plugins.entry_count = 0;
+
+    cc_json_value_t *entries = cc_json_object_get(plugins, "entries");
+    if (!entries || !cc_json_is_object(entries)) return 1;
+    int count = cc_json_object_size(entries);
+    config->plugins.entries = count > 0 ? calloc((size_t)count, sizeof(cc_config_plugin_entry_t)) : NULL;
+    if (count > 0 && !config->plugins.entries) return 0;
+    for (int i = 0; i < count; i++) {
+        const char *id = cc_json_object_key_at(entries, i);
+        cc_json_value_t *entry_json = cc_json_object_value_at(entries, i);
+        cc_config_plugin_entry_t *entry = &config->plugins.entries[config->plugins.entry_count];
+        entry->id = id ? strdup(id) : NULL;
+        entry->enabled = 1;
+        entry->workers = 1;
+        entry->timeout_ms = config->tools.default_timeout_ms ? config->tools.default_timeout_ms : 30000;
+        entry->max_in_flight = 1;
+        entry->restart_on_crash = 1;
+        if (id && !entry->id) return 0;
+        v = cc_json_object_get(entry_json, "enabled");
+        if (v) entry->enabled = json_boolish_value(v);
+        if (!copy_json_string_field(entry_json, "command", &entry->command)) return 0;
+        if (!copy_args_array(cc_json_object_get(entry_json, "args"), &entry->args, &entry->arg_count)) return 0;
+        v = cc_json_object_get(entry_json, "workers");
+        if (v) entry->workers = cc_json_int_value(v);
+        v = cc_json_object_get(entry_json, "timeoutMs");
+        if (!v) v = cc_json_object_get(entry_json, "timeout_ms");
+        if (v) entry->timeout_ms = cc_json_int_value(v);
+        v = cc_json_object_get(entry_json, "maxInFlight");
+        if (!v) v = cc_json_object_get(entry_json, "max_in_flight");
+        if (v) entry->max_in_flight = cc_json_int_value(v);
+        v = cc_json_object_get(entry_json, "restartOnCrash");
+        if (!v) v = cc_json_object_get(entry_json, "restart_on_crash");
+        if (v) entry->restart_on_crash = json_boolish_value(v);
+        if (!parse_plugin_tools(cc_json_object_get(entry_json, "tools"), entry)) return 0;
+        if (!parse_string_array(cc_json_object_get(entry_json, "skills"), &entry->skill_dirs)) return 0;
+        config->plugins.entry_count++;
+    }
+    return 1;
+}
+
+static int parse_skills_section(cc_config_t *config, cc_json_value_t *root)
+{
+    cc_json_value_t *skills = cc_json_object_get(root, "skills");
+    if (!skills || !cc_json_is_object(skills)) return 1;
+    cc_json_value_t *load = cc_json_object_get(skills, "load");
+    if (load && cc_json_is_object(load)) {
+        cc_json_value_t *v = cc_json_object_get(load, "watch");
+        if (v) config->skills.watch = json_boolish_value(v);
+        v = cc_json_object_get(load, "watchDebounceMs");
+        if (!v) v = cc_json_object_get(load, "watch_debounce_ms");
+        if (v) config->skills.watch_debounce_ms = cc_json_int_value(v);
+        cc_json_value_t *extra_dirs = cc_json_object_get(load, "extraDirs");
+        if (!extra_dirs) extra_dirs = cc_json_object_get(load, "extra_dirs");
+        if (extra_dirs && !parse_string_array(extra_dirs, &config->skills.extra_dirs)) return 0;
+    }
+    return 1;
+}
+
+static int parse_mcp_section(cc_config_t *config, cc_json_value_t *root)
+{
+    cc_json_value_t *mcp = cc_json_object_get(root, "mcp");
+    if (!mcp || !cc_json_is_object(mcp)) return 1;
+    cc_json_value_t *v = cc_json_object_get(mcp, "enabled");
+    if (v) config->mcp.enabled = json_boolish_value(v);
+    v = cc_json_object_get(mcp, "sessionIdleTtlMs");
+    if (!v) v = cc_json_object_get(mcp, "session_idle_ttl_ms");
+    if (v) config->mcp.session_idle_ttl_ms = cc_json_int_value(v);
+
+    for (size_t i = 0; i < config->mcp.server_count; i++) free_mcp_server(&config->mcp.servers[i]);
+    free(config->mcp.servers);
+    config->mcp.servers = NULL;
+    config->mcp.server_count = 0;
+
+    cc_json_value_t *servers = cc_json_object_get(mcp, "servers");
+    if (!servers || !cc_json_is_object(servers)) return 1;
+    int count = cc_json_object_size(servers);
+    config->mcp.servers = count > 0 ? calloc((size_t)count, sizeof(cc_config_mcp_server_t)) : NULL;
+    if (count > 0 && !config->mcp.servers) return 0;
+    for (int i = 0; i < count; i++) {
+        const char *name = cc_json_object_key_at(servers, i);
+        cc_json_value_t *server_json = cc_json_object_value_at(servers, i);
+        cc_config_mcp_server_t *server = &config->mcp.servers[config->mcp.server_count];
+        server->name = name ? strdup(name) : NULL;
+        if (name && !server->name) return 0;
+        if (!copy_json_string_field(server_json, "command", &server->command)) return 0;
+        if (!copy_args_array(cc_json_object_get(server_json, "args"), &server->args, &server->arg_count)) return 0;
+        if (!copy_json_string_field(server_json, "cwd", &server->cwd)) return 0;
+        if (!copy_json_string_field(server_json, "workingDirectory", &server->cwd)) return 0;
+        if (!copy_json_string_field(server_json, "url", &server->url)) return 0;
+        if (!copy_json_string_field(server_json, "transport", &server->transport)) return 0;
+        v = cc_json_object_get(server_json, "connectionTimeoutMs");
+        if (!v) v = cc_json_object_get(server_json, "connection_timeout_ms");
+        if (v) server->connection_timeout_ms = cc_json_int_value(v);
+        config->mcp.server_count++;
+    }
+    return 1;
+}
+
+static int parse_runtime_sections(cc_config_t *config, cc_json_value_t *root)
+{
+    return parse_queue_section(config, root) &&
+           parse_agents_section(config, root) &&
+           parse_tools_section(config, root) &&
+           parse_plugins_section(config, root) &&
+           parse_skills_section(config, root) &&
+           parse_mcp_section(config, root);
+}
+
+static int str_nonempty(const char *s)
+{
+    return s && s[0] != '\0';
+}
+
+static int mcp_transport_known(const char *transport)
+{
+    const char *t = transport ? transport : "stdio";
+    return strcmp(t, "stdio") == 0 ||
+           strcmp(t, "http") == 0 ||
+           strcmp(t, "sse") == 0 ||
+           strcmp(t, "streamable_http") == 0;
+}
+
+/**
+ * validate_runtime_sections — 对 config.json 的运行期配置做严格语义校验。
+ *
+ * 解析阶段只负责把 JSON 复制成 C 结构；这里集中检查“值是否能被 runtime 正确
+ * 执行”。这样 POSIX/Windows/ESP app 都复用同一套错误行为，不会出现桌面能容忍
+ * 拼错字段、设备却静默裁剪的差异。
+ */
+static cc_result_t validate_runtime_sections(const cc_config_t *config)
+{
+    if (!config) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null config");
+    if (config->queue.main_concurrency <= 0 ||
+        config->queue.subagent_concurrency <= 0 ||
+        config->queue.plugin_concurrency <= 0 ||
+        config->queue.mcp_concurrency <= 0) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "queue.lanes values must be positive");
+    }
+    if (config->queue.max_pending_per_session < 0 || config->queue.debounce_ms < 0) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "queue limits must be non-negative");
+    }
+    if (config->tools.default_timeout_ms < 0) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "tools.defaultTimeoutMs must be non-negative");
+    }
+    for (size_t i = 0; i < config->tools.policy_count; i++) {
+        const cc_config_tool_policy_t *policy = &config->tools.policies[i];
+        if (!str_nonempty(policy->name)) {
+            return cc_result_error(CC_ERR_INVALID_ARGUMENT, "tools.perTool entry has an empty name");
+        }
+        if (policy->concurrency < 0 || policy->timeout_ms < 0) {
+            return cc_result_errf(
+                CC_ERR_INVALID_ARGUMENT,
+                "tools.perTool.%s concurrency/timeout must be non-negative",
+                policy->name);
+        }
+    }
+    for (size_t i = 0; i < config->plugins.entry_count; i++) {
+        const cc_config_plugin_entry_t *plugin = &config->plugins.entries[i];
+        if (!str_nonempty(plugin->id)) {
+            return cc_result_error(CC_ERR_INVALID_ARGUMENT, "plugins.entries contains an empty id");
+        }
+        if (plugin->enabled && !str_nonempty(plugin->command)) {
+            return cc_result_errf(
+                CC_ERR_INVALID_ARGUMENT,
+                "plugins.entries.%s requires command",
+                plugin->id);
+        }
+        if (plugin->workers <= 0 || plugin->max_in_flight <= 0 || plugin->timeout_ms < 0) {
+            return cc_result_errf(
+                CC_ERR_INVALID_ARGUMENT,
+                "plugins.entries.%s workers/maxInFlight must be positive and timeout non-negative",
+                plugin->id);
+        }
+        for (size_t j = 0; j < plugin->tool_count; j++) {
+            if (!str_nonempty(plugin->tools[j].name)) {
+                return cc_result_errf(
+                    CC_ERR_INVALID_ARGUMENT,
+                    "plugins.entries.%s has a tool without name",
+                    plugin->id);
+            }
+        }
+    }
+    if (config->skills.watch_debounce_ms < 0) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "skills.load.watchDebounceMs must be non-negative");
+    }
+    if (config->mcp.session_idle_ttl_ms < 0) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "mcp.sessionIdleTtlMs must be non-negative");
+    }
+    for (size_t i = 0; i < config->mcp.server_count; i++) {
+        const cc_config_mcp_server_t *server = &config->mcp.servers[i];
+        const char *transport = server->transport ? server->transport : "stdio";
+        if (!str_nonempty(server->name)) {
+            return cc_result_error(CC_ERR_INVALID_ARGUMENT, "mcp.servers contains an empty id");
+        }
+        if (!mcp_transport_known(transport)) {
+            return cc_result_errf(
+                CC_ERR_INVALID_ARGUMENT,
+                "mcp.servers.%s has unknown transport '%s'",
+                server->name,
+                transport);
+        }
+        if (strcmp(transport, "stdio") == 0 && !str_nonempty(server->command)) {
+            return cc_result_errf(
+                CC_ERR_INVALID_ARGUMENT,
+                "mcp.servers.%s stdio transport requires command",
+                server->name);
+        }
+        if ((strcmp(transport, "http") == 0 ||
+             strcmp(transport, "sse") == 0 ||
+             strcmp(transport, "streamable_http") == 0) &&
+            !str_nonempty(server->url)) {
+            return cc_result_errf(
+                CC_ERR_INVALID_ARGUMENT,
+                "mcp.servers.%s %s transport requires url",
+                server->name,
+                transport);
+        }
+        if (server->connection_timeout_ms < 0) {
+            return cc_result_errf(
+                CC_ERR_INVALID_ARGUMENT,
+                "mcp.servers.%s connectionTimeoutMs must be non-negative",
+                server->name);
+        }
+    }
+    if (config->active_memory_max_value_chars < 0) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "memory.active.maxValueChars must be non-negative");
     }
     return cc_result_ok();
 }
@@ -298,7 +820,10 @@ cc_result_t cc_config_load_default(cc_config_t *out_config)
     out_config->temperature = 0.7;
     out_config->memory_backend = strdup(CC_DEFAULT_MEMORY_BACKEND);
     out_config->memory_path = strdup(CC_DEFAULT_MEMORY_PATH);
-    out_config->plugin_config_path = strdup(CC_DEFAULT_PLUGIN_CONFIG_PATH);
+    out_config->active_memory_enabled = 0;
+    out_config->active_memory_write_summary = 1;
+    out_config->active_memory_max_value_chars = 1600;
+    out_config->active_memory_category = strdup("active_summary");
     out_config->soul_file = strdup(CC_DEFAULT_SOUL_FILE);
     out_config->user_file = strdup(CC_DEFAULT_USER_FILE);
     out_config->context_window_tokens = 8192;
@@ -306,6 +831,21 @@ cc_result_t cc_config_load_default(cc_config_t *out_config)
     out_config->context_keep_recent = 20;
     out_config->summary_max_tokens = 1024;
     out_config->summary_temperature = 0.3;
+    out_config->queue.main_concurrency = 4;
+    out_config->queue.subagent_concurrency = 8;
+    out_config->queue.plugin_concurrency = 4;
+    out_config->queue.mcp_concurrency = 4;
+    out_config->queue.per_session_concurrency = 1;
+    out_config->queue.mode = strdup("steer");
+    out_config->queue.debounce_ms = 500;
+    out_config->queue.max_pending_per_session = 20;
+    out_config->tools.default_timeout_ms = 30000;
+    out_config->plugins.hot_reload = 0;
+    out_config->plugins.reload_debounce_ms = 300;
+    out_config->skills.watch = 0;
+    out_config->skills.watch_debounce_ms = 250;
+    out_config->mcp.enabled = 0;
+    out_config->mcp.session_idle_ttl_ms = 600000;
     cc_result_t rc = config_required_allocs_ok(out_config);
     if (rc.code != CC_OK) {
         cc_config_destroy(out_config);
@@ -325,9 +865,14 @@ cc_result_t cc_config_load_default(cc_config_t *out_config)
  *   {
  *     "model":    { "provider": "...", "model": "...", "base_url": "...", "api_key": "..." },
  *     "storage":  { "type": "...", "path": "..." },
- *     "workspace":{ "path": "..." },
+ *     "agents":   { "defaults": { "workspace": "..." }, "list": [] },
+ *     "queue":    { "lanes": { "main": 4 } },
  *     "sandbox":  { "type": "...", "shell_requires_approval": true, "timeout_ms": 30000 },
- *     "tools":    { "enabled": ["tool_a", "tool_b"] }
+ *     "tools":    { "enabled": ["tool_a", "tool_b"] },
+ *     "plugins":  { "entries": {} },
+ *     "skills":   { "load": { "extraDirs": [] } },
+ *     "mcp":      { "enabled": false, "servers": {} },
+ *     "memory":   { "backend": "json_file" }
  *   }
  *
  * 参数：
@@ -339,8 +884,8 @@ cc_result_t cc_config_load_default(cc_config_t *out_config)
  *
  * 设计决策：
  *   - 容错优先（fail-safe）：配置文件损坏或缺失时程序仍可运行，方便开发调试
- *   - 段式解析：按 model/storage/workspace/sandbox/tools 分段处理，
- *     每段独立 fallback，一个段缺失不影响其他段
+ *   - 段式解析：按 model/storage/agents/queue/tools/plugins/skills/mcp/
+ *     memory/sandbox/system/cli 分段处理，每段独立 fallback，一个段缺失不影响其他段
  *   - tools.enabled 数组：支持按名称动态启用/禁用工具，解析为字符串数组
  *
  * 逐字段解析逻辑详解：
@@ -483,13 +1028,23 @@ cc_result_t cc_config_load(const char *path, cc_config_t *out_config)
         if (s && !replace_string(&out_config->memory_backend, s)) goto oom;
         s = json_string_field(memory, "path");
         if (s && !replace_string(&out_config->memory_path, s)) goto oom;
+        cc_json_value_t *active = cc_json_object_get(memory, "active");
+        if (active && cc_json_is_object(active)) {
+            cc_json_value_t *v = cc_json_object_get(active, "enabled");
+            if (v) out_config->active_memory_enabled = json_boolish_value(v);
+            v = cc_json_object_get(active, "writeSummary");
+            if (!v) v = cc_json_object_get(active, "write_summary");
+            if (v) out_config->active_memory_write_summary = json_boolish_value(v);
+            v = cc_json_object_get(active, "maxValueChars");
+            if (!v) v = cc_json_object_get(active, "max_value_chars");
+            if (v) out_config->active_memory_max_value_chars = cc_json_int_value(v);
+            s = json_string_field(active, "category");
+            if (s && !replace_string(&out_config->active_memory_category, s)) goto oom;
+        }
     }
 
     cc_json_value_t *tools = cc_json_object_get(root, "tools");
     if (tools) {
-        const char *plugins_path = json_string_field(tools, "plugin_config_path");
-        if (plugins_path && !replace_string(&out_config->plugin_config_path, plugins_path)) goto oom;
-
         cc_json_value_t *enabled = cc_json_object_get(tools, "enabled");
         if (enabled && cc_json_is_array(enabled)) {
             int count = cc_json_array_size(enabled);
@@ -583,6 +1138,17 @@ cc_result_t cc_config_load(const char *path, cc_config_t *out_config)
         if (v) out_config->debug_mode = json_boolish_value(v);
     }
 
+    /*
+     * 分段运行时配置是主配置入口。上面的平铺字段是 runtime 的便捷缓存，
+     * 由同一个 loader 同步填充，避免调用点重复理解 JSON 树结构。
+     */
+    if (!parse_runtime_sections(out_config, root)) goto oom;
+    cc_result_t validation_rc = validate_runtime_sections(out_config);
+    if (validation_rc.code != CC_OK) {
+        cc_json_destroy(root);
+        return validation_rc;
+    }
+
     if (out_config->thinking_mode) {
         out_config->stream_mode = 1;
     }
@@ -626,7 +1192,7 @@ void cc_config_destroy(cc_config_t *config)
     free(config->sandbox_type);
     free(config->memory_backend);
     free(config->memory_path);
-    free(config->plugin_config_path);
+    free(config->active_memory_category);
     free(config->system_prompt);
     free(config->soul_file);
     free(config->user_file);
@@ -638,6 +1204,26 @@ void cc_config_destroy(cc_config_t *config)
         free(config->plugin_commands[i]);
     }
     free(config->plugin_commands);
+    free_agent_profile(&config->agents.defaults);
+    for (size_t i = 0; i < config->agents.profile_count; i++) {
+        free_agent_profile(&config->agents.profiles[i]);
+    }
+    free(config->agents.profiles);
+    free(config->queue.mode);
+    free_string_list(&config->tools.enabled);
+    for (size_t i = 0; i < config->tools.policy_count; i++) {
+        free(config->tools.policies[i].name);
+    }
+    free(config->tools.policies);
+    for (size_t i = 0; i < config->plugins.entry_count; i++) {
+        free_plugin_entry(&config->plugins.entries[i]);
+    }
+    free(config->plugins.entries);
+    free_string_list(&config->skills.extra_dirs);
+    for (size_t i = 0; i < config->mcp.server_count; i++) {
+        free_mcp_server(&config->mcp.servers[i]);
+    }
+    free(config->mcp.servers);
     memset(config, 0, sizeof(cc_config_t));
 }
 

@@ -29,7 +29,7 @@ JSON-RPC 响应的可执行文件都可以作为 c-claw 插件。
 独立测试：
   echo '{"jsonrpc":"2.0","id":"1","method":"weather_query","params":{"city":"Beijing"}}' | python3 weather_tool.py
 
-── 配置方式 (plugins.json) ──
+── 配置方式 (config.json plugins.entries) ──
 
   {
     "name": "weather",

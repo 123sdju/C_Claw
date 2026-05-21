@@ -23,6 +23,8 @@
 
 #include "cc/core/cc_result.h"
 
+typedef struct cc_cancel_token cc_cancel_token_t;
+
 /**
  * cc_process_options — 同步启动子进程时使用的参数集合。
  *
@@ -148,6 +150,32 @@ cc_result_t cc_process_pipe_write(
  */
 cc_result_t cc_process_pipe_read_line(
     cc_process_pipe_t *pipe,
+    char **out_line
+);
+
+/**
+ * cc_process_pipe_read_line_timeout — 带超时读取一行文本。
+ *
+ * timeout_ms <= 0 时使用平台默认值。该接口让上层 plugin/MCP 可以把
+ * config.json 中的 timeoutMs 落到真实管道等待上，而不是只能依赖平台默认。
+ */
+cc_result_t cc_process_pipe_read_line_timeout(
+    cc_process_pipe_t *pipe,
+    int timeout_ms,
+    char **out_line
+);
+
+/**
+ * cc_process_pipe_read_line_timeout_cancel — 带超时和取消令牌读取一行文本。
+ *
+ * cancel_token 为借用指针；平台实现只查询状态，不取得所有权。该接口用于
+ * plugin/MCP stdio 这类长等待路径，让 interrupt/shutdown 能从 tool context
+ * 传到实际 pipe 等待。NULL token 表示不启用取消。
+ */
+cc_result_t cc_process_pipe_read_line_timeout_cancel(
+    cc_process_pipe_t *pipe,
+    int timeout_ms,
+    cc_cancel_token_t *cancel_token,
     char **out_line
 );
 

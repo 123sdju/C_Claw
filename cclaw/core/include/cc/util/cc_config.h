@@ -23,10 +23,11 @@
  *   - cc_config_destroy() 释放 config 中的所有动态分配字段
  *   - 调用方不需要手动释放字段，全部委托给 cc_config_destroy()
  *
- * ─── 配置优先级 ───────────────────────────────────────────────────────
+ * ─── 配置入口 ─────────────────────────────────────────────────────────
  *
- *   config.json > 环境变量 > 默认值
- *   （当前版本仅实现 config.json，环境变量在后续迭代中支持）
+ *   config.json 是唯一主配置入口；未写入 config.json 的字段走
+ *   cc_config_load_default() 中的 profile 默认值。loader 解析后会做统一语义
+ *   校验，例如 MCP transport/url/command、plugin workers、timeout 等。
  *
  * ─── 依赖 ─────────────────────────────────────────────────────────────
  *
@@ -37,6 +38,110 @@
 #define CC_CONFIG_H
 
 #include "cc/core/cc_result.h"
+#include <stddef.h>
+
+/**
+ * cc_config_string_list_t — 配置中的字符串数组。
+ *
+ * 所有 items[i] 都由 cc_config_t 拥有，调用方只借用读取。
+ * 这个小结构会被 agents/skills/tools/MCP 多处复用，避免每个段都手写
+ * `char ** + count` 字段并增加释放遗漏风险。
+ */
+typedef struct cc_config_string_list {
+    char **items;
+    size_t count;
+} cc_config_string_list_t;
+
+typedef struct cc_config_agent_profile {
+    char *id;
+    char *model;
+    char *workspace;
+    char *agent_dir;
+    char *system_prompt_file;
+    cc_config_string_list_t skills;
+} cc_config_agent_profile_t;
+
+typedef struct cc_config_agents {
+    cc_config_agent_profile_t defaults;
+    cc_config_agent_profile_t *profiles;
+    size_t profile_count;
+} cc_config_agents_t;
+
+typedef struct cc_config_queue {
+    int main_concurrency;
+    int subagent_concurrency;
+    int plugin_concurrency;
+    int mcp_concurrency;
+    int per_session_concurrency;
+    char *mode;
+    int debounce_ms;
+    int max_pending_per_session;
+} cc_config_queue_t;
+
+typedef struct cc_config_tool_policy {
+    char *name;
+    int concurrency;
+    int timeout_ms;
+} cc_config_tool_policy_t;
+
+typedef struct cc_config_tools {
+    cc_config_string_list_t enabled;
+    int default_timeout_ms;
+    cc_config_tool_policy_t *policies;
+    size_t policy_count;
+} cc_config_tools_t;
+
+typedef struct cc_config_plugin_tool {
+    char *name;
+    char *description;
+    char *parameters_json;
+} cc_config_plugin_tool_t;
+
+typedef struct cc_config_plugin_entry {
+    char *id;
+    int enabled;
+    char *command;
+    char **args;
+    size_t arg_count;
+    int workers;
+    int timeout_ms;
+    int max_in_flight;
+    int restart_on_crash;
+    cc_config_plugin_tool_t *tools;
+    size_t tool_count;
+    cc_config_string_list_t skill_dirs;
+} cc_config_plugin_entry_t;
+
+typedef struct cc_config_plugins {
+    int hot_reload;
+    int reload_debounce_ms;
+    cc_config_plugin_entry_t *entries;
+    size_t entry_count;
+} cc_config_plugins_t;
+
+typedef struct cc_config_skills {
+    int watch;
+    int watch_debounce_ms;
+    cc_config_string_list_t extra_dirs;
+} cc_config_skills_t;
+
+typedef struct cc_config_mcp_server {
+    char *name;
+    char *command;
+    char **args;
+    size_t arg_count;
+    char *cwd;
+    char *url;
+    char *transport;
+    int connection_timeout_ms;
+} cc_config_mcp_server_t;
+
+typedef struct cc_config_mcp {
+    int enabled;
+    int session_idle_ttl_ms;
+    cc_config_mcp_server_t *servers;
+    size_t server_count;
+} cc_config_mcp_t;
 
 /**
  * cc_config_t — 系统全局配置结构体
@@ -106,8 +211,11 @@ typedef struct cc_config {
                                   *   json_file 后端：JSON 文件路径（默认 profile memory path）
                                   *   sqlite 后端：数据库文件路径（默认 profile memory path）
                                   *   默认值：由平台 profile 的 CC_DEFAULT_MEMORY_PATH 提供 */
-    char *plugin_config_path;    /**< 插件配置文件路径。
-                                  *   默认值：由平台 profile 的 CC_DEFAULT_PLUGIN_CONFIG_PATH 提供 */
+    int active_memory_enabled;   /**< 是否在 run 结束后自动写入可检索摘要。
+                                  *   只有 CC_ENABLE_ACTIVE_MEMORY=ON 时 runtime 才会编译执行路径。 */
+    int active_memory_write_summary; /**< 非 0 表示 run 后写入 user/assistant 摘要。 */
+    int active_memory_max_value_chars; /**< 单条 active memory 最大字符数，防止长回答撑爆设备存储。 */
+    char *active_memory_category; /**< active memory 写入分类，默认 "active_summary"。 */
     char *system_prompt;         /**< 显式系统提示词覆盖。
                                   *   优先级最高：如果设置，则忽略 soul.md / user.md。
                                   *   默认值：NULL（使用 soul.md + user.md 组合） */
@@ -142,6 +250,14 @@ typedef struct cc_config {
                                   *   默认值：1024 */
     double summary_temperature;   /**< 上下文摘要压缩请求的生成温度。
                                   *   默认值：0.3 */
+
+    /** 分段运行时配置：这些字段是主配置模型，平铺字段仅作为 runtime 便捷缓存。 */
+    cc_config_agents_t agents;
+    cc_config_queue_t queue;
+    cc_config_tools_t tools;
+    cc_config_plugins_t plugins;
+    cc_config_skills_t skills;
+    cc_config_mcp_t mcp;
 } cc_config_t;
 
 /**

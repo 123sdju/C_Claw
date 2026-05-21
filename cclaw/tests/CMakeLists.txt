@@ -18,11 +18,33 @@ set(C_CLAW_CORE_TESTS
     test_runtime_concurrent_sessions
     test_runtime_request_config
     test_config_missing_defaults
+    test_config_runtime_sections
+    test_cancel_token
+    test_plugin_protocol_envelope
+    test_sse_parser
 )
 
 foreach(test_name IN LISTS C_CLAW_CORE_TESTS)
     cc_add_sdk_test(${test_name} "core/${test_name}.c")
 endforeach()
+
+if(CC_ENABLE_RUN_QUEUE)
+    cc_add_sdk_test(test_run_queue_session_serial "core/test_run_queue_session_serial.c")
+    cc_add_sdk_test(test_run_queue_async_interrupt "core/test_run_queue_async_interrupt.c")
+endif()
+
+if(CC_ENABLE_TOOL_POOL)
+    cc_add_sdk_test(test_tool_executor_pool_lane "core/test_tool_executor_pool_lane.c")
+endif()
+
+if(CC_ENABLE_SKILLS)
+    cc_add_sdk_test(test_skill_catalog_prompt "core/test_skill_catalog_prompt.c")
+endif()
+
+if(CC_ENABLE_MCP)
+    cc_add_sdk_test(test_mcp_jsonrpc_matcher "core/test_mcp_jsonrpc_matcher.c")
+    cc_add_sdk_test(test_mcp_runtime_manager_fake_transport "core/test_mcp_runtime_manager_fake_transport.c")
+endif()
 
 set(C_CLAW_ADAPTER_TESTS
     test_memory_store_concurrent

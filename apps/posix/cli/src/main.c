@@ -25,15 +25,17 @@
  *
  * @param argc 命令行参数数量。
  * @param argv 命令行参数数组；gateway 只借用，不保存。
- * @param runtime 已由 runtime_builder 创建的运行时借用指针。
+ * @param builder 已由 runtime_builder 创建的组合根借用指针。
  * @param config 已加载的配置；gateway 可读取 CLI 行为参数。
+ * @param config_path 配置文件路径；`/reload` 会按该路径重新读取 config.json。
  * @return 进程退出码，0 表示 CLI 正常完成，非 0 表示命令处理失败。
  */
 extern int cc_cli_gateway_run(
     int argc,
     char **argv,
-    cc_agent_runtime_t *runtime,
-    cc_config_t *config
+    cc_runtime_builder_t *builder,
+    cc_config_t *config,
+    const char *config_path
 );
 #endif
 
@@ -92,8 +94,9 @@ int main(int argc, char **argv)
     exit_code = cc_cli_gateway_run(
         argc,
         argv,
-        cc_runtime_builder_runtime(builder),
-        &config
+        builder,
+        &config,
+        config_path
     );
 #else
     (void)argc;

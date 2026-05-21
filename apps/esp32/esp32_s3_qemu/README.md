@@ -47,18 +47,38 @@ python "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa qemu-riscv32
 From the repository root:
 
 ```bash
+./scripts/esp32_s3_qemu.sh doctor
 ./scripts/esp32_s3_qemu.sh build
 ./scripts/esp32_s3_qemu.sh qemu
 ```
 
-The script writes ESP-IDF build output to `build/esp32-s3-qemu` by default.
+The script writes ESP-IDF build output to `build/app/esp32/esp32_s3_qemu` by default.
 Override it with `CCLAW_ESP32S3_QEMU_BUILD_DIR` when a separate build tree is
 needed.
+
+Generated ESP-IDF files stay in the build tree. The source directory keeps only
+`sdkconfig.defaults`; the generated configuration is written to:
+
+```text
+build/app/esp32/esp32_s3_qemu/sdkconfig
+```
 
 The QEMU command succeeds when the UART log contains:
 
 ```text
 CCLAW_QEMU_PASS
+```
+
+`qemu` is a smoke-test command: it rebuilds the image, starts QEMU, captures the
+UART log, and treats `CCLAW_QEMU_PASS` as success. The board then enters the
+mock UART chat loop, so the process may continue until the configured timeout
+expires. Set `CCLAW_QEMU_TIMEOUT_SECONDS` lower for quick CI smoke checks.
+
+Current reference firmware size for the default smoke profile:
+
+```text
+c_claw_esp32_s3_qemu.bin  272,800 bytes, about 266.4 KiB
+factory app partition     1 MiB, about 757.6 KiB free
 ```
 
 For interactive debugging:

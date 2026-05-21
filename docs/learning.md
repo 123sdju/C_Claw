@@ -68,6 +68,36 @@
 C-Claw 是一个 **纯 C99/C11 实现的 AI Agent 运行时**，支持 OpenAI/Ollama/Anthropic 等
 LLM 后端，可以在 Linux、Windows 和 ESP32 上运行，通过插件系统扩展能力。
 
+### 1.1.1 当前工程状态
+
+这一版代码已经按主线能力重构为多层工程，学习时建议把“源码分层”和“构建分层”一起记：
+
+```text
+cclaw/      SDK：协议、调度、生命周期、并发语义、可移植端口
+apps/       应用和板级组合：CLI、进程型 plugin、MCP transport、ESP32 QEMU
+build/app/  应用或板级构建产物
+build/sdk/  SDK 裁剪构建产物
+```
+
+当前已验证的入口：
+
+```text
+POSIX CLI tests       build/app/posix/cli          27/27 passed
+core-minimal tests    build/sdk/core-minimal       18/18 passed
+ESP32-S3 QEMU         build/app/esp32/esp32_s3_qemu  CCLAW_QEMU_PASS
+```
+
+ESP32-S3 QEMU 默认固件参考大小：
+
+```text
+c_claw_esp32_s3_qemu.bin  272,800 bytes，约 266.4 KiB
+factory app partition     1 MiB，约 757.6 KiB free
+```
+
+Windows CLI 的源码和 CMake 结构已经跟 POSIX 对齐，但仍需要真实 Windows 主机或
+Windows 交叉工具链做最终编译验收。面试或复盘时要把它讲成“结构已准备，平台验收待补”，
+不要把未跑过的环境说成已验证。
+
 ### 1.2 为什么值得学？
 
 | 学习点 | 对应面试场景 |
@@ -2144,16 +2174,24 @@ for (i = 0; i < snapshot_count; i++) {
 # Linux/macOS 桌面构建
 cmake --preset posix-cli
 cmake --build --preset posix-cli
-ctest --test-dir build/posix-cli --output-on-failure
+ctest --test-dir build/app/posix/cli --output-on-failure
 
 # 最小化构建（无 LLM，无 Shell）
 cmake --preset core-minimal
 cmake --build --preset core-minimal
+ctest --test-dir build/sdk/core-minimal --output-on-failure
 
 # ESP32 QEMU
 . "$IDF_PATH/export.sh"
+./scripts/esp32_s3_qemu.sh doctor
+./scripts/esp32_s3_qemu.sh build
 ./scripts/esp32_s3_qemu.sh qemu
 ```
+
+构建目录按层分开：桌面应用使用 `build/app/posix/cli`，Windows CLI 使用
+`build/app/windows/cli`，SDK 最小裁剪使用 `build/sdk/core-minimal`，ESP32 QEMU
+使用 `build/app/esp32/esp32_s3_qemu`。这样阅读 build 产物时能直接看出它属于
+哪个层，而不会把 SDK 测试、桌面 app 和板级工程混在一个平铺目录里。
 
 ## 附录 B：核心源文件速查表
 

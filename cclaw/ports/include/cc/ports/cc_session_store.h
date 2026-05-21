@@ -177,6 +177,22 @@ struct cc_session_store_vtable {
     );
 
     /**
+     * clear_session — 清空一个 session 的对话内容。
+     *
+     * reset session 需要删除 messages、tool_calls、tool_results 等 turn 历史，
+     * 但保留 session 元数据，便于 CLI/UI 继续使用同一个 session id。实现必须
+     * 自行保证线程安全；不支持清理的后端可以将该函数置 NULL。
+     *
+     * @param self        存储私有数据
+     * @param session_id  要清空的会话 ID
+     * @return            CC_OK 表示清理成功或该 session 原本为空
+     */
+    cc_result_t (*clear_session)(
+        void *self,
+        const char *session_id
+    );
+
+    /**
      * destroy — 销毁存储实例
      *
      * 释放文件句柄、关闭数据库连接、刷新缓冲区等。
