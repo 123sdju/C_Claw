@@ -64,10 +64,7 @@ static const char *slash_commands[] = {
 /**
  * history_add — 把用户输入追加到 CLI 历史数组，并在容量满时移除最旧记录。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param line 借用的只读字符串；函数不会释放该指针。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void history_add(const char *line)
 {
@@ -84,12 +81,8 @@ static void history_add(const char *line)
 /**
  * tab_complete — 根据当前缓冲区内容执行内置命令或路径补全。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
- * @param pos 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param size 按值传入，用于控制本次操作。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int tab_complete(char *buf, size_t *pos, size_t size)
 {
@@ -127,10 +120,7 @@ static int tab_complete(char *buf, size_t *pos, size_t size)
 /**
  * __redraw_line — 根据当前输入缓冲区和光标位置重绘 CLI 提示行。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 借用的只读字符串；函数不会释放该指针。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void __redraw_line(const char *buf)
 {
@@ -144,8 +134,6 @@ static void __redraw_line(const char *buf)
 /**
  * generate_session_id — 生成 CLI 临时会话 ID 字符串，调用方负责释放。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
  */
 static char *generate_session_id(void)
@@ -158,11 +146,8 @@ static char *generate_session_id(void)
 /**
  * cli_readline — 从终端读取一行用户输入，处理历史、补全和基本编辑快捷键。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
  * @param size 按值传入，用于控制本次操作。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int cli_readline(char *buf, size_t size)
 {
@@ -333,9 +318,6 @@ static void print_runtime_diagnostics(
 /**
  * stream_render_reset — 重置 CLI 流式渲染状态，准备显示下一次模型输出。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void stream_render_reset(void)
 {
@@ -433,10 +415,7 @@ static void stream_event_handler(const char *event, const char *payload, void *u
 /**
  * run_chat_loop — 驱动 CLI 交互循环，读取用户输入并调用 runtime 获取同步或流式回答。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param runtime 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void run_chat_loop(cc_agent_runtime_t *runtime, cc_agent_manager_t *manager)
 {

@@ -25,12 +25,11 @@ typedef struct cc_esp32_gpio_tool {
 } cc_esp32_gpio_tool_t;
 
 /**
- * gpio_allowed — 执行条件检查，用于决定后续控制流或测试断言是否继续。
+ * gpio_allowed — 板级 GPIO 白名单。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param pin 按值传入，用于控制本次操作。
- * @return 非 0 表示条件成立，0 表示条件不成立。
+ * QEMU 示例故意只暴露一小组安全引脚，避免 agent 误操作 UART、flash 或启动相关
+ * 引脚。真实板级应用应根据原理图重新定义 allowlist，而不是把平台层做成通用
+ * “任意 GPIO 执行器”。
  */
 static int gpio_allowed(int pin)
 {
@@ -48,8 +47,6 @@ static int gpio_allowed(int pin)
 /**
  * gpio_tool_name — 返回端口、工具或协议的静态名称字符串，用于注册和日志。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @return 返回借用或静态只读字符串；调用方不得释放。
  */
@@ -62,8 +59,6 @@ static const char *gpio_tool_name(void *self)
 /**
  * gpio_tool_description — 返回工具或组件的静态说明字符串，供模型理解工具用途。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @return 返回借用或静态只读字符串；调用方不得释放。
  */
@@ -75,8 +70,6 @@ static const char *gpio_tool_description(void *self)
 
 /**
  * gpio_tool_schema_json — 返回工具参数 schema 的静态 JSON 字符串，供工具注册给 LLM。
- *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @return 返回借用或静态只读字符串；调用方不得释放。
@@ -100,11 +93,8 @@ static const char *gpio_tool_schema_json(void *self)
 /**
  * set_tool_error — 更新对象内部字段或输出结构，同时维护旧值释放规则。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_result 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_result 输出参数；调用方传入有效指针，成功后接收结果。
  * @param message 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void set_tool_error(cc_tool_result_t *out_result, const char *message)
 {
@@ -113,14 +103,11 @@ static void set_tool_error(cc_tool_result_t *out_result, const char *message)
 }
 
 /**
- * ensure_direction — 确保后续操作所需的容量、状态或平台资源已经准备好。
+ * ensure_direction — 将引脚切到本次操作需要的输入/输出模式。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param tool 借用的对象；函数不释放该对象本身。
- * @param pin 按值传入，用于控制本次操作。
- * @param mode 按值传入，用于控制本次操作。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * ESP-IDF 的 GPIO 配置是板级资源状态，不属于 core SDK。工具每次 read/write/toggle
+ * 前都显式 reset + set_direction，牺牲一点性能换取 QEMU smoke 和交互 demo 的
+ * 可预测性；configured[] 记录最近一次成功配置，便于后续扩展时做缓存策略。
  */
 static cc_result_t ensure_direction(cc_esp32_gpio_tool_t *tool, int pin, gpio_mode_t mode)
 {
@@ -139,12 +126,10 @@ static cc_result_t ensure_direction(cc_esp32_gpio_tool_t *tool, int pin, gpio_mo
 /**
  * gpio_tool_call — 参与工具注册、工具调用或工具结果写回流程。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param args_json 借用的只读字符串；函数不会释放该指针。
  * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param out_result 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_result 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t gpio_tool_call(
@@ -239,10 +224,7 @@ io_error:
 /**
  * gpio_tool_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void gpio_tool_destroy(void *self)
 {
@@ -258,11 +240,9 @@ static cc_tool_vtable_t gpio_tool_vtable = {
 };
 
 /**
- * cc_esp32_gpio_tool_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * cc_esp32_gpio_tool_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 cc_result_t cc_esp32_gpio_tool_create(cc_tool_t *out_tool)

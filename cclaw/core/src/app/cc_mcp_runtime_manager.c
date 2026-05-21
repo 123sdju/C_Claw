@@ -9,6 +9,15 @@
 #include <string.h>
 #include <time.h>
 
+/*
+ * MCP runtime manager 是 core SDK 的协议状态机：
+ *   - server_runtime 持有 transport、初始化状态、TTL 和 request id。
+ *   - tool bridge 把 MCP tool 暴露成 C-Claw tool 名称 mcp.<server>.<tool>。
+ *   - transport 只通过 vtable 调用，core 不知道它是 stdio、HTTP、SSE 还是 ESP HTTP。
+ *
+ * 锁约定：串行 transport 在 send 期间持有 server mutex；并发 HTTP transport
+ * 只在分配 request id、检查 TTL、更新 last_used 时持锁，实际 IO 在锁外执行。
+ */
 typedef struct cc_mcp_server_runtime {
     char *name;
     char *transport_name;
@@ -55,6 +64,10 @@ static int server_idle_expired(cc_mcp_server_runtime_t *server, long now_ms)
 
 static cc_json_value_t *build_initialize_params(void)
 {
+    /*
+     * initialize 参数保持最小集合：声明 protocolVersion、空 capabilities 和 clientInfo。
+     * 这样 mock server、stdio server 和 streamable HTTP server 都能用同一条路径。
+     */
     cc_json_value_t *params = cc_json_create_object();
     cc_json_object_set(params, "protocolVersion", cc_json_create_string("2024-11-05"));
     cc_json_object_set(params, "capabilities", cc_json_create_object());

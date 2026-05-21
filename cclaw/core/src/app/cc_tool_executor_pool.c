@@ -4,6 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Tool executor pool 管 lane，而不管工具怎么执行。它的职责是：
+ *   - 为 tool.<name> / plugin.<id> / mcp.<server> 这类 lane 维护并发上限。
+ *   - 提供本次调用应使用的 timeout_ms。
+ *   - 在 acquire 等待时观察 cancel token，避免被取消的 run 卡在队列里。
+ *
+ * pool 不拥有 tool，不调用 tool，也不关闭进程/HTTP；这些都由具体 adapter 处理。
+ */
 typedef struct cc_tool_executor_lane {
     char *name;
     int concurrency;

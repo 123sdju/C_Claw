@@ -21,7 +21,8 @@
 /**
  * cc_esp32_filesystem — filesystem 端口私有实现对象，当前多数平台无需额外状态但仍保留 self 位置。
  *
- * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ * 当前实现不持有动态资源；真实文件系统状态由 ESP-IDF VFS/FATFS 管理。dummy 只是让
+ * 私有对象保持非空，destroy 时只需要释放这个轻量 wrapper。
  */
 typedef struct cc_esp32_filesystem {
     int dummy;
@@ -30,11 +31,9 @@ typedef struct cc_esp32_filesystem {
 /**
  * esp32_read_text — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param path 借用的只读字符串；函数不会释放该指针。
- * @param out_text 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_text 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t esp32_read_text(void *self, const char *path, char **out_text)
@@ -61,8 +60,6 @@ static cc_result_t esp32_read_text(void *self, const char *path, char **out_text
 /**
  * esp32_write_text — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param path 借用的只读字符串；函数不会释放该指针。
  * @param text 借用的只读字符串；函数不会释放该指针。
@@ -83,11 +80,9 @@ static cc_result_t esp32_write_text(void *self, const char *path, const char *te
 /**
  * esp32_exists — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param path 借用的只读字符串；函数不会释放该指针。
- * @param out_exists 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_exists 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t esp32_exists(void *self, const char *path, int *out_exists)
@@ -100,12 +95,10 @@ static cc_result_t esp32_exists(void *self, const char *path, int *out_exists)
 /**
  * esp32_list_dir — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param path 借用的只读字符串；函数不会释放该指针。
- * @param out_items 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
- * @param out_count 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_items 输出参数；调用方传入有效指针，成功后接收结果。
+ * @param out_count 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t esp32_list_dir(void *self, const char *path, char ***out_items, size_t *out_count)
@@ -154,8 +147,6 @@ static cc_result_t esp32_list_dir(void *self, const char *path, char ***out_item
 /**
  * esp32_make_dir — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param path 借用的只读字符串；函数不会释放该指针。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
@@ -190,8 +181,6 @@ static cc_result_t esp32_make_dir(void *self, const char *path)
 /**
  * esp32_remove — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param path 借用的只读字符串；函数不会释放该指针。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
@@ -207,10 +196,7 @@ static cc_result_t esp32_remove(void *self, const char *path)
 /**
  * esp32_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void esp32_destroy(void *self)
 {
@@ -230,9 +216,7 @@ static cc_filesystem_vtable_t esp32_vtable = {
 /**
  * cc_filesystem_get_default — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_fs 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_fs 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 cc_result_t cc_filesystem_get_default(cc_filesystem_t *out_fs)
@@ -247,9 +231,7 @@ cc_result_t cc_filesystem_get_default(cc_filesystem_t *out_fs)
 /**
  * cc_filesystem_get_posix — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_fs 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_fs 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 cc_result_t cc_filesystem_get_posix(cc_filesystem_t *out_fs)

@@ -5,6 +5,15 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * Agent manager 是 CLI/app 面向 SDK 的主入口。它不拥有 runtime 的内部依赖，
+ * 只保存 agent_id -> runtime 的映射，并把每次消息提交到 run queue。
+ *
+ * 生命周期：
+ *   - runtime 指针由 runtime_builder 或 app 创建，manager 只借用。
+ *   - queue 可借用也可由 manager 拥有，取决于 owns_queue。
+ *   - pending_run 保存异步 run 的响应指针；collect 后释放节点。
+ */
 typedef struct cc_agent_manager_entry {
     char *id;
     cc_agent_runtime_t *runtime;
@@ -46,6 +55,10 @@ static cc_result_t run_message_task(void *user_data, cc_cancel_token_t *cancel_t
     }
     cc_agent_runtime_run_options_t options;
     memset(&options, 0, sizeof(options));
+    /*
+     * cancel_token 直接透传到 runtime。runtime 再把它传给 LLM stream fallback、
+     * tool executor、plugin/MCP transport。manager 自己不解释取消细节。
+     */
     options.cancel_token = cancel_token;
     return cc_agent_runtime_handle_message_with_options(
         task->runtime,

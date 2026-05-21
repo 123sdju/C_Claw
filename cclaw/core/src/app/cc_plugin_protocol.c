@@ -3,6 +3,11 @@
 
 #include <stdlib.h>
 
+/*
+ * Plugin protocol 留在 core，因为 JSON-RPC envelope 与平台无关。POSIX/Windows
+ * app 只负责把 request_json 写入子进程 stdin，并把 stdout line 交回这里解析。
+ * 这样两个桌面 app 不会各自维护一份协议细节。
+ */
 char *cc_plugin_protocol_build_request(
     const char *method,
     const char *params_json

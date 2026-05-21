@@ -26,58 +26,48 @@ extern cc_result_t cc_policy_engine_create_default(
 );
 #if CC_TOOL_FILE_READ
 /**
- * cc_file_read_tool_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * cc_file_read_tool_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param fs 按值传入，用于控制本次操作。
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 extern cc_result_t cc_file_read_tool_create(cc_filesystem_t fs, cc_tool_t *out_tool);
 #endif
 #if CC_TOOL_FILE_WRITE
 /**
- * cc_file_write_tool_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * cc_file_write_tool_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param fs 按值传入，用于控制本次操作。
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 extern cc_result_t cc_file_write_tool_create(cc_filesystem_t fs, cc_tool_t *out_tool);
 #endif
 #if CC_TOOL_HTTP_REQUEST
 /**
- * cc_http_request_tool_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * cc_http_request_tool_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 extern cc_result_t cc_http_request_tool_create(cc_tool_t *out_tool);
 #endif
 /**
- * cc_esp32_gpio_tool_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * cc_esp32_gpio_tool_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 extern cc_result_t cc_esp32_gpio_tool_create(cc_tool_t *out_tool);
 #if CC_LLM_OPENAI
 /**
- * cc_openai_provider_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * cc_openai_provider_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param base_url 借用的只读字符串；函数不会释放该指针。
  * @param api_key 借用的只读字符串；函数不会释放该指针。
  * @param model 借用的只读字符串；函数不会释放该指针。
- * @param out_provider 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_provider 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 extern cc_result_t cc_openai_provider_create(
@@ -90,12 +80,10 @@ extern cc_result_t cc_openai_provider_create(
 
 #if CC_LLM_OPENAI
 /**
- * create_openai — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * create_openai — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param config 只读配置对象；函数读取字段但不保存 config 指针。
- * @param out_provider 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_provider 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t create_openai(const cc_config_t *config, cc_llm_provider_t *out_provider)
@@ -105,12 +93,10 @@ static cc_result_t create_openai(const cc_config_t *config, cc_llm_provider_t *o
 #endif
 
 /**
- * create_policy — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * create_policy — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param config 只读配置对象；函数读取字段但不保存 config 指针。
- * @param out_policy 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_policy 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t create_policy(const cc_config_t *config, cc_policy_engine_t *out_policy)
@@ -141,12 +127,10 @@ static cc_result_t create_memory_store(const cc_config_t *config, cc_memory_stor
 
 #if CC_TOOL_FILE_READ
 /**
- * create_file_read_tool — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * create_file_read_tool — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t create_file_read_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
@@ -157,12 +141,10 @@ static cc_result_t create_file_read_tool(const cc_runtime_tool_factory_ctx_t *ct
 
 #if CC_TOOL_FILE_WRITE
 /**
- * create_file_write_tool — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * create_file_write_tool — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t create_file_write_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
@@ -173,12 +155,10 @@ static cc_result_t create_file_write_tool(const cc_runtime_tool_factory_ctx_t *c
 
 #if CC_TOOL_HTTP_REQUEST
 /**
- * create_http_request_tool — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * create_http_request_tool — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t create_http_request_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
@@ -189,12 +169,10 @@ static cc_result_t create_http_request_tool(const cc_runtime_tool_factory_ctx_t 
 #endif
 
 /**
- * create_memory_tool — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * create_memory_tool — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t create_memory_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
@@ -210,12 +188,10 @@ static cc_result_t create_memory_tool(const cc_runtime_tool_factory_ctx_t *ctx, 
 }
 
 /**
- * create_gpio_tool — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * create_gpio_tool — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t create_gpio_tool(const cc_runtime_tool_factory_ctx_t *ctx, cc_tool_t *out_tool)
@@ -269,8 +245,6 @@ static const cc_runtime_feature_set_t feature_set = {
 
 /**
  * cc_app_default_features — 返回当前应用 profile 的静态 feature set，供 runtime_builder 发现可编译能力。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @return 静态只读 feature set 借用指针；调用方不得释放或修改。
  */

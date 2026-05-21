@@ -16,9 +16,10 @@
 #include <stdlib.h>
 
 /**
- * cc_esp32_thread — 平台线程包装对象，用于把统一 cc_thread_t 映射到平台原生线程句柄。
+ * cc_esp32_thread — FreeRTOS task join 包装。
  *
- * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ * FreeRTOS task 本身没有 pthread_join 等价物，因此 wrapper 持有一个 binary
+ * semaphore。task 结束前 give，cc_thread_join take 后释放 wrapper。
  */
 typedef struct cc_esp32_thread {
     cc_thread_fn_t fn;
@@ -27,12 +28,10 @@ typedef struct cc_esp32_thread {
 } cc_esp32_thread_t;
 
 /**
- * cc_esp32_thread_entry — 把 ESP-IDF task 入口参数还原为 C-Claw 线程启动参数并调用用户函数。
+ * cc_esp32_thread_entry — FreeRTOS task trampoline。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ * arg 是 cc_esp32_thread_t*，由 cc_thread_create 分配并由 join 释放。入口函数
+ * 执行完后通知 done semaphore，再删除当前 task。
  */
 static void cc_esp32_thread_entry(void *arg)
 {
@@ -43,14 +42,10 @@ static void cc_esp32_thread_entry(void *arg)
 }
 
 /**
- * cc_thread_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * cc_thread_create — 用 FreeRTOS task 实现 cc_thread_t。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param fn 按值传入，用于控制本次操作。
- * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
- * @param out_thread 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * wrapper 拥有 done semaphore，但不拥有 arg；arg 生命周期仍由调用方或上层 job
+ * 对象管理。栈大小固定为 8192 字节，适合当前 QEMU smoke 和轻量 SDK 任务。
  */
 cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thread)
 {
@@ -88,8 +83,6 @@ cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thre
 /**
  * cc_thread_join — 等待平台线程结束，并把底层 join 错误转换为统一结果。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param handle 按值传入，用于控制本次操作。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
@@ -104,11 +97,9 @@ cc_result_t cc_thread_join(cc_thread_t handle)
 }
 
 /**
- * cc_mutex_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * cc_mutex_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_mutex 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_mutex 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
@@ -123,10 +114,7 @@ cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
 /**
  * cc_mutex_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param mutex 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_mutex_destroy(cc_mutex_t mutex)
 {
@@ -146,10 +134,7 @@ void cc_mutex_lock(cc_mutex_t mutex)
 /**
  * cc_mutex_unlock — 离开平台互斥锁临界区，让其他线程继续访问共享状态。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param mutex 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_mutex_unlock(cc_mutex_t mutex)
 {

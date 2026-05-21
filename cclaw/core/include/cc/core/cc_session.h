@@ -2,7 +2,8 @@
  * 学习导读：cclaw/core/include/cc/core/cc_session.h
  *
  * 所属层次：核心层。
- * 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+ * 阅读重点：这里定义 session 元数据，重点看 session_id、workspace 和时间字段
+ *           如何被 session store 持久化。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */

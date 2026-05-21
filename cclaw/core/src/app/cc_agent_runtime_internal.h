@@ -2,7 +2,8 @@
  * 学习导读：cclaw/core/src/app/cc_agent_runtime_internal.h
  *
  * 所属层次：核心层。
- * 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+ * 阅读重点：这里是 runtime 内部共享定义，重点看 run options、stream 状态和
+ *           私有 helper 之间的所有权约定。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */
@@ -36,11 +37,8 @@ struct cc_agent_runtime {
 /**
  * cc_agent_runtime_execute_tool_step — 参与工具注册、工具调用或工具结果写回流程。
  *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param runtime 借用的对象；函数不释放该对象本身。
  * @param session_id 借用的只读字符串；函数不会释放该指针。
- * @param call 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param reasoning_content 借用的只读字符串；函数不会释放该指针。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
@@ -54,8 +52,6 @@ cc_result_t cc_agent_runtime_execute_tool_step(
 
 /**
  * cc_agent_runtime_store_assistant_text — 把最终 assistant 文本和可选 reasoning_content 包装成消息并追加到 session store。
- *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param runtime 借用的对象；函数不释放该对象本身。
  * @param session_id 借用的只读字符串；函数不会释放该指针。

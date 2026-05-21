@@ -218,10 +218,7 @@ static void reload_watcher_poll(
 /**
  * history_add — 把用户输入追加到 CLI 历史数组，并在容量满时移除最旧记录。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param line 借用的只读字符串；函数不会释放该指针。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void history_add(const char *line)
 {
@@ -237,8 +234,6 @@ static void history_add(const char *line)
 
 /**
  * utf8_prev_index — 按 UTF-8 字节序列移动光标下标，避免在多字节字符中间删除或移动。
- *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param buf 借用的只读字符串；函数不会释放该指针。
  * @param cursor 按值传入，用于控制本次操作。
@@ -256,8 +251,6 @@ static size_t utf8_prev_index(const char *buf, size_t cursor)
 
 /**
  * utf8_next_index — 按 UTF-8 字节序列移动光标下标，避免在多字节字符中间删除或移动。
- *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param buf 借用的只读字符串；函数不会释放该指针。
  * @param cursor 按值传入，用于控制本次操作。
@@ -277,12 +270,8 @@ static size_t utf8_next_index(const char *buf, size_t cursor, size_t len)
 /**
  * utf8_decode_one — 从缓冲区当前位置解码一个 UTF-8 codepoint，并返回实际消耗的字节数。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param s 借用的只读字符串；函数不会释放该指针。
  * @param len 按值传入，用于控制本次操作。
- * @param consumed 借用的指针参数；若需要长期保存内容，函数会复制。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static unsigned int utf8_decode_one(const unsigned char *s, size_t len, size_t *consumed)
 {
@@ -319,10 +308,7 @@ static unsigned int utf8_decode_one(const unsigned char *s, size_t len, size_t *
 /**
  * codepoint_display_width — 估算 Unicode codepoint 在终端中的显示宽度，用于重绘光标位置。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param cp 按值传入，用于控制本次操作。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int codepoint_display_width(unsigned int cp)
 {
@@ -351,8 +337,6 @@ static int codepoint_display_width(unsigned int cp)
 /**
  * display_width_prefix — 计算字符串前缀在终端中的显示宽度，支撑多字节输入的行重绘。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 借用的只读字符串；函数不会释放该指针。
  * @param bytes 按值传入，用于控制本次操作。
  * @return 返回字节数、元素数或下标；不会转移任何指针所有权。
@@ -374,11 +358,8 @@ static size_t display_width_prefix(const char *buf, size_t bytes)
 /**
  * redraw_line — 根据当前输入缓冲区和光标位置重绘 CLI 提示行。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 借用的只读字符串；函数不会释放该指针。
  * @param cursor 按值传入，用于控制本次操作。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void redraw_line(const char *buf, size_t cursor)
 {
@@ -397,13 +378,8 @@ static void redraw_line(const char *buf, size_t cursor)
 /**
  * tab_complete — 根据当前缓冲区内容执行内置命令或路径补全。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
- * @param len 借用的指针参数；若需要长期保存内容，函数会复制。
- * @param cursor 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param size 按值传入，用于控制本次操作。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int tab_complete(char *buf, size_t *len, size_t *cursor, size_t size)
 {
@@ -443,12 +419,7 @@ static int tab_complete(char *buf, size_t *len, size_t *cursor, size_t size)
 /**
  * delete_before_cursor — 按 UTF-8 字符边界删除输入缓冲区中的一个字符并更新长度/光标。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
- * @param len 借用的指针参数；若需要长期保存内容，函数会复制。
- * @param cursor 借用的指针参数；若需要长期保存内容，函数会复制。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void delete_before_cursor(char *buf, size_t *len, size_t *cursor)
 {
@@ -462,12 +433,8 @@ static void delete_before_cursor(char *buf, size_t *len, size_t *cursor)
 /**
  * delete_at_cursor — 按 UTF-8 字符边界删除输入缓冲区中的一个字符并更新长度/光标。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
- * @param len 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param cursor 按值传入，用于控制本次操作。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void delete_at_cursor(char *buf, size_t *len, size_t cursor)
 {
@@ -480,8 +447,6 @@ static void delete_at_cursor(char *buf, size_t *len, size_t cursor)
 /**
  * generate_session_id — 生成 CLI 临时会话 ID 字符串，调用方负责释放。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
  */
 static char *generate_session_id(void)
@@ -492,12 +457,11 @@ static char *generate_session_id(void)
 }
 
 /**
- * is_yes_answer — 执行条件检查，用于决定后续控制流或测试断言是否继续。
+ * is_yes_answer — 解析交互式审批输入。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param line 借用的只读字符串；函数不会释放该指针。
- * @return 非 0 表示条件成立，0 表示条件不成立。
+ * CLI 只接受 `y`/`yes`，并允许后面跟空白或换行。其他输入都按拒绝处理。
+ * 函数只借用 line，不修改、不保存，也不负责提示文本；调用方负责把结果映射到
+ * policy decision。
  */
 static int is_yes_answer(const char *line)
 {
@@ -521,13 +485,10 @@ static int is_yes_answer(const char *line)
 /**
  * cli_tool_approval — 参与工具注册、工具调用或工具结果写回流程。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param tool_name 借用的只读字符串；函数不会释放该指针。
  * @param arguments_json 借用的只读字符串；函数不会释放该指针。
  * @param reason 借用的只读字符串；函数不会释放该指针。
  * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int cli_tool_approval(
     const char *tool_name,
@@ -557,11 +518,8 @@ static int cli_tool_approval(
 /**
  * cli_readline — 从终端读取一行用户输入，处理历史、补全和基本编辑快捷键。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
  * @param size 按值传入，用于控制本次操作。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int cli_readline(char *buf, size_t size)
 {
@@ -777,9 +735,6 @@ static int g_stream_seen_tool = 0;
 /**
  * stream_render_reset — 重置 CLI 流式渲染状态，准备显示下一次模型输出。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void stream_render_reset(void)
 {
@@ -877,10 +832,7 @@ static void stream_event_handler(const char *event, const char *payload, void *u
 /**
  * run_chat_loop — 驱动 CLI 交互循环，读取用户输入并调用 runtime 获取同步或流式回答。
  *
- * 位置：CLI gateway。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param runtime 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void print_configured_skills(const cc_config_t *config)
 {

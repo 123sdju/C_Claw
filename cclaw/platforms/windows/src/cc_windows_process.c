@@ -172,13 +172,9 @@ static void drain_pipe(HANDLE h, capture_buffer_t *capture)
 /**
  * append_cmd_char — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
  *
- * 位置：Windows 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
  * @param cap 按值传入，用于控制本次操作。
- * @param pos 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param ch 按值传入，用于控制本次操作。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int append_cmd_char(char *buf, size_t cap, size_t *pos, char ch)
 {
@@ -191,12 +187,8 @@ static int append_cmd_char(char *buf, size_t cap, size_t *pos, char ch)
 /**
  * append_cmd_space — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
  *
- * 位置：Windows 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
  * @param cap 按值传入，用于控制本次操作。
- * @param pos 借用的指针参数；若需要长期保存内容，函数会复制。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int append_cmd_space(char *buf, size_t cap, size_t *pos)
 {
@@ -207,13 +199,9 @@ static int append_cmd_space(char *buf, size_t cap, size_t *pos)
 /**
  * append_windows_quoted_arg — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
  *
- * 位置：Windows 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param buf 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
  * @param cap 按值传入，用于控制本次操作。
- * @param pos 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int append_windows_quoted_arg(char *buf, size_t cap, size_t *pos, const char *arg)
 {
@@ -251,9 +239,7 @@ static int append_windows_quoted_arg(char *buf, size_t cap, size_t *pos, const c
 /**
  * build_windows_env_block — 把 NULL 结尾的 KEY=VALUE 数组转换为 Windows 需要的双 NUL 环境块。
  *
- * 位置：Windows 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param env 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param env 输出参数；调用方传入有效指针，成功后接收结果。
  * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
  */
 static char *build_windows_env_block(char **env)

@@ -3,6 +3,13 @@
 
 #include <stdlib.h>
 
+/*
+ * Snapshot 是热重载的读侧保护。runtime_builder 成功构建新 registry 后发布新
+ * generation；已经开始的 run acquire 旧 snapshot 并在 run 结束 release。
+ *
+ * ref_count 只保护 snapshot 对象和它拥有的 registry 生命周期，不让 app 层
+ * plugin reload 直接影响正在运行的工具调用。
+ */
 struct cc_tool_registry_snapshot {
     cc_tool_registry_t *registry;
     unsigned long generation;
@@ -41,6 +48,7 @@ cc_tool_registry_snapshot_t *cc_tool_registry_snapshot_acquire(
 )
 {
     if (!snapshot) return NULL;
+    /* ref_count 由 mutex 保护，避免 reload/destroy 与 run acquire/release 竞争。 */
     cc_mutex_lock(snapshot->mutex);
     snapshot->ref_count++;
     cc_mutex_unlock(snapshot->mutex);

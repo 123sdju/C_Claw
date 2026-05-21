@@ -1,6 +1,7 @@
 # 学习导读：cclaw/core/CMakeLists.txt
 # 所属层次：核心层。
-# 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+# 阅读重点：这里按 CMake feature 开关选择 core 源文件，重点看 SDK 能力如何随
+# profile 裁剪，避免 ESP 等设备 profile 编译无关实现。
 # 注释说明：如果注释与代码冲突，以代码行为和测试为准。
 set(C_CLAW_CORE_SOURCES
     vendor/cjson/cJSON.c

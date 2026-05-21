@@ -2,7 +2,8 @@
  * 学习导读：cclaw/core/src/app/cc_tool_executor.c
  *
  * 所属层次：核心层。
- * 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+ * 阅读重点：这里统一处理工具查找、policy、tool pool、timeout、事件审计和
+ *           “Tool not found” 宽容错误语义。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */
@@ -74,14 +75,11 @@
 #include <string.h>
 
 /**
- * publish_json_event — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ * publish_json_event — 把工具审计事件发布到 event bus。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param bus 借用的指针参数；若需要长期保存内容，函数会复制。
- * @param event_type 借用的只读字符串；函数不会释放该指针。
- * @param payload 借用的指针参数；若需要长期保存内容，函数会复制。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ * payload 由调用方创建，本函数负责 stringify 后发布，然后销毁 payload。
+ * event bus 会复制 event_type/payload_json，因此本地 JSON 字符串发布后即可释放。
+ * 审计事件失败不应影响工具调用主路径，所以这里吞掉 publish 错误。
  */
 static void publish_json_event(
     cc_event_bus_t *bus,
@@ -103,11 +101,8 @@ static void publish_json_event(
 /**
  * set_policy_error_result — 更新对象内部字段或输出结构，同时维护旧值释放规则。
  *
- * 位置：工具适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_result 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_result 输出参数；调用方传入有效指针，成功后接收结果。
  * @param message 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void set_policy_error_result(
     cc_tool_result_t *out_result,

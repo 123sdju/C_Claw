@@ -2,7 +2,8 @@
  * 学习导读：cclaw/core/include/cc/core/cc_memory_entry.h
  *
  * 所属层次：核心层。
- * 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+ * 阅读重点：这里定义 memory entry 的字段模型，重点看 key/value/category/session
+ *           的字符串所有权和时间戳语义。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */

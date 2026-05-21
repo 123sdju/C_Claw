@@ -3,6 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * SSE parser 是纯文本增量状态机。HTTP client 的 body callback 可能把一行、
+ * 一个 event，甚至一个 UTF-8 字节序列拆成多个 chunk；parser 因此分别保存
+ * 当前 line 和当前 event_data。这里只消费 MCP 需要的 data 字段，忽略 event/id/retry。
+ */
 struct cc_sse_parser {
     char *line;
     size_t line_len;

@@ -2,7 +2,8 @@
  * 学习导读：apps/posix/cli/src/plugin/cc_plugin_manager.c
  *
  * 所属层次：POSIX CLI 应用层。
- * 阅读重点：这里组装桌面 CLI、工具、插件和 sandbox，阅读时重点看 main 到 runtime builder 的组合流程。
+ * 阅读重点：这里是桌面 plugin supervisor，重点看 config.json.plugins.entries
+ *           如何转换为 worker 进程、tool 注册和非致命 diagnostics。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */
@@ -44,8 +45,9 @@
  * plugin tool 会 round-robin 选择子进程，从而允许同一插件并发处理多个调用。
  *
  * 错误处理：
- *   - 插件进程启动失败：跳过该插件，继续加载其他插件
- *   - 工具注册失败：跳过该工具，继续处理同插件的其他工具
+ *   - 插件进程启动失败：记录 diagnostic，跳过该插件，继续加载其他插件
+ *   - 工具注册失败：记录 diagnostic，跳过该工具，继续处理同插件的其他工具
+ *   - 配置结构错误：由 cc_config 校验阶段拦截，manager 不负责猜测字段语义
  *****************************************************************************/
 
 #include "cc/plugin/cc_plugin_manager.h"
@@ -57,9 +59,10 @@
 #include <stdio.h>
 
 /**
- * cc_plugin_entry_t — 单个插件条目，拥有插件名并记录该插件注册出的工具数量。
+ * cc_plugin_entry_t — 已加载插件的运行期记录。
  *
- * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ * entry 拥有插件 id、worker 进程数组和 tool_count。tool 本身注册进 registry 后由
+ * registry 拥有；manager 只负责在销毁时停止 worker 进程。
  */
 typedef struct {
     char *name;
@@ -69,9 +72,10 @@ typedef struct {
 } cc_plugin_entry_t;
 
 /**
- * cc_plugin_manager — 插件管理器状态，拥有插件进程、插件工具条目和注册时产生的资源。
+ * cc_plugin_manager — 桌面 plugin supervisor。
  *
- * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ * manager 由 runtime_builder 拥有；reload 成功发布新 generation 后，旧 manager
+ * 可以在 builder destroy 阶段统一释放，避免正在运行的旧 tool 快照读到被提前关闭的进程。
  */
 struct cc_plugin_manager {
     cc_plugin_entry_t *entries;
@@ -81,7 +85,7 @@ struct cc_plugin_manager {
 /**
  * cc_plugin_manager_create — 创建插件 supervisor 状态。
  *
- * @param out_manager 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_manager 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 cc_result_t cc_plugin_manager_create(cc_plugin_manager_t **out_manager)
@@ -99,8 +103,7 @@ cc_result_t cc_plugin_manager_create(cc_plugin_manager_t **out_manager)
  * @param tool_name 借用的只读字符串；函数不会释放该指针。
  * @param tool_description 借用的只读字符串；函数不会释放该指针。
  * @param tool_schema_json 借用的只读字符串；函数不会释放该指针。
- * @param process 借用的指针参数；若需要长期保存内容，函数会复制。
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 extern cc_result_t cc_plugin_tool_create_full(
@@ -125,8 +128,6 @@ extern cc_result_t cc_plugin_tool_create_pool(
 /**
  * manager_add_entry — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
  *
- * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param manager 借用的对象；函数不释放该对象本身。
  * @param entry 按值传入，用于控制本次操作。
  * @return CC_OK 表示已接管 entry；失败时调用方仍拥有 entry，需要自行释放。
@@ -145,7 +146,6 @@ static cc_result_t manager_add_entry(cc_plugin_manager_t *manager, cc_plugin_ent
  * load_single_plugin — 从旧 JSON 测试格式启动一个插件条目。
  *
  * @param manager 借用的对象；函数不释放该对象本身。
- * @param plugin_json 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param registry 借用的对象；函数不释放该对象本身。
  * @return 成功表示该插件至少完成了必要资源处理；失败由上层跳过该插件。
  */
@@ -449,10 +449,7 @@ cc_result_t cc_plugin_manager_load_plugins(
 /**
  * cc_plugin_manager_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
  *
- * 位置：插件/JSON-RPC 子系统。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param manager 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_plugin_manager_destroy(cc_plugin_manager_t *manager)
 {

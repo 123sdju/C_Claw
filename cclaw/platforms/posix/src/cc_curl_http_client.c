@@ -20,9 +20,11 @@
 #endif
 
 /**
- * cc_curl_write_ctx — HTTP 响应累积上下文，回调逐块追加响应体并维护长度/容量。
+ * cc_curl_write_ctx — libcurl body/header 回调共享上下文。
  *
- * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ * 非流式调用把 body 累积到 response->body；流式调用把每个 chunk 交给 on_body，
+ * 用于 LLM streaming、MCP SSE 和 streamable HTTP。callback_error 保存回调返回的
+ * cc_result_t，让 CURLE_WRITE_ERROR 可以还原成取消、解析失败或大小限制。
  */
 typedef struct cc_curl_write_ctx {
     cc_http_response_t *response;
@@ -39,15 +41,11 @@ typedef struct cc_curl_write_ctx {
 } cc_curl_write_ctx_t;
 
 /**
- * response_append — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+ * response_append — 累积非流式响应体。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param response 借用的对象；函数不释放该对象本身。
- * @param data 借用的只读字符串；函数不会释放该指针。
- * @param len 按值传入，用于控制本次操作。
- * @param max_response_bytes 按值传入，用于控制本次操作。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
+ * 只在 request.on_body 为 NULL 时使用。函数维护 response->body 的 '\0' 结尾，
+ * 方便上层把 HTTP body 当 C 字符串解析 JSON；超过 max_response_bytes 或 OOM
+ * 返回 0，由 libcurl 回调路径转换成 cc_result_t。
  */
 static int response_append(
     cc_http_response_t *response,
@@ -131,12 +129,8 @@ static cc_result_t response_header_append(
 /**
  * cc_curl_write_body — 执行文件系统操作，并把平台错误转换为统一结果。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param contents 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param size 按值传入，用于控制本次操作。
  * @param nmemb 按值传入，用于控制本次操作。
- * @param userp 借用的指针参数；若需要长期保存内容，函数会复制。
  * @return 返回字节数、元素数或下标；不会转移任何指针所有权。
  */
 static size_t cc_curl_write_body(void *contents, size_t size, size_t nmemb, void *userp)
@@ -213,9 +207,7 @@ static int cc_curl_progress(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
 /**
  * append_header — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param headers 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param headers 输出参数；调用方传入有效指针，成功后接收结果。
  * @param name 借用的只读字符串；函数不会释放该指针。
  * @param value 借用的只读字符串；函数不会释放该指针。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
@@ -247,10 +239,8 @@ static cc_result_t append_header(struct curl_slist **headers, const char *name, 
 /**
  * cc_http_client_perform — 执行一次平台 HTTP 请求，填充状态码和响应体或触发流式回调。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param request 借用的对象；函数不释放该对象本身。
- * @param out_response 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_response 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 cc_result_t cc_http_client_perform(
@@ -347,10 +337,7 @@ cc_result_t cc_http_client_perform(
 /**
  * cc_http_response_free — 释放结果结构体内部由平台层分配的缓冲区，并把大小/指针复位。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param response 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_http_response_free(cc_http_response_t *response)
 {

@@ -2,7 +2,8 @@
  * 学习导读：cclaw/core/src/app/cc_agent_runtime.c
  *
  * 所属层次：核心层。
- * 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+ * 阅读重点：这里实现 ReAct 主循环，重点看消息持久化、LLM 调用、工具执行、
+ *           stream fallback、取消令牌和 max_steps 防护。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */
@@ -134,9 +135,6 @@ static unsigned long g_id_counter = 0;
 /**
  * ensure_id_mutex — 按需初始化全局消息 ID 互斥锁，保护进程内递增计数。
  *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void ensure_id_mutex(void)
 {
@@ -414,9 +412,6 @@ cc_result_t cc_agent_runtime_create(
 /**
  * build_tool_calls_json — 把单个工具调用编码成 LLM 兼容的 tool_calls JSON 数组字符串。
  *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param call 借用的指针参数；若需要长期保存内容，函数会复制。
  * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
  */
 static char *build_tool_calls_json(const cc_tool_call_t *call)
@@ -438,8 +433,6 @@ static char *build_tool_calls_json(const cc_tool_call_t *call)
 
 /**
  * cc_agent_runtime_store_assistant_text — 把最终 assistant 文本和可选 reasoning_content 包装成消息并追加到 session store。
- *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param runtime 借用的对象；函数不释放该对象本身。
  * @param session_id 借用的只读字符串；函数不会释放该指针。
@@ -480,11 +473,8 @@ cc_result_t cc_agent_runtime_store_assistant_text(
 /**
  * cc_agent_runtime_execute_tool_step — 参与工具注册、工具调用或工具结果写回流程。
  *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param runtime 借用的对象；函数不释放该对象本身。
  * @param session_id 借用的只读字符串；函数不会释放该指针。
- * @param call 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param reasoning_content 借用的只读字符串；函数不会释放该指针。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
@@ -813,11 +803,7 @@ static void execute_pending_tool(stream_loop_ctx_t *ctx)
 /**
  * stream_loop_callback — 维护流式输出缓冲和事件分发状态。
  *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param chunk 借用的指针参数；若需要长期保存内容，函数会复制。
  * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void stream_loop_callback(const cc_stream_chunk_t *chunk, void *user_data)
 {
@@ -1257,12 +1243,9 @@ void cc_agent_runtime_set_thinking_mode(cc_agent_runtime_t *runtime, int enabled
 /**
  * cc_agent_runtime_set_tool_approval — 参与工具注册、工具调用或工具结果写回流程。
  *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param runtime 借用的对象；函数不释放该对象本身。
  * @param approve_tool_call 按值传入，用于控制本次操作。
  * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_agent_runtime_set_tool_approval(
     cc_agent_runtime_t *runtime,
@@ -1313,8 +1296,6 @@ int cc_agent_runtime_get_thinking_mode(cc_agent_runtime_t *runtime)
 /**
  * cc_agent_runtime_event_bus — 返回 runtime 注入的事件总线借用指针，供 gateway 订阅流式事件。
  *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param runtime 借用的对象；函数不释放该对象本身。
  * @return 返回借用对象指针；NULL 表示未注入、未找到或当前对象无效。
  */
@@ -1337,8 +1318,6 @@ cc_tool_registry_t *cc_agent_runtime_tool_registry(cc_agent_runtime_t *runtime)
 /**
  * cc_agent_runtime_session_store — 返回 runtime 内部会话存储端口地址，供测试或诊断复用。
  *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param runtime 借用的对象；函数不释放该对象本身。
  * @return 返回借用对象指针；NULL 表示未注入、未找到或当前对象无效。
  */
@@ -1359,9 +1338,7 @@ int cc_agent_runtime_supports_stream(cc_agent_runtime_t *runtime)
 }
 
 /**
- * cc_agent_runtime_create_session — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：Agent runtime 应用层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * cc_agent_runtime_create_session — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param runtime 借用的对象；函数不释放该对象本身。
  * @param session_id 借用的只读字符串；函数不会释放该指针。

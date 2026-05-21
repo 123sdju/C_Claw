@@ -2,7 +2,8 @@
  * 学习导读：cclaw/core/src/core/cc_message.c
  *
  * 所属层次：核心层。
- * 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+ * 阅读重点：这里实现会话消息值对象，重点看 role/content/tool_calls/reasoning
+ *           字段的深拷贝、清理和序列化边界。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */
@@ -259,10 +260,7 @@ void cc_message_destroy(cc_message_t *message)
 /**
  * cc_message_cleanup — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
  *
- * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param message 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_message_cleanup(cc_message_t *message)
 {
@@ -280,10 +278,6 @@ void cc_message_cleanup(cc_message_t *message)
 /**
  * cc_message_copy — 复制输入数据，让目标对象拥有独立生命周期。
  *
- * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param src 借用的指针参数；若需要长期保存内容，函数会复制。
- * @param dst 借用的指针参数；若需要长期保存内容，函数会复制。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst)
@@ -314,13 +308,11 @@ cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst)
 }
 
 /**
- * cc_message_set_tool_calls_json — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ * cc_message_set_tool_calls_json — 保存 assistant 消息中的 tool_calls 原始 JSON。
  *
- * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param message 借用的对象；函数不释放该对象本身。
- * @param tool_calls_json 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 消息模型把 tool_calls_json 作为字符串字段存储，是为了让不同 LLM provider 的
+ * 工具调用格式先在边界层归一化，再由 runtime 解析执行。函数会深拷贝输入并释放
+ * 旧值；失败时保留旧值，避免半更新的 message 进入 session store。
  */
 cc_result_t cc_message_set_tool_calls_json(cc_message_t *message, const char *tool_calls_json)
 {
@@ -336,8 +328,6 @@ cc_result_t cc_message_set_tool_calls_json(cc_message_t *message, const char *to
 
 /**
  * cc_message_set_reasoning_content — 处理消息对象的创建、复制、字段更新或序列化。
- *
- * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param message 借用的对象；函数不释放该对象本身。
  * @param reasoning_content 借用的只读字符串；函数不会释放该指针。

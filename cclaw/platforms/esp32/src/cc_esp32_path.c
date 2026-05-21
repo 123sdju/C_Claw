@@ -22,8 +22,6 @@
 /**
  * cc_path_join — 拼接基础路径和子路径，返回新分配的规范 C 字符串。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param base 借用的只读字符串；函数不会释放该指针。
  * @param child 借用的只读字符串；函数不会释放该指针。
  * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
@@ -46,8 +44,6 @@ char *cc_path_join(const char *base, const char *child)
 /**
  * cc_path_canonical — 解析路径的真实位置；失败时回退为输入路径副本。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param path 借用的只读字符串；函数不会释放该指针。
  * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
  */
@@ -62,11 +58,8 @@ char *cc_path_canonical(const char *path)
 /**
  * cc_path_is_within — 判断目标路径规范化后是否仍位于给定基础目录内。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param base_dir 借用的只读字符串；函数不会释放该指针。
  * @param path 借用的只读字符串；函数不会释放该指针。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 int cc_path_is_within(const char *base_dir, const char *path)
 {
@@ -87,8 +80,6 @@ int cc_path_is_within(const char *base_dir, const char *path)
 
 /**
  * cc_path_dirname — 计算路径所在目录，返回新分配字符串。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param path 借用的只读字符串；函数不会释放该指针。
  * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
@@ -113,8 +104,6 @@ char *cc_path_dirname(const char *path)
 
 /**
  * cc_path_exists — 查询路径是否存在，并把平台 API 的结果折叠为布尔值。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param path 借用的只读字符串；函数不会释放该指针。
  * @return 非 0 表示条件成立，0 表示条件不成立。

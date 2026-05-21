@@ -94,6 +94,10 @@ c_claw_esp32_s3_qemu.bin  272,800 bytes，约 266.4 KiB
 factory app partition     1 MiB，约 757.6 KiB free
 ```
 
+`docs/study.md` 是本地忽略的个人学习统计快照，不作为仓库正式文档提交。需要长期
+维护的学习材料放在本文档和 `cclaw/docs/*`；需要更新代码量数字时，应重新统计当前
+工作区并确认是否要同步到正式文档。
+
 Windows CLI 的源码和 CMake 结构已经跟 POSIX 对齐，但仍需要真实 Windows 主机或
 Windows 交叉工具链做最终编译验收。面试或复盘时要把它讲成“结构已准备，平台验收待补”，
 不要把未跑过的环境说成已验证。

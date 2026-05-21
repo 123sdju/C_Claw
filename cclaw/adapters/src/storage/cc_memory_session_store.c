@@ -105,8 +105,6 @@ typedef struct {
 /**
  * dup_required_string — 复制输入数据，让目标对象拥有独立生命周期。
  *
- * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param value 借用的只读字符串；函数不会释放该指针。
  * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
  */
@@ -134,10 +132,6 @@ static void free_tool_call_record(cc_memory_tool_call_record_t *record)
 /**
  * free_tool_result_record — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
  *
- * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param record 借用的指针参数；若需要长期保存内容，函数会复制。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void free_tool_result_record(cc_memory_tool_result_record_t *record)
 {
@@ -152,12 +146,11 @@ static void free_tool_result_record(cc_memory_tool_result_record_t *record)
 }
 
 /**
- * ensure_tool_call_capacity — 确保后续操作所需的容量、状态或平台资源已经准备好。
+ * ensure_tool_call_capacity — 扩容内存态 tool call 审计数组。
  *
- * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param store 借用的对象；函数不释放该对象本身。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * store 拥有 tool_calls 数组；扩容使用 realloc，成功后新增区域清零，保证后续
+ * free_tool_call_record() 可以安全处理未完全写入的槽位。失败时保持旧数组和旧容量
+ * 不变，让调用方可以直接返回 OOM，不会丢失已有会话数据。
  */
 static cc_result_t ensure_tool_call_capacity(cc_memory_session_store_t *store)
 {
@@ -176,12 +169,11 @@ static cc_result_t ensure_tool_call_capacity(cc_memory_session_store_t *store)
 }
 
 /**
- * ensure_tool_result_capacity — 确保后续操作所需的容量、状态或平台资源已经准备好。
+ * ensure_tool_result_capacity — 扩容内存态 tool result 审计数组。
  *
- * 位置：存储适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param store 借用的对象；函数不释放该对象本身。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * tool result 与 tool call 分开存储，是为了保留“LLM 发起调用”和“工具返回观察”
+ * 两个事件的独立时间线。扩容策略与 tool_calls 一致：成功后清零新增槽位，失败时
+ * 不破坏旧数据结构。
  */
 static cc_result_t ensure_tool_result_capacity(cc_memory_session_store_t *store)
 {

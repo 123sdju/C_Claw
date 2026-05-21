@@ -43,12 +43,11 @@ cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thre
 }
 
 /**
- * cc_thread_join — 等待平台线程结束，并把底层 join 错误转换为统一结果。
+ * cc_thread_join — 等待 pthread 结束并释放堆上 pthread_t 包装。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param thread 借用的对象；函数不释放该对象本身。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * cc_thread_create 为了隐藏 pthread_t 的实际大小，把 pthread_t 放在堆上并通过
+ * void* 返回；join 成功或 pthread_join 失败后都释放这块包装内存，因此句柄只能
+ * join 一次。
  */
 cc_result_t cc_thread_join(cc_thread_t thread)
 {
@@ -67,12 +66,10 @@ cc_result_t cc_thread_join(cc_thread_t thread)
 }
 
 /**
- * cc_mutex_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * cc_mutex_create — 创建递归 pthread mutex。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_mutex 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 递归锁让 event bus、logger 等模块在少量重入场景下更稳妥；上层仍应尽量缩短
+ * 持锁区间，不把递归语义当成主要设计依赖。返回的 mutex 由调用方 destroy。
  */
 cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
 {
@@ -103,10 +100,7 @@ cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
 /**
  * cc_mutex_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param mutex 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_mutex_destroy(cc_mutex_t mutex)
 {
@@ -118,10 +112,7 @@ void cc_mutex_destroy(cc_mutex_t mutex)
 /**
  * cc_mutex_lock — 进入平台互斥锁临界区，保护共享状态读写。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param mutex 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_mutex_lock(cc_mutex_t mutex)
 {
@@ -132,10 +123,7 @@ void cc_mutex_lock(cc_mutex_t mutex)
 /**
  * cc_mutex_unlock — 离开平台互斥锁临界区，让其他线程继续访问共享状态。
  *
- * 位置：POSIX 平台层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param mutex 借用的对象；函数不释放该对象本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 void cc_mutex_unlock(cc_mutex_t mutex)
 {

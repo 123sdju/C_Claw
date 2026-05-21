@@ -4,6 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Run queue 是 SDK 层的真实 job queue。它只依赖 cc_thread/cc_mutex/cc_cond，
+ * 所以 POSIX、Windows 和 ESP32 复用同一套 session/lane 语义。
+ *
+ * 锁约定：
+ *   - queue->mutex 保护 jobs 链表、session in-flight、lane in-flight 和计数器。
+ *   - worker 取到可运行 job 后在锁外执行 task，避免长时间持锁阻塞其它 session。
+ *   - cancel source 属于 job；interrupt 只标记取消，具体 task 在安全点观察 token。
+ */
 #define CC_RUN_QUEUE_LANE_COUNT 4
 #define CC_RUN_QUEUE_MAX_ACTIVE_SESSIONS 128
 
@@ -16,6 +25,7 @@ typedef enum cc_run_job_state {
 typedef struct cc_run_queue_session_state {
     char *key;
     int in_flight;
+    /* 每次 steer/interrupt 都递增 generation，用于让 pending job 识别过期输入。 */
     unsigned long generation;
 } cc_run_queue_session_state_t;
 
@@ -58,6 +68,10 @@ static cc_result_t cancelled_result(const char *message)
 static void free_job(cc_run_queue_job_t *job)
 {
     if (!job) return;
+    /*
+     * job 持有 session_key、cancel_source 和 result 错误消息。user_data 默认只借用；
+     * 少数内部路径可以设置 owns_user_data，让队列在取消未执行 job 时清理 task 对象。
+     */
     free(job->session_key);
     cc_result_free(&job->result);
     cc_cancel_source_destroy(job->cancel_source);
@@ -117,6 +131,10 @@ static size_t desired_worker_count(const cc_run_queue_config_t *config)
     int mcp_limit = normalized_limit(config->mcp_concurrency);
     int total = main_limit + subagent_limit + plugin_limit + mcp_limit;
     if (total < 1) total = 1;
+    /*
+     * 上限避免配置错误在桌面创建过多线程，也让 ESP profile 即使误开较大并发时
+     * 仍有一个保守保护。lane 并发限制仍由 lane_in_flight 单独执行。
+     */
     if (total > 32) total = 32;
     return (size_t)total;
 }

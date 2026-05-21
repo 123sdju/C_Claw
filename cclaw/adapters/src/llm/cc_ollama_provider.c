@@ -16,8 +16,6 @@
 /**
  * add_header — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
  *
- * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param request 借用的对象；函数不释放该对象本身。
  * @param name 借用的只读字符串；函数不会释放该指针。
  * @param value 借用的只读字符串；函数不会释放该指针。
@@ -42,8 +40,6 @@ static cc_result_t add_header(cc_llm_http_request_t *request, const char *name, 
 /**
  * ollama_name — 返回端口、工具或协议的静态名称字符串，用于注册和日志。
  *
- * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @return 返回借用或静态只读字符串；调用方不得释放。
  */
@@ -56,15 +52,13 @@ static const char *ollama_name(void *self)
 /**
  * ollama_build_request — 把统一 chat request 转换为该 provider 的 HTTP URL、header 和 JSON body。
  *
- * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param base_url 借用的只读字符串；函数不会释放该指针。
  * @param api_key 借用的只读字符串；函数不会释放该指针。
  * @param default_model 借用的只读字符串；函数不会释放该指针。
  * @param request 借用的对象；函数不释放该对象本身。
  * @param stream 按值传入，用于控制本次操作。
- * @param out_request 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_request 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t ollama_build_request(
@@ -143,11 +137,9 @@ static cc_result_t ollama_build_request(
 /**
  * ollama_parse_response — 解析 provider 的完整响应 JSON，填充统一 LLM response。
  *
- * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param response_json 借用的只读字符串；函数不会释放该指针。
- * @param out_response 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_response 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t ollama_parse_response(
@@ -211,13 +203,11 @@ static cc_result_t ollama_parse_response(
 /**
  * ollama_parse_stream_event — 解析 provider 的一段流式事件，并通过统一 chunk 回调交给 runtime。
  *
- * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param event_json 借用的只读字符串；函数不会释放该指针。
  * @param on_chunk 按值传入，用于控制本次操作。
  * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * @param out_finished 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_finished 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t ollama_parse_stream_event(
@@ -312,13 +302,11 @@ static cc_llm_protocol_vtable_t ollama_protocol_vtable = {
 };
 
 /**
- * cc_ollama_provider_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：LLM 协议适配层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * cc_ollama_provider_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @param base_url 借用的只读字符串；函数不会释放该指针。
  * @param model 借用的只读字符串；函数不会释放该指针。
- * @param out_provider 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_provider 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 cc_result_t cc_ollama_provider_create(

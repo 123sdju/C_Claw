@@ -2,7 +2,8 @@
  * 学习导读：cclaw/core/include/cc/app/cc_memory_context.h
  *
  * 所属层次：核心层。
- * 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+ * 阅读重点：这里声明 memory prompt 注入入口，重点看 memory store 借用和关闭
+ *           memory feature 后的裁剪边界。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */

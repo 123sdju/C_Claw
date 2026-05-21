@@ -12,6 +12,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * POSIX/Windows app 层的 MCP manager 只提供 transport factory。MCP 协议状态机、
+ * tool bridge、TTL 和 JSON-RPC id 匹配都在 core 的 cc_mcp_runtime_manager 中。
+ *
+ * stdio transport 拥有进程 pipe，必须串行；HTTP transport 通过 cc_http_client 的
+ * on_body 流式回调接入 SSE/streamable HTTP，并缓存 Mcp-Session-Id。
+ */
 typedef struct cc_mcp_stdio_transport {
     char *command;
     char **argv;

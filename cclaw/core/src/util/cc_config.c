@@ -2,7 +2,8 @@
  * 学习导读：cclaw/core/src/util/cc_config.c
  *
  * 所属层次：核心层。
- * 阅读重点：这里定义 Agent 运行时的数据模型、主循环和通用工具，阅读时重点看所有权、错误返回和 ReAct 数据流。
+ * 阅读重点：这里解析 config.json 并建立 profile 默认值，重点看字段所有权、
+ *           严格语义校验、非致命外部 tool diagnostics 的配置边界。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */
@@ -200,11 +201,8 @@ static char *read_text_file(const char *path)
 /**
  * replace_string — 用新分配字符串替换配置字段；分配失败时保留旧值并返回错误。
  *
- * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param field 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param field 输出参数；调用方传入有效指针，成功后接收结果。
  * @param value 借用的只读字符串；函数不会释放该指针。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int replace_string(char **field, const char *value)
 {
@@ -217,13 +215,11 @@ static int replace_string(char **field, const char *value)
 }
 
 /**
- * json_string_field — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ * json_string_field — 从 JSON object 里借用一个字符串字段。
  *
- * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param obj 借用的指针参数；若需要长期保存内容，函数会复制。
- * @param key 借用的只读字符串；函数不会释放该指针。
- * @return 返回借用或静态只读字符串；调用方不得释放。
+ * 这里不复制字符串，也不报“字段缺失”错误；config loader 的策略是先填 profile
+ * 默认值，再只用 JSON 里实际出现的字段覆盖。需要持久化到 cc_config_t 的地方
+ * 必须马上调用 replace_string()/copy_json_string_field() 做深拷贝。
  */
 static const char *json_string_field(cc_json_value_t *obj, const char *key)
 {
@@ -232,12 +228,11 @@ static const char *json_string_field(cc_json_value_t *obj, const char *key)
 }
 
 /**
- * json_boolish_value — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ * json_boolish_value — 宽松读取配置里的布尔值。
  *
- * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param value 借用的指针参数；若需要长期保存内容，函数会复制。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
+ * config.json 示例通常写 true/false，但历史配置和手写配置里可能出现
+ * "true"/"false" 或 0/1。这里统一归一化为 0/1；非布尔、非数字、非可识别字符串
+ * 视为 false，严格语义校验留给 validate_config() 处理。
  */
 static int json_boolish_value(cc_json_value_t *value)
 {
@@ -393,8 +388,6 @@ static int sync_enabled_tools_cache(cc_config_t *config)
 
 /**
  * config_required_allocs_ok — 检查默认配置填充后的关键字符串字段是否都已成功分配。
- *
- * 位置：核心数据模型层。注释重点说明当前函数的输入输出、资源边界和错误传播。
  *
  * @param config 只读配置对象；函数读取字段但不保存 config 指针。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。

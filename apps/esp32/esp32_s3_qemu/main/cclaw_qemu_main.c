@@ -47,20 +47,16 @@ static const char *QEMU_DATA_DIR = "/sdcard/cclaw/data";
 static wl_handle_t s_sdcard_wl_handle = WL_INVALID_HANDLE;
 
 /**
- * cc_memory_session_store_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * cc_memory_session_store_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_store 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_store 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 extern cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
 /**
- * cc_esp32_gpio_tool_create — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * cc_esp32_gpio_tool_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param out_tool 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out_tool 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 extern cc_result_t cc_esp32_gpio_tool_create(cc_tool_t *out_tool);
@@ -91,13 +87,9 @@ static esp_eth_phy_t *s_eth_phy = NULL;
 /**
  * on_eth_got_ip — 处理 QEMU 以太网获 IP 事件，记录网络已经可用的状态。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
  * @param event_base 按值传入，用于控制本次操作。
  * @param event_id 按值传入，用于控制本次操作。
- * @param event_data 借用的指针参数；若需要长期保存内容，函数会复制。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void on_eth_got_ip(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
@@ -110,9 +102,7 @@ static void on_eth_got_ip(void *arg, esp_event_base_t event_base, int32_t event_
 }
 
 /**
- * qemu_network_start — 创建、启动或加载组件资源，并把错误统一传播给调用方。
- *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
+ * qemu_network_start — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
@@ -183,7 +173,8 @@ static cc_result_t qemu_network_start(void)
 /**
  * thread_probe — QEMU 自测用线程探针，主线程通过它验证 mutex 保护下的计数递增。
  *
- * 资源约定：动态缓冲区由该结构拥有；借用指针只在所属调用链有效，count/capacity 字段必须同步维护。
+ * mutex 是测试创建的同步对象，worker 和主线程共同借用它；value 只能在持锁时读写。
+ * 测试在线程 join 之后销毁 mutex，避免 worker 仍在运行时释放同步原语。
  */
 typedef struct thread_probe {
     cc_mutex_t mutex;
@@ -194,11 +185,8 @@ typedef struct thread_probe {
 /**
  * replace_config_string — 用测试配置值替换 cc_config_t 字符串字段，成功后字段拥有新副本。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param field 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param field 输出参数；调用方传入有效指针，成功后接收结果。
  * @param value 借用的只读字符串；函数不会释放该指针。
- * @return 返回整数状态、计数或断言结果，供当前调用链判断下一步。
  */
 static int replace_config_string(char **field, const char *value)
 {
@@ -214,8 +202,6 @@ static int replace_config_string(char **field, const char *value)
 /**
  * worker_increment — 在线程测试中递增共享计数器，用互斥锁验证并发访问安全。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param arg 回调上下文；函数只透传或临时读取，不取得所有权。
  * @return 返回借用对象指针；NULL 表示未注入、未找到或当前对象无效。
  */
@@ -229,13 +215,10 @@ static void *worker_increment(void *arg)
 }
 
 /**
- * require_ok — 执行条件检查，用于决定后续控制流或测试断言是否继续。
+ * require_ok — QEMU smoke test 的硬断言。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param name 借用的只读字符串；函数不会释放该指针。
- * @param rc 按值传入，用于控制本次操作。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ * ESP32 示例没有宿主侧测试框架，失败时直接记录错误并 abort，让 QEMU 日志停止在
+ * 第一处失败点。rc 按值传入，本函数负责释放其中的错误消息。
  */
 static void require_ok(const char *name, cc_result_t rc)
 {
@@ -249,13 +232,10 @@ static void require_ok(const char *name, cc_result_t rc)
 }
 
 /**
- * require_true — 执行条件检查，用于决定后续控制流或测试断言是否继续。
+ * require_true — QEMU smoke test 的布尔断言。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * @param name 借用的只读字符串；函数不会释放该指针。
- * @param condition 按值传入，用于控制本次操作。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ * 成功路径打印 `<name>: ok`，失败路径 abort。脚本只需要扫描 UART 日志中的
+ * `CCLAW_QEMU_PASS`，因此这里保持极简断言而不引入额外 test runner。
  */
 static void require_true(const char *name, int condition)
 {
@@ -268,11 +248,11 @@ static void require_true(const char *name, int condition)
 }
 
 /**
- * test_json — 在结构体与 JSON/文本之间转换，并负责字段校验和临时内存。
+ * test_json — 验证 core JSON 解析/读取/序列化能在 ESP32 profile 下工作。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
+ * 这是设备端最基础的依赖检查：config、tool schema、LLM message 和 MCP/plugin
+ * 协议都依赖 JSON。这里不用大样本，只确认 cJSON wrapper 在 ESP-IDF 链接和堆
+ * 分配环境里能正常往返。
  */
 static void test_json(void)
 {
@@ -289,9 +269,6 @@ static void test_json(void)
 /**
  * test_message_copy — 复制输入数据，让目标对象拥有独立生命周期。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void test_message_copy(void)
 {
@@ -320,9 +297,6 @@ static void test_message_copy(void)
 /**
  * test_thread_mutex — 运行 ESP32/QEMU 线程互斥测试，验证多线程递增不会丢失更新。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void test_thread_mutex(void)
 {
@@ -344,9 +318,6 @@ static void test_thread_mutex(void)
 /**
  * test_tool_registry — 参与工具注册、工具调用或工具结果写回流程。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void test_tool_registry(void)
 {
@@ -359,9 +330,6 @@ static void test_tool_registry(void)
 /**
  * test_gpio_tool — 参与工具注册、工具调用或工具结果写回流程。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void test_gpio_tool(void)
 {
@@ -403,11 +371,8 @@ static void test_gpio_tool(void)
 }
 
 /**
- * mount_qemu_sdcard — 创建、启动或加载组件资源，并把错误统一传播给调用方。
+ * mount_qemu_sdcard — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void mount_qemu_sdcard(void)
 {
@@ -453,8 +418,6 @@ static void mount_qemu_sdcard(void)
 /**
  * last_user_content_from_messages — 解析 messages JSON，提取最后一条 user 消息内容供 mock LLM 回显。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param messages_json 借用的只读字符串；函数不会释放该指针。
  * @return 返回借用或静态只读字符串；调用方不得释放。
  */
@@ -490,11 +453,9 @@ static const char *last_user_content_from_messages(const char *messages_json)
 /**
  * qemu_mock_chat — ESP32/QEMU mock LLM 的同步 chat 实现，根据最后用户消息构造测试回复。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
  * @param request 借用的对象；函数不释放该对象本身。
- * @param out 输出参数；成功时写入有效结果，失败时保持为 NULL 或未定义状态。
+ * @param out 输出参数；调用方传入有效指针，成功后接收结果。
  * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
  */
 static cc_result_t qemu_mock_chat(void *self, const cc_llm_chat_request_t *request, cc_llm_response_t *out)
@@ -522,10 +483,7 @@ static cc_result_t qemu_mock_chat(void *self, const cc_llm_chat_request_t *reque
 /**
  * qemu_mock_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void qemu_mock_destroy(void *self)
 {
@@ -542,10 +500,7 @@ static cc_llm_provider_vtable_t qemu_mock_llm_vtable = {
 /**
  * trim_line — 移除行尾换行和回车，便于串口/终端输入后续解析。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
  * @param line 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void trim_line(char *line)
 {
@@ -559,9 +514,6 @@ static void trim_line(char *line)
 /**
  * run_uart_chat — 驱动 ESP32 QEMU UART 聊天示例，初始化配置后循环处理串口输入。
  *
- * 位置：ESP32/QEMU 层。注释重点说明当前函数的输入输出、资源边界和错误传播。
- *
- * 无返回值；副作用体现在对象状态、输出缓冲区或资源释放上。
  */
 static void run_uart_chat(void)
 {

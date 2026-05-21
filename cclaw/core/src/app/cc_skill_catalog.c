@@ -5,6 +5,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * Skill catalog 只实现“目录 -> SKILL.md -> prompt snapshot”的可移植语义。
+ * 文件 watcher、个人目录发现策略、plugin skill dir 注入时机由 app/builder 负责。
+ *
+ * 同名覆盖规则通过加载顺序表达：后加载的 entry 覆盖先加载的 entry，最终 prompt
+ * 只输出一个同名 skill。catalog 拥有 name/source_path/content 三个字符串。
+ */
 typedef struct cc_skill_entry {
     char *name;
     char *source_path;
