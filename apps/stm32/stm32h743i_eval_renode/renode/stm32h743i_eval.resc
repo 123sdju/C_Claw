@@ -1,0 +1,14 @@
+:name: STM32H743I-EVAL c-claw smoke
+
+using sysbus
+
+$bin ?= @build/app/stm32/stm32h743i_eval_renode/c_claw_stm32h743i_eval_renode
+$uart_log ?= @build/app/stm32/stm32h743i_eval_renode/renode-uart.log
+
+mach create "stm32h743i-eval"
+machine LoadPlatformDescription @platforms/cpus/stm32h743.repl
+
+showAnalyzer sysbus.usart3
+sysbus.usart3 CreateFileBackend $uart_log
+sysbus LoadELF $bin
+start

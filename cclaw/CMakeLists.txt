@@ -12,8 +12,8 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers")
 
-set(CC_PROFILE "posix-cli" CACHE STRING "Build profile: posix-cli, windows-cli, core-minimal, esp32-s3-qemu")
-set_property(CACHE CC_PROFILE PROPERTY STRINGS posix-cli windows-cli core-minimal esp32-s3-qemu)
+set(CC_PROFILE "posix-cli" CACHE STRING "Build profile: posix-cli, windows-cli, core-minimal, esp32-s3-qemu, stm32h743-renode")
+set_property(CACHE CC_PROFILE PROPERTY STRINGS posix-cli windows-cli core-minimal esp32-s3-qemu stm32h743-renode)
 
 if(NOT DEFINED CC_PROFILE_APPLICATION_DIR)
     set(CC_PROFILE_APPLICATION_DIR "")
@@ -27,8 +27,8 @@ endif()
 include("${CC_PROFILE_FILE}")
 
 # CC_TARGET_PLATFORM 可以显式指定，也可以 auto；resolved 值会驱动 platforms/<name> 子目录。
-set(CC_TARGET_PLATFORM "${CC_PROFILE_TARGET_PLATFORM}" CACHE STRING "Target platform: auto, posix, windows, esp32")
-set_property(CACHE CC_TARGET_PLATFORM PROPERTY STRINGS auto posix windows esp32)
+set(CC_TARGET_PLATFORM "${CC_PROFILE_TARGET_PLATFORM}" CACHE STRING "Target platform: auto, posix, windows, esp32, freertos")
+set_property(CACHE CC_TARGET_PLATFORM PROPERTY STRINGS auto posix windows esp32 freertos)
 
 if(CC_TARGET_PLATFORM STREQUAL "auto")
     if(DEFINED ESP_PLATFORM)
@@ -50,6 +50,8 @@ elseif(CC_TARGET_PLATFORM_RESOLVED STREQUAL "windows")
     set(CC_PLATFORM_ID 200)
 elseif(CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32")
     set(CC_PLATFORM_ID 300)
+elseif(CC_TARGET_PLATFORM_RESOLVED STREQUAL "freertos")
+    set(CC_PLATFORM_ID 400)
 else()
     message(FATAL_ERROR "Unknown CC_TARGET_PLATFORM: ${CC_TARGET_PLATFORM}")
 endif()
@@ -100,7 +102,7 @@ message(STATUS "c-claw target platform: ${CC_TARGET_PLATFORM_RESOLVED}")
 
 # 桌面平台需要线程库；ESP32 线程能力由 ESP-IDF 适配层提供。
 set(THREADS_PREFER_PTHREAD_FLAG ON)
-if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32")
+if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32" AND NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "freertos")
     find_package(Threads REQUIRED)
 endif()
 
@@ -151,7 +153,7 @@ set(CC_DEFAULT_SOUL_FILE_VALUE "${CC_PROFILE_DEFAULT_SOUL_FILE}")
 set(CC_DEFAULT_USER_FILE_VALUE "${CC_PROFILE_DEFAULT_USER_FILE}")
 
 # 桌面构建提前创建 runtime/data 和 workspace，避免首次运行时工具写入失败。
-if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32")
+if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32" AND NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "freertos")
     file(MAKE_DIRECTORY
         "${CC_DEFAULT_DATA_DIR_VALUE}"
         "${CC_DEFAULT_WORKSPACE_PATH_VALUE}"
@@ -202,6 +204,10 @@ if(CC_TARGET_PLATFORM_RESOLVED STREQUAL "windows" AND NOT MINGW)
     target_compile_definitions(c_claw_project_options INTERFACE
         _CRT_SECURE_NO_WARNINGS
         _WIN32_WINNT=0x0600)
+elseif(CC_TARGET_PLATFORM_RESOLVED STREQUAL "freertos")
+    target_compile_definitions(c_claw_project_options INTERFACE
+        CC_FREERTOS_PLATFORM=1
+        CC_HAS_NETWORK=$<BOOL:${CC_NEEDS_HTTP_CLIENT}>)
 elseif(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32")
     target_compile_definitions(c_claw_project_options INTERFACE
         _POSIX_C_SOURCE=200809L
@@ -228,7 +234,7 @@ target_link_libraries(c_claw_runtime PUBLIC
     c_claw_project_options
 )
 
-if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32")
+if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32" AND NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "freertos")
     target_link_libraries(c_claw_runtime PUBLIC Threads::Threads)
 endif()
 

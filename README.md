@@ -65,6 +65,13 @@ cmake --preset windows-cli
 ./scripts/esp32_s3_qemu.sh doctor
 ./scripts/esp32_s3_qemu.sh build
 ./scripts/esp32_s3_qemu.sh qemu
+
+# STM32H743I-EVAL Renode board
+./scripts/stm32h743_renode.sh install-renode
+./scripts/stm32h743_renode.sh install-freertos
+./scripts/stm32h743_renode.sh doctor
+./scripts/stm32h743_renode.sh build
+./scripts/stm32h743_renode.sh renode
 ```
 
 日常 Linux 验证以 `posix-cli` 和 `core-minimal` 为准；`windows-cli` 需要 Windows
@@ -78,6 +85,7 @@ cmake --preset windows-cli
 | Windows CLI | `build/app/windows/cli` | `bin/c-claw.exe` 或 `bin/c-claw` |
 | core-minimal | `build/sdk/core-minimal` | SDK 最小裁剪 tests |
 | ESP32-S3 QEMU | `build/app/esp32/esp32_s3_qemu` | `.bin`、`.elf`、`qemu_flash.bin` |
+| STM32H743I-EVAL Renode | `build/app/stm32/stm32h743i_eval_renode` | Cortex-M7 FreeRTOS `.elf`、Renode UART log |
 
 ESP-IDF 生成的 `sdkconfig` 也放在 `build/app/esp32/esp32_s3_qemu/sdkconfig`；
 源码目录只保留 `apps/esp32/esp32_s3_qemu/sdkconfig.defaults`。
@@ -86,8 +94,8 @@ ESP-IDF 生成的 `sdkconfig` 也放在 `build/app/esp32/esp32_s3_qemu/sdkconfig
 
 | CMake 选项 | 说明 |
 |------------|------|
-| `CC_PROFILE` | `posix-cli`、`windows-cli`、`core-minimal`、`esp32-s3-qemu` |
-| `CC_TARGET_PLATFORM` | `auto`、`posix`、`windows`、`esp32` |
+| `CC_PROFILE` | `posix-cli`、`windows-cli`、`core-minimal`、`esp32-s3-qemu`、`stm32h743-renode` |
+| `CC_TARGET_PLATFORM` | `auto`、`posix`、`windows`、`esp32`、`freertos` |
 | `CC_ENABLE_CLI` | 构建 CLI gateway 和 `c-claw` 可执行文件 |
 | `CC_ENABLE_SHELL` | 编入 `shell_run` 工具和 local sandbox |
 | `CC_ENABLE_PLUGIN` | 编入外部进程插件系统 |
@@ -267,8 +275,8 @@ profile 不编入外部进程插件。
 
 ```text
 cclaw/         可移植基础 SDK：core、ports、adapters、platforms、profiles
-apps/          产品工程：posix/cli、windows/cli、esp32/esp32_s3_qemu 等
-build/         统一构建输出：posix-cli、core-minimal、esp32-s3-qemu 等
+apps/          产品工程：posix/cli、windows/cli、esp32/esp32_s3_qemu、stm32/stm32h743i_eval_renode 等
+build/         统一构建输出：posix-cli、core-minimal、esp32-s3-qemu、stm32h743-renode 等
                app 构建放在 build/app/<platform>/<app>，
                SDK 裁剪构建放在 build/sdk/<profile>
 ```
@@ -300,6 +308,7 @@ GPIO/I2C/SPI/ADC/PWM 等硬件工具在对应 `apps/<mcu>/<board>/main/tools`。
 - [cclaw/docs/architecture.md](cclaw/docs/architecture.md)：SDK 架构、平台 profile、扩展点
 - [apps/posix/cli/docs/config.md](apps/posix/cli/docs/config.md)：POSIX CLI 配置和构建选项
 - [apps/esp32/esp32_s3_qemu/README.md](apps/esp32/esp32_s3_qemu/README.md)：ESP32-S3 QEMU app 说明
+- [apps/stm32/stm32h743i_eval_renode/README.md](apps/stm32/stm32h743i_eval_renode/README.md)：STM32H743I-EVAL Renode app 说明
 - [pure_c_claw_architecture_design.md](pure_c_claw_architecture_design.md)：纯 C 架构设计备忘
 
 ## License

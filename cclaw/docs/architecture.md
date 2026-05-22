@@ -194,6 +194,7 @@ cmake --preset core-minimal
 | `windows-cli` | `build/app/windows/cli` | `bin/c-claw.exe` 或 `bin/c-claw` |
 | `core-minimal` | `build/sdk/core-minimal` | 仅 SDK/测试目标 |
 | ESP32-S3 QEMU | `build/app/esp32/esp32_s3_qemu` | ESP-IDF firmware 和 QEMU 镜像 |
+| STM32H743I-EVAL Renode | `build/app/stm32/stm32h743i_eval_renode` | Cortex-M7 FreeRTOS ELF 和 Renode UART log |
 
 源码目录只表达层次：`cclaw/` 是 SDK，`apps/` 是产品或板级组合；build
 目录用同样的层次镜像这些入口。
@@ -205,6 +206,7 @@ cmake --preset core-minimal
 | POSIX | `100` | Linux、macOS、BSD 等桌面/服务器环境 |
 | Windows | `200` | Win32 / MSVC / MinGW |
 | ESP32 | `300` | FreeRTOS / ESP-IDF 设备 profile |
+| FreeRTOS | `400` | 裸机/RTOS 板级 profile，例如 STM32H743 Renode bring-up |
 
 功能开关会生成同名编译宏：
 

@@ -21,10 +21,13 @@
 #define CC_PLATFORM_POSIX   100
 #define CC_PLATFORM_WINDOWS 200
 #define CC_PLATFORM_ESP32   300
+#define CC_PLATFORM_FREERTOS 400
 
 #ifndef CC_PLATFORM
 #  if defined(__XTENSA__) || defined(ESP_PLATFORM)
 #    define CC_PLATFORM CC_PLATFORM_ESP32
+#  elif defined(CC_FREERTOS_PLATFORM)
+#    define CC_PLATFORM CC_PLATFORM_FREERTOS
 #  elif defined(_WIN32)
 #    define CC_PLATFORM CC_PLATFORM_WINDOWS
 #  else
@@ -185,6 +188,57 @@
 #  define CC_LIMIT_STACK_SIZE_KB 16
 #  define CC_LIMIT_HTTP_RESP_MAX 32768
 #  define CC_LIMIT_SESSION_HISTORY 10
+#elif CC_PLATFORM == CC_PLATFORM_FREERTOS
+#  ifndef CC_HAS_FORK
+#    define CC_HAS_FORK 0
+#  endif
+#  ifndef CC_HAS_THREADS
+#    define CC_HAS_THREADS 1
+#  endif
+#  ifndef CC_HAS_PIPES
+#    define CC_HAS_PIPES 0
+#  endif
+#  ifndef CC_HAS_PROCESS_RUN
+#    define CC_HAS_PROCESS_RUN 0
+#  endif
+#  ifndef CC_HAS_PROCESS_PIPE
+#    define CC_HAS_PROCESS_PIPE 0
+#  endif
+#  ifndef CC_HAS_SIGNALS
+#    define CC_HAS_SIGNALS 0
+#  endif
+#  ifndef CC_HAS_REALPATH
+#    define CC_HAS_REALPATH 0
+#  endif
+#  ifndef CC_HAS_DIRENT
+#    define CC_HAS_DIRENT 0
+#  endif
+#  ifndef CC_HAS_MMAP
+#    define CC_HAS_MMAP 0
+#  endif
+#  ifndef CC_HAS_FSYNC
+#    define CC_HAS_FSYNC 0
+#  endif
+#  ifndef CC_HAS_CURL
+#    define CC_HAS_CURL 0
+#  endif
+#  ifndef CC_HAS_NETWORK
+#    define CC_HAS_NETWORK 0
+#  endif
+#  ifndef CC_HAS_SSL_TLS
+#    define CC_HAS_SSL_TLS 0
+#  endif
+#  ifndef CC_HAS_DLOPEN
+#    define CC_HAS_DLOPEN 0
+#  endif
+#  ifndef CC_HAS_CLOCK_MONOTONIC
+#    define CC_HAS_CLOCK_MONOTONIC 0
+#  endif
+#  define CC_LIMIT_MAX_PATH 256
+#  define CC_LIMIT_HEAP_WARN_KB 256
+#  define CC_LIMIT_STACK_SIZE_KB 16
+#  define CC_LIMIT_HTTP_RESP_MAX 0
+#  define CC_LIMIT_SESSION_HISTORY 8
 #else
 #  error "Unknown CC_PLATFORM value"
 #endif
