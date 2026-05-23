@@ -21,7 +21,7 @@
  *
  *   - 注册表在堆上分配，由 create/destroy 管理生命周期
  *   - 注册的工具以值拷贝方式存储（cc_tool_t 结构体的浅拷贝）
- *   - 工具名称唯一：同名工具 add 会覆盖旧的
+ *   - 工具以值拷贝追加到注册表末尾，不做同名去重检查
  *   - build_schema_json 生成的 JSON 是符合 OpenAI function calling 格式的数组
  *
  * ─── 使用模式 ─────────────────────────────────────────────────────────
@@ -77,8 +77,8 @@ void cc_tool_registry_destroy(cc_tool_registry_t *registry);
 /**
  * cc_tool_registry_add — 向注册表添加一个工具
  *
- * 以值拷贝方式存储 tool（浅拷贝 self + vtable 指针）。
- * 如果已存在同名工具，旧工具被覆盖（旧工具的 destroy 被调用）。
+ * 以值拷贝方式存储 tool（浅拷贝 self + vtable 指针），直接追加到注册表末尾。
+ * 不做同名检查——重复添加同名工具会在注册表中产生多个同名条目。
  *
  * @param registry  注册表（不可为 NULL）
  * @param tool      要注册的工具实例（值拷贝）

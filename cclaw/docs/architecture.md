@@ -361,12 +361,25 @@ HTTP POST 入口，发送 `Accept: application/json, text/event-stream`，再根
 
 ```text
 cclaw/ports/include/cc/ports/
+  cc_env.h
+  cc_event_bus.h
+  cc_filesystem.h
+  cc_http_client.h
+  cc_llm_provider.h
+  cc_logger.h
+  cc_memory_store.h
+  cc_memory_tool_factory.h
+  cc_path.h
   cc_platform.h
   cc_platform_check.h
-  cc_filesystem.h
-  cc_path.h
+  cc_policy_engine.h
   cc_process.h
+  cc_sandbox.h
+  cc_session_store.h
+  cc_storage_factory.h
   cc_thread.h
+  cc_tool.h
+  cc_tool_registry.h
 
 cclaw/platforms/
   posix/
@@ -410,6 +423,7 @@ Shell 工具持有自己的 sandbox 副本，销毁工具时也会销毁该 sand
 | `stream.thinking` | 流式思考片段 |
 | `stream.text` | 流式文本片段 |
 | `stream.tool.start` | 流式工具调用开始 |
+| `stream.tool.delta` | 流式工具调用参数增量 |
 | `stream.tool.end` | 流式工具调用结束 |
 | `stream.finished` | 流式响应结束 |
 

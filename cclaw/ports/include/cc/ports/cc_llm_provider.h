@@ -54,7 +54,8 @@ typedef struct cc_llm_chat_request {
                              *   可为 NULL（无工具可用时）。 */
     char *model;            /**< 模型名称（如 "qwen2.5-coder:7b"、"gpt-4o"） */
     int stream;             /**< 是否启用流式输出：1 = SSE 流式, 0 = 一次性返回。
-                             *   当前版本暂不支持 stream（预留字段）。 */
+                             *   chat_stream 已实现：设为 1 通过 SSE 流式回调接收增量 chunk，
+ *   设为 0 通过 chat() 同步一次性返回完整回复。 */
     int max_tokens;         /**< 最大生成 token 数。0 表示使用模型默认值 */
     double temperature;     /**< 生成温度（0.0 ~ 2.0）。越高越随机，越低越确定。
                              *   默认 0.7。设为 0 表示贪婪解码（最确定）。 */

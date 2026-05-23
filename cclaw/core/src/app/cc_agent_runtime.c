@@ -1612,20 +1612,20 @@ cc_result_t cc_agent_runtime_handle_message_with_options(
         /*
          * Step ①: 构建消息上下文
          *
-         * 从 storage 加载该会话的最近 100 条历史消息，
+         * 从 storage 加载该会话的最近 500 条历史消息，
          * 每轮迭代都重新构建——因为上一轮可能新增了 tool_call 和 tool_result 消息。
          *
          * 构建逻辑由 cc_context_builder_build_messages 完成：
-         *   1. 从 storage 加载最近 100 条消息
+         *   1. 从 storage 加载最近 500 条消息
          *   2. 在最前面插入 system_prompt（role="system"）
          *   3. 还原 assistant 消息中的 tool_calls JSON（持久化时包装的）
          *   4. 还原 reasoning_content 字段（JSON 包装格式）
          *   5. 为 tool 消息添加 tool_call_id 字段
          *   6. 序列化为完整 JSON 字符串
          *
-         * 为什么加载 100 条而不是全部：
+         * 为什么加载 500 条而不是全部：
          *   大部分 LLM 的上下文窗口有限（如 8K/32K/128K tokens），
-         *   加载过多历史消息会超出窗口限制。100 条对于大多数对话
+         *   加载过多历史消息会超出窗口限制。500 条对于大多数对话
          *   来说已经足够覆盖完整的上下文。
          */
         rc = cc_context_builder_build_messages(

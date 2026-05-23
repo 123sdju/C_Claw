@@ -7,6 +7,31 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_curl_http_client.c — 基于 libcurl 的 HTTP 客户端实现（Windows 平台）
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 Windows 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_http_client.h 端口接口在 Windows 平台的具体实现，
+ *   基于 libcurl 提供完整的 HTTP/HTTPS 客户端能力。
+ *   实现逻辑与 POSIX 版本的 cc_curl_http_client.c 几乎完全一致——
+ *   两者共享相同的 libcurl 回调架构（WRITEFUNCTION/HEADERFUNCTION/XFERINFOFUNCTION），
+ *   仅在头文件引入和平台宏方面有所区别。
+ *
+ * libcurl 回调驱动架构：
+ *   通过 libcurl 的三个回调深度集成取消令牌和流式处理：
+ *     - cc_curl_write_body：累积响应体（非流式）或传递给 on_body（流式/SSE）
+ *     - cc_curl_write_header：逐行解析 HTTP 响应头
+ *     - cc_curl_progress：传输进度回调，轮询 cancel_token 实现中途取消
+ *   callback_error 字段保存回调错误码，使取消和解析失败可精确传递到调用方。
+ *
+ * 与 POSIX 版本的关系：
+ *   Windows 和 POSIX 版本共享相同的 libcurl 逻辑，代码结构一致。
+ *   这确保两个平台的 HTTP 行为（SSL/TLS 证书验证、超时、取消语义、响应解析）
+ *   完全统一，上层代码无需关注运行平台。
+ */
+
 #include "cc/ports/cc_http_client.h"
 #include "cc/ports/cc_platform.h"
 #include "cc/app/cc_cancel_token.h"

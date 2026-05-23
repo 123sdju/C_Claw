@@ -93,7 +93,7 @@ void cc_event_bus_destroy(cc_event_bus_t *bus);
  *
  * 注册一个事件处理器，当指定类型的事件发布时被调用。
  * 同一事件类型可以有多个订阅者，按注册顺序依次回调。
- * 当前不支持通配符匹配，event_type 需精确匹配。
+ * event_type 为 NULL 时表示通配订阅（匹配所有事件）。
  *
  * @param bus         事件总线（不可为 NULL）
  * @param event_type  要订阅的事件类型（不可为 NULL）

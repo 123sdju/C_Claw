@@ -7,6 +7,36 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_curl_http_client.c — 基于 libcurl 的 HTTP 客户端实现
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 POSIX 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_http_client.h 端口接口在 POSIX（Linux/macOS/BSD）平台的具体实现，
+ *   基于 libcurl（CURLOPT_WRITEFUNCTION / CURLOPT_HEADERFUNCTION / CURLOPT_XFERINFOFUNCTION）
+ *   提供完整的 HTTP/HTTPS 客户端能力。向上层（如 LLM provider、MCP transport 模块）
+ *   提供统一的 cc_http_client_perform() / cc_http_response_free() 接口。
+ *
+ * libcurl 回调驱动架构：
+ *   本模块通过 libcurl 的三个回调深度集成取消令牌和流式处理：
+ *     - cc_curl_write_body：累积响应体（非流式）或传递给 on_body 回调（流式/SSE）
+ *     - cc_curl_write_header：逐行解析 HTTP 响应头，存入响应结构体
+ *     - cc_curl_progress：curl 传输进度回调，用于轮询 cancel_token 实现中途取消
+ *   callback_error 字段保存回调层面产生的 cc_result_t，让取消、解析失败
+ *   和大小限制问题能从 CURLE_WRITE_ERROR 还原为准确的错误码，而非笼统的网络错误。
+ *
+ * 支持的 HTTP 方法：
+ *   - GET / POST（原生支持）
+ *   - 其他方法通过 CURLOPT_CUSTOMREQUEST 兜底
+ *
+ * 设计决策：
+ *   - 响应体始终 '\0' 结尾：方便上层将 HTTP body 作为 C 字符串解析 JSON
+ *   - callback_error 优先：回调错误（取消/解析失败）优先级高于 curl 返回码
+ *   - 空 body 兜底为 strdup("")：保证 out_response->body 非 NULL，简化上层 NULL 检查
+ *   - 非流式模式下流式 body 仍累积响应体：为 SSE/流式 JSON 提供完整内容留存
+ */
+
 #include "cc/ports/cc_http_client.h"
 #include "cc/ports/cc_platform.h"
 #include "cc/app/cc_cancel_token.h"

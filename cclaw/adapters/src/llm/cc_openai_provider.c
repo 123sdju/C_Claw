@@ -7,6 +7,79 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_openai_provider.c — OpenAI Chat Completions API 协议策略模块
+ *
+ * 本模块在整体架构中的角色：
+ * ─────────────────────────────
+ * 位于适配器层，是 LLM provider 两层策略中的**协议层**。只实现
+ * cc_llm_protocol_t vtable 的四个回调，负责 OpenAI Chat Completions API
+ * 特有的 JSON 格式转换。HTTP 传输细节完全由 cc_http_llm_provider 处理。
+ *
+ * 本模块不持有任何私有状态（self 始终为 NULL），因此不需要 destroy 回调。
+ *
+ * 上游调用方：
+ *   - cc_http_llm_provider.c — 通过 cc_llm_protocol_t vtable 委托调用
+ *     build_request / parse_response / parse_stream_event
+ *
+ * 下游依赖模块：
+ *   - cc_json.c — JSON 对象构造与解析
+ *   - cc_string_builder.c — URL 拼接、Authorization header 拼接
+ *   - cc_http_llm_provider.h — cc_llm_http_request_t 结构体、cc_llm_stream_kind
+ *
+ * ─── build_request — 构造 OpenAI HTTP 请求 ──────────────────────────────
+ *
+ *   终端点：  POST {base_url}/v1/chat/completions
+ *   认证方式：Authorization: Bearer {api_key}（api_key 为空则跳过）
+ *   Content-Type：application/json
+ *   流格式：  SSE（CC_LLM_STREAM_SSE）
+ *
+ *   请求体 JSON 字段：
+ *     - model       —— 优先用 request->model，回退到 default_model
+ *     - messages    —— request->messages_json 直接解析为 JSON 数组透传
+ *     - stream      —— 布尔值，控制是否启用流式
+ *     - max_tokens  —— request->max_tokens
+ *     - temperature —— request->temperature
+ *     - tools       —— request->tools_json 解析后透传（非空数组时）
+ *     - tool_choice —— "auto"（仅在有 tools 时设置）
+ *
+ *   messages_json 已经是 OpenAI 原生格式（role/content 数组），无需格式转换，
+ *   直接解析为 cc_json_value_t 后嵌入请求体。若解析失败则回退为空数组。
+ *
+ * ─── parse_response — 解析非流式响应 ────────────────────────────────────
+ *
+ *   响应 JSON 结构（OpenAI Chat Completions API）：
+ *     error.message                          —— API 错误消息
+ *     choices[0].message.content             —— 文本回复（→ out_response.text）
+ *     choices[0].message.reasoning_content   —— 推理链内容（→ reasoning_content）
+ *     choices[0].message.tool_calls[0]       —— 工具调用（→ tool_call）
+ *       .id / .function.name / .function.arguments
+ *     choices[0].finish_reason               —— "stop" 表示正常结束
+ *
+ *   只取 choices[0]（第一个候选项），适用于非流式单候选场景。
+ *
+ * ─── parse_stream_event — 解析流式 SSE 事件 ─────────────────────────────
+ *
+ *   每条 SSE data 是一个 JSON 对象，包含一个 delta 增量：
+ *     choices[0].delta.content               —— 文本增量 → CC_STREAM_CHUNK_TEXT
+ *     choices[0].delta.reasoning_content     —— 推理增量 → CC_STREAM_CHUNK_THINKING
+ *     choices[0].delta.tool_calls[i]         —— 工具调用增量：
+ *       .function.name    → CC_STREAM_CHUNK_TOOL_START（首次出现时）
+ *       .function.arguments → CC_STREAM_CHUNK_TOOL_DELTA（增量拼接）
+ *     choices[0].finish_reason = "tool_calls" → CC_STREAM_CHUNK_TOOL_END
+ *     choices[0].finish_reason = "stop"       → out_finished = 1
+ *
+ *   流式 tool_call 采用增量模式：每段 arguments JSON 以 CC_STREAM_CHUNK_TOOL_DELTA
+ *   发出，上层负责将所有片段拼接为完整 arguments。
+ *
+ * ─── 默认值与创建 ────────────────────────────────────────────────────────
+ *
+ *   cc_openai_provider_create() 将 protocol.self 设为 NULL，委托
+ *   cc_http_llm_provider_create() 组合传输层与协议层：
+ *     - 默认 base_url：https://api.openai.com
+ *     - 默认 model：   gpt-4o-mini
+ */
+
 #include "cc/adapters/cc_http_llm_provider.h"
 #include "cc/util/cc_json.h"
 #include "cc/util/cc_memory.h"

@@ -1,3 +1,102 @@
+/**
+ * 学习导读：cclaw/core/src/app/cc_agent_manager.c
+ *
+ * 所属层次：核心层。
+ * 阅读重点：这里是 SDK 的多 agent 编排中心，重点看 agent_id→runtime 映射、
+ *          message task 构造与 run queue 集成、pending_run 异步响应机制
+ *          以及 session key 的生成规则。
+ * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
+ *           以代码行为和测试为准，并应同步修正注释。
+ */
+
+/**
+ * cc_agent_manager.c — 多 Agent 编排与消息路由中心
+ *
+ * 本模块在整体架构中的角色：
+ * ─────────────────────────────
+ * 位于 App 层（业务逻辑层），是 CLI/app 面向 SDK 的主入口。它不创建 LLM、
+ * store、plugin 进程，也不读取文件 watcher。它只做三件事：(1) 维护
+ * agent_id 到 cc_agent_runtime_t 的映射表；(2) 将每次 handle_message 包装
+ * 为 message_task 提交到 run queue；(3) 通过 pending_run 链表追踪异步 run
+ * 的响应指针，支持 submit+collect 分离的调用模式。
+ *
+ * 上游调用方：
+ *   - CLI / app 层 —— 通过 cc_agent_manager_handle_message 发起交互 turn
+ *   - 高层编排逻辑 —— 通过 submit + collect 分离调用实现异步流水线
+ *
+ * 下游依赖模块：
+ *   - cc_agent_runtime.c —— runtime 的 handle_message_with_options，
+ *     是 message_task 最终执行体；也用于 reset_session 获取 session store
+ *   - cc_run_queue.c —— job 调度，manager 把 message_task 提交为
+ *     STEER action 的 run queue job
+ *   - cc_cancel_token.c —— cancel token 从 run queue 透传到 runtime，
+ *     再到 LLM stream、tool executor、plugin/MCP transport
+ *
+ * ─── 内部数据结构 ───────────────────────────────────────────────────
+ *
+ *   cc_agent_manager_entry_t：
+ *     动态数组条目，保存 agent_id 字符串（manager 拥有）和 runtime 指针
+ *     （manager 只借用，由 runtime_builder 或 app 创建）。
+ *
+ *   cc_agent_manager_message_task_t：
+ *     每次消息提交时分配的 task 对象。持有 runtime 指针、session_id、
+ *     user_input 副本和反向引用 pending_run。其生命周期由 run queue 的
+ *     owns_user_data 机制管理：若 job 被取消未执行，队列负责 free；若
+ *     job 正常执行，collect 时释放。
+ *
+ *   cc_agent_manager_pending_run_t：
+ *     submit 时创建、collect 时销毁的异步追踪节点。保存 run_id 和
+ *     response 输出指针（由 runtime 在 handle_message 中写入）。
+ *     通过单向链表串联，collect 时用 take_pending_run_locked 取出。
+ *
+ *   cc_agent_manager（主结构体）：
+ *     持有 entries 动态数组、run_queue（可借用也可拥有，由 owns_queue 控制）、
+ *     current_agent_id、default_action、pending_runs 链表及 mutex。
+ *
+ * ─── 消息处理流程 ───────────────────────────────────────────────────
+ *
+ *   handle_message_with_options：
+ *     1. 调用 submit_with_options 将消息提交到 run queue，获取 run_id
+ *     2. 调用 collect 阻塞等待 run 完成并取回 response
+ *
+ *   submit_with_options：
+ *     1. 查找 agent_id 对应的 runtime（未指定时用 current_agent_id 或 "default"）
+ *     2. 构造 session_key = "agent_id:session_id"
+ *     3. 分配 message_task（拷贝 session_id、user_input）和 pending_run
+ *     4. 包装为 run_queue_request（lane 和 action 可配置，默认 MAIN+STEER）
+ *     5. 通过 cc_run_queue_submit_with_token 提交
+ *     6. 将 pending_run 插入 manager 链表
+ *
+ *   collect：
+ *     1. 验证 run_id 存在
+ *     2. 调用 cc_run_queue_collect 等待 run queue 完成
+ *     3. 从 pending_run 链表取出节点，提取 response 指针返回给调用方
+ *     4. 释放 message_task 和 pending_run
+ *
+ * ─── Session Key 设计 ────────────────────────────────────────────────
+ *
+ *   session_key 格式为 "agent_id:session_id"，由 cc_agent_manager_make_session_key
+ *   生成。这个 key 作为 run queue 的 session_key 传入，确保同 agent 同 session
+ *   的请求在 run queue 层面被串行化（per_session_concurrency=1），不同 agent
+ *   的 session 互不干扰。
+ *
+ * ─── 设计决策 ───────────────────────────────────────────────────────
+ *
+ *   为什么 manager 不拥有 runtime？
+ *     runtime 由 runtime_builder 或 app 创建，manager 只保存指针。这样
+ *     同一个 runtime 可以被多个 manager 引用，也可以由 app 在 manager
+ *     销毁后继续使用。生命周期分离使得热重载等场景更容易实现。
+ *
+ *   为什么 message_task 要拷贝 session_id 和 user_input？
+ *     submit 返回后调用方栈上的字符串可能失效，而 message_task 需要
+ *     在 worker 线程中异步访问这些值。拷贝确保异步安全。
+ *
+ *   为什么 cancel_token 从 run queue 透传到 runtime？
+ *     manager 只负责调度，不解释取消语义。当 run queue 取消 job 时，
+ *     cancel token 自动传播到 runtime → LLM stream → tool executor →
+ *     plugin/MCP transport，每一层在安全点检查 token 并释放资源。
+ */
+
 #include "cc/app/cc_agent_manager.h"
 #include "cc/ports/cc_thread.h"
 

@@ -1,7 +1,41 @@
 /**
  * 学习导读：cclaw/platforms/freertos/src/cc_freertos_thread.c
+ *
  * 所属层次：平台层。
- * 阅读重点：这里用 FreeRTOS task/semaphore 实现 c-claw 的线程和条件变量端口。
+ * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
+ * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
+ *           以代码行为和测试为准，并应同步修正注释。
+ */
+
+/**
+ * cc_freertos_thread.c — FreeRTOS 线程与同步原语封装
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 FreeRTOS 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_thread.h 端口接口在裸 FreeRTOS 平台的具体实现，
+ *   基于 FreeRTOS xTaskCreate / xSemaphore 提供线程创建/等待、互斥锁
+ *   和条件变量等同步原语。向上层提供统一的线程管理接口。
+ *
+ * 与 ESP32 版本的关系：
+ *   本文件与 cc_esp32_thread.c 共享相同的实现策略（FreeRTOS Task +
+ *   Binary Semaphore Join），但因为 ESP32 版本限定在 ESP_PLATFORM 条件，
+ *   需要一个独立的裸 FreeRTOS 实现供其他 FreeRTOS 平台（如 stm32）使用。
+ *   主要区别：栈大小为可配置宏 CCLAW_FREERTOS_TASK_STACK_WORDS（默认 2048 words），
+ *   任务名为 "cclaw"（而非 "cclaw_thread"）。
+ *
+ * 线程模型（FreeRTOS Task + Binary Semaphore Join）：
+ *   FreeRTOS task 本身没有 pthread_join 等价物，因此每个线程 wrapper
+ *   （cc_freertos_thread_t）持有一个 binary semaphore。task 结束时
+ *   xSemaphoreGive(done) 通知，cc_thread_join 通过 xSemaphoreTake 等待。
+ *
+ * 互斥锁模型（FreeRTOS Mutex Semaphore）：
+ *   使用 xSemaphoreCreateMutex() 创建互斥信号量，lock/unlock 映射为
+ *   xSemaphoreTake/xSemaphoreGive。
+ *
+ * 条件变量模型（Binary Semaphore 模拟）：
+ *   wait 操作先释放互斥锁、等待条件信号量、再重新获取互斥锁。
+ *   broadcast 不支持（signal 和 broadcast 行为相同）。
  */
 
 #include "cc/ports/cc_thread.h"

@@ -7,6 +7,33 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_esp32_thread.c — ESP32 FreeRTOS 线程与同步原语封装
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 ESP32 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_thread.h 端口接口在 ESP32（FreeRTOS）平台的具体实现，
+ *   基于 FreeRTOS xTaskCreate / xSemaphore 提供线程创建/等待、互斥锁
+ *   和条件变量等同步原语。向上层提供统一的线程管理接口。
+ *
+ * 线程模型（FreeRTOS Task + Binary Semaphore Join）：
+ *   FreeRTOS task 本身没有 pthread_join 等价物，因此每个线程 wrapper
+ *   （cc_esp32_thread_t）持有一个 binary semaphore。task 启动时执行入口函数，
+ *   执行完毕后 xSemaphoreGive(done) 通知，cc_thread_join 通过
+ *   xSemaphoreTake(done, portMAX_DELAY) 等待。wrapper 在 join 完成后释放。
+ *   栈大小固定为 8192 字节，优先级为 tskIDLE_PRIORITY + 1，任务名为 "cclaw_thread"。
+ *
+ * 互斥锁模型（FreeRTOS Mutex Semaphore）：
+ *   使用 xSemaphoreCreateMutex() 创建互斥信号量，支持优先级继承。
+ *   lock/unlock 分别映射为 xSemaphoreTake/xSemaphoreGive。
+ *
+ * 条件变量模型（Binary Semaphore 模拟）：
+ *   FreeRTOS 没有原生条件变量，使用 binary semaphore 模拟：
+ *   wait 操作先释放互斥锁、等待条件信号量、再重新获取互斥锁。
+ *   此实现不支持 broadcast（signal 和 broadcast 行为相同，仅 give 一次）。
+ */
+
 #include "cc/ports/cc_thread.h"
 
 #ifdef ESP_PLATFORM

@@ -49,37 +49,87 @@ static int append_chat_path(char *out, size_t out_len, const char *base_url)
     return 1;
 }
 
+static int append_json_ascii(char *out, size_t out_len, size_t *pos, const char *text)
+{
+    size_t len = strlen(text);
+    if (*pos + len >= out_len) return 0;
+    memcpy(out + *pos, text, len);
+    *pos += len;
+    out[*pos] = '\0';
+    return 1;
+}
+
+static int append_json_codepoint(char *out, size_t out_len, size_t *pos, unsigned long cp)
+{
+    char tmp[16];
+    if (cp <= 0xFFFFUL) {
+        snprintf(tmp, sizeof(tmp), "\\u%04lx", cp);
+        return append_json_ascii(out, out_len, pos, tmp);
+    }
+
+    cp -= 0x10000UL;
+    unsigned long high = 0xD800UL + ((cp >> 10) & 0x3FFUL);
+    unsigned long low = 0xDC00UL + (cp & 0x3FFUL);
+    snprintf(tmp, sizeof(tmp), "\\u%04lx", high);
+    if (!append_json_ascii(out, out_len, pos, tmp)) return 0;
+    snprintf(tmp, sizeof(tmp), "\\u%04lx", low);
+    return append_json_ascii(out, out_len, pos, tmp);
+}
+
 static int json_escape(char *out, size_t out_len, const char *in)
 {
     size_t pos = 0;
     while (in && *in) {
         unsigned char ch = (unsigned char)*in++;
-        const char *escaped = NULL;
-        char tmp[7];
         if (ch == '"' || ch == '\\') {
-            tmp[0] = '\\';
-            tmp[1] = (char)ch;
-            tmp[2] = '\0';
-            escaped = tmp;
+            char tmp[3] = {'\\', (char)ch, '\0'};
+            if (!append_json_ascii(out, out_len, &pos, tmp)) return 0;
         } else if (ch == '\n') {
-            escaped = "\\n";
+            if (!append_json_ascii(out, out_len, &pos, "\\n")) return 0;
         } else if (ch == '\r') {
-            escaped = "\\r";
+            if (!append_json_ascii(out, out_len, &pos, "\\r")) return 0;
         } else if (ch == '\t') {
-            escaped = "\\t";
+            if (!append_json_ascii(out, out_len, &pos, "\\t")) return 0;
         } else if (ch < 0x20) {
-            snprintf(tmp, sizeof(tmp), "\\u%04x", ch);
-            escaped = tmp;
-        }
-
-        if (escaped) {
-            size_t len = strlen(escaped);
-            if (pos + len >= out_len) return 0;
-            memcpy(out + pos, escaped, len);
-            pos += len;
-        } else {
+            if (!append_json_codepoint(out, out_len, &pos, ch)) return 0;
+        } else if (ch < 0x80) {
             if (pos + 1 >= out_len) return 0;
             out[pos++] = (char)ch;
+            out[pos] = '\0';
+        } else {
+            unsigned long cp = 0xFFFDUL;
+            if ((ch & 0xE0U) == 0xC0U) {
+                unsigned char b1 = (unsigned char)*in;
+                if ((b1 & 0xC0U) == 0x80U) {
+                    in++;
+                    cp = ((unsigned long)(ch & 0x1FU) << 6) |
+                         (unsigned long)(b1 & 0x3FU);
+                    if (cp < 0x80UL) cp = 0xFFFDUL;
+                }
+            } else if ((ch & 0xF0U) == 0xE0U) {
+                unsigned char b1 = (unsigned char)in[0];
+                unsigned char b2 = (unsigned char)in[1];
+                if ((b1 & 0xC0U) == 0x80U && (b2 & 0xC0U) == 0x80U) {
+                    in += 2;
+                    cp = ((unsigned long)(ch & 0x0FU) << 12) |
+                         ((unsigned long)(b1 & 0x3FU) << 6) |
+                         (unsigned long)(b2 & 0x3FU);
+                    if (cp < 0x800UL || (cp >= 0xD800UL && cp <= 0xDFFFUL)) cp = 0xFFFDUL;
+                }
+            } else if ((ch & 0xF8U) == 0xF0U) {
+                unsigned char b1 = (unsigned char)in[0];
+                unsigned char b2 = (unsigned char)in[1];
+                unsigned char b3 = (unsigned char)in[2];
+                if ((b1 & 0xC0U) == 0x80U && (b2 & 0xC0U) == 0x80U && (b3 & 0xC0U) == 0x80U) {
+                    in += 3;
+                    cp = ((unsigned long)(ch & 0x07U) << 18) |
+                         ((unsigned long)(b1 & 0x3FU) << 12) |
+                         ((unsigned long)(b2 & 0x3FU) << 6) |
+                         (unsigned long)(b3 & 0x3FU);
+                    if (cp < 0x10000UL || cp > 0x10FFFFUL) cp = 0xFFFDUL;
+                }
+            }
+            if (!append_json_codepoint(out, out_len, &pos, cp)) return 0;
         }
     }
     if (pos >= out_len) return 0;
@@ -156,7 +206,12 @@ static int real_llm_request(const char *prompt, unsigned iteration, int print_an
 
     char body[1200];
     int n = snprintf(body, sizeof(body),
-        "{\"model\":\"%s\",\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],"
+        "{\"model\":\"%s\",\"messages\":["
+        "{\"role\":\"system\",\"content\":\"You are c-claw running on STM32H743 in Renode. "
+        "The UART has local commands /help, /ls, /cat and /write. "
+        "The mounted workspace path is /sdcard/cclaw/workspace. "
+        "Do not claim unavailable hosted app features.\"},"
+        "{\"role\":\"user\",\"content\":\"%s\"}],"
         "\"temperature\":0.7,\"max_tokens\":512}",
         CCLAW_REAL_MODEL,
         escaped_prompt);

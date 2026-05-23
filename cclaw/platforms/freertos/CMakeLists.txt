@@ -31,6 +31,18 @@ target_include_directories(c_claw_platform_freertos_objects PRIVATE
     "${FREERTOS_PORT_DIR}"
 )
 
+if(CCLAW_FREERTOS_ENABLE_FATFS)
+    if(NOT DEFINED FATFS_INCLUDE_DIRS)
+        message(FATAL_ERROR "CCLAW_FREERTOS_ENABLE_FATFS requires FATFS_INCLUDE_DIRS")
+    endif()
+    target_compile_definitions(c_claw_platform_freertos_objects PRIVATE
+        CCLAW_FREERTOS_ENABLE_FATFS=1
+    )
+    target_include_directories(c_claw_platform_freertos_objects PRIVATE
+        ${FATFS_INCLUDE_DIRS}
+    )
+endif()
+
 if(CC_NEEDS_HTTP_CLIENT)
     if(NOT DEFINED LWIP_INCLUDE_DIRS)
         message(FATAL_ERROR "CC_TARGET_PLATFORM=freertos with HTTP requires LWIP_INCLUDE_DIRS")

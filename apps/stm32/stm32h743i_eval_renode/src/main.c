@@ -2,6 +2,7 @@
 #include "task.h"
 
 #include "board.h"
+#include "board_storage.h"
 #include "cc/ports/cc_thread.h"
 #include "cc/util/cc_json.h"
 #include "http_smoke.h"
@@ -23,6 +24,9 @@
 #endif
 #ifndef CCLAW_STM32H743_ENABLE_UART_CHAT
 #define CCLAW_STM32H743_ENABLE_UART_CHAT 0
+#endif
+#ifndef CCLAW_STM32H743_ENABLE_FATFS
+#define CCLAW_STM32H743_ENABLE_FATFS 0
 #endif
 
 static void pass(const char *name)
@@ -135,6 +139,9 @@ static void app_task(void *arg)
     const char *url = (const char *)arg;
     board_uart_write("c-claw STM32H743I-EVAL Renode FreeRTOS/lwIP/HAL smoke\n");
     (void)run_smoke();
+#if CCLAW_STM32H743_ENABLE_FATFS
+    (void)board_storage_mount();
+#endif
     xTaskCreate(net_task, "net", 4096, (void *)url, tskIDLE_PRIORITY + 1, NULL);
     for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
 }

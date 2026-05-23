@@ -36,6 +36,7 @@ set(STM32H7_HAL_DIR "${STM32CUBEH7_PATH}/Drivers/STM32H7xx_HAL_Driver")
 set(STM32H7_CMSIS_DEVICE_DIR "${STM32CUBEH7_PATH}/Drivers/CMSIS/Device/ST/STM32H7xx")
 set(STM32H7_CMSIS_CORE_DIR "${STM32CUBEH7_PATH}/Drivers/CMSIS/Core")
 set(LWIP_DIR "${STM32CUBEH7_PATH}/Middlewares/Third_Party/LwIP")
+set(FATFS_DIR "${STM32CUBEH7_PATH}/Middlewares/Third_Party/FatFs")
 set(MBEDTLS_DIR "${STM32CUBEH7_PATH}/Middlewares/Third_Party/mbedTLS")
 set(MBEDTLS_CONFIG_DIR "${STM32CUBEH7_PATH}/Projects/STM32H743I-EVAL/Applications/mbedTLS/SSL_Client/Inc")
 set(LWIP_INCLUDE_DIRS
@@ -51,6 +52,8 @@ set(CCLAW_STM32H743_ENABLE_UART_CHAT "$ENV{CCLAW_STM32H743_ENABLE_UART_CHAT}" CA
 set(CCLAW_STM32H743_REAL_LLM_ITERATIONS "$ENV{CCLAW_STM32H743_REAL_LLM_ITERATIONS}" CACHE STRING "STM32H743 real LLM smoke iteration count")
 set(CCLAW_STM32H743_DNS_SERVER "$ENV{CCLAW_STM32H743_DNS_SERVER}" CACHE STRING "STM32H743 DNS server IPv4 address")
 set(CCLAW_STM32H743_REAL_CONFIG_DIR "$ENV{CCLAW_STM32H743_REAL_CONFIG_DIR}" CACHE PATH "Directory containing generated real LLM config header")
+set(CCLAW_STM32H743_ENABLE_FATFS "$ENV{CCLAW_STM32H743_ENABLE_FATFS}" CACHE STRING "Enable STM32H743 FatFs workspace")
+set(CCLAW_STM32H743_SD_SIZE_MB "$ENV{CCLAW_STM32H743_SD_SIZE_MB}" CACHE STRING "STM32H743 Renode SD image size in MiB")
 if(CCLAW_STM32H743_STATIC_IP STREQUAL "")
     set(CCLAW_STM32H743_STATIC_IP "10.0.2.15")
 endif()
@@ -72,6 +75,13 @@ endif()
 if(CCLAW_STM32H743_DNS_SERVER STREQUAL "")
     set(CCLAW_STM32H743_DNS_SERVER "10.0.2.2")
 endif()
+if(CCLAW_STM32H743_ENABLE_FATFS STREQUAL "")
+    set(CCLAW_STM32H743_ENABLE_FATFS "1")
+endif()
+if(CCLAW_STM32H743_SD_SIZE_MB STREQUAL "")
+    set(CCLAW_STM32H743_SD_SIZE_MB "64")
+endif()
+math(EXPR CCLAW_STM32H743_SD_SECTOR_COUNT "${CCLAW_STM32H743_SD_SIZE_MB} * 1024 * 1024 / 512")
 if(NOT EXISTS "${FREERTOS_KERNEL_PATH}/include/FreeRTOS.h")
     message(FATAL_ERROR "Set FREERTOS_KERNEL_PATH to a FreeRTOS-Kernel checkout")
 endif()
@@ -83,6 +93,9 @@ if(NOT EXISTS "${STM32H7_HAL_DIR}/Inc/stm32h7xx_hal.h")
 endif()
 if(NOT EXISTS "${LWIP_DIR}/src/include/lwip/init.h")
     message(FATAL_ERROR "STM32CubeH7 lwIP middleware not found under ${LWIP_DIR}")
+endif()
+if(CCLAW_STM32H743_ENABLE_FATFS AND NOT EXISTS "${FATFS_DIR}/src/ff.h")
+    message(FATAL_ERROR "STM32CubeH7 FatFs middleware not found under ${FATFS_DIR}; run scripts/stm32h743_renode.sh install-cubeh7")
 endif()
 if(CCLAW_STM32H743_ENABLE_REAL_LLM OR CCLAW_STM32H743_ENABLE_UART_CHAT)
     if(NOT EXISTS "${MBEDTLS_DIR}/include/mbedtls/ssl.h")
@@ -103,10 +116,18 @@ endif()
 
 set(CC_PROFILE stm32h743-renode CACHE STRING "c-claw build profile" FORCE)
 set(CC_TARGET_PLATFORM freertos CACHE STRING "c-claw target platform" FORCE)
-set(CC_ENABLE_FILE_TOOLS OFF CACHE BOOL "Disable file tools for bare-metal Renode smoke" FORCE)
+set(CC_ENABLE_FILE_TOOLS ON CACHE BOOL "Enable SD-card backed file tools" FORCE)
 set(CC_ENABLE_HTTP_TOOL ON CACHE BOOL "Enable http.request for STM32 lwIP smoke" FORCE)
 set(CC_ENABLE_MEMORY OFF CACHE BOOL "Disable memory tools for bare-metal Renode smoke" FORCE)
 set(CC_ENABLE_RUN_QUEUE OFF CACHE BOOL "Disable run queue for first STM32H743 Renode smoke" FORCE)
+
+if(CCLAW_STM32H743_ENABLE_FATFS)
+    set(CCLAW_FREERTOS_ENABLE_FATFS ON CACHE BOOL "Enable FatFs in the FreeRTOS platform filesystem" FORCE)
+    set(FATFS_INCLUDE_DIRS
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${FATFS_DIR}/src"
+        CACHE INTERNAL "FatFs include directories for FreeRTOS platform")
+endif()
 
 add_subdirectory(
     "${CMAKE_CURRENT_LIST_DIR}/../../../cclaw"
@@ -139,8 +160,11 @@ set(STM32H7_HAL_SOURCES
     "${STM32H7_HAL_DIR}/Src/stm32h7xx_hal_pwr_ex.c"
     "${STM32H7_HAL_DIR}/Src/stm32h7xx_hal_rcc.c"
     "${STM32H7_HAL_DIR}/Src/stm32h7xx_hal_rcc_ex.c"
+    "${STM32H7_HAL_DIR}/Src/stm32h7xx_hal_sd.c"
+    "${STM32H7_HAL_DIR}/Src/stm32h7xx_hal_sd_ex.c"
     "${STM32H7_HAL_DIR}/Src/stm32h7xx_hal_uart.c"
     "${STM32H7_HAL_DIR}/Src/stm32h7xx_hal_uart_ex.c"
+    "${STM32H7_HAL_DIR}/Src/stm32h7xx_ll_sdmmc.c"
 )
 
 set(LWIP_SOURCES
@@ -185,8 +209,19 @@ if(CCLAW_STM32H743_ENABLE_REAL_LLM OR CCLAW_STM32H743_ENABLE_UART_CHAT)
     file(GLOB MBEDTLS_SOURCES CONFIGURE_DEPENDS "${MBEDTLS_DIR}/library/*.c")
 endif()
 
+set(FATFS_SOURCES)
+if(CCLAW_STM32H743_ENABLE_FATFS)
+    set(FATFS_SOURCES
+        "${FATFS_DIR}/src/ff.c"
+        "${FATFS_DIR}/src/diskio.c"
+        "${FATFS_DIR}/src/ff_gen_drv.c"
+        "${FATFS_DIR}/src/option/unicode.c"
+    )
+endif()
+
 add_executable(c_claw_stm32h743i_eval_renode
     src/board.c
+    src/board_storage.c
     src/ethernetif.c
     src/http_smoke.c
     src/main.c
@@ -194,10 +229,12 @@ add_executable(c_claw_stm32h743i_eval_renode
     src/real_llm_smoke.c
     src/startup.c
     src/syscalls.c
+    src/stm32_sd_diskio.c
     src/uart_chat.c
     ${FREERTOS_SOURCES}
     ${STM32H7_HAL_SOURCES}
     ${LWIP_SOURCES}
+    ${FATFS_SOURCES}
     ${MBEDTLS_SOURCES}
 )
 
@@ -207,6 +244,7 @@ target_include_directories(c_claw_stm32h743i_eval_renode PRIVATE
     "${STM32H7_CMSIS_DEVICE_DIR}/Include"
     "${STM32H7_CMSIS_CORE_DIR}/Include"
     ${LWIP_INCLUDE_DIRS}
+    ${FATFS_INCLUDE_DIRS}
     "${FREERTOS_KERNEL_PATH}/include"
     "${FREERTOS_PORT_DIR}"
 )
@@ -227,6 +265,8 @@ target_compile_definitions(c_claw_stm32h743i_eval_renode PRIVATE
     CCLAW_STM32H743_ENABLE_HTTP_SMOKE=${CCLAW_STM32H743_ENABLE_HTTP_SMOKE}
     CCLAW_STM32H743_ENABLE_REAL_LLM=${CCLAW_STM32H743_ENABLE_REAL_LLM}
     CCLAW_STM32H743_ENABLE_UART_CHAT=${CCLAW_STM32H743_ENABLE_UART_CHAT}
+    CCLAW_STM32H743_ENABLE_FATFS=${CCLAW_STM32H743_ENABLE_FATFS}
+    CCLAW_STM32H743_SD_SECTOR_COUNT=${CCLAW_STM32H743_SD_SECTOR_COUNT}
     CCLAW_STM32H743_REAL_LLM_ITERATIONS=${CCLAW_STM32H743_REAL_LLM_ITERATIONS}
     CCLAW_STM32H743_DNS_SERVER="${CCLAW_STM32H743_DNS_SERVER}"
 )

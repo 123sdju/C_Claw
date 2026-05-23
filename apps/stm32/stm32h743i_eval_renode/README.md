@@ -1,4 +1,4 @@
-# c-claw STM32H743I-EVAL Renode FreeRTOS Smoke
+# c-claw STM32H743I-EVAL Renode FreeRTOS Target
 
 This target builds a small FreeRTOS application for the STM32H743I-EVAL software
 profile and runs it in Renode using the STM32H743 CPU platform description.
@@ -10,6 +10,15 @@ contains:
 ```text
 CCLAW_STM32H743_RENODE_PASS
 ```
+
+When SD/FatFs is enabled, the firmware mounts the attached card as the c-claw
+workspace:
+
+```text
+/sdcard/cclaw/workspace
+```
+
+The STM32 profile enables c-claw file tools against that workspace path.
 
 ## Prerequisites
 
@@ -52,6 +61,31 @@ build directory, configures TAP/NAT, starts Renode, and connects the current
 terminal to USART3. Type a line and press Enter to send it. Use `/help` for
 firmware-side commands, `/quit` to stop the chat task, and ESC to leave
 Renode's UART connection mode.
+
+The chat path uses a generated UTF-8 Renode monitor command, so prompts typed
+in Chinese are sent to the STM32 as UTF-8 bytes instead of Unicode codepoints.
+
+By default the script also prepares and attaches a Renode SD-card image at:
+
+```text
+build/app/stm32/stm32h743i_eval_renode/workspace-sd.img
+```
+
+By default the script creates an empty FAT workspace and does not copy the
+repository into the image. Set `CCLAW_STM32H743_SKIP_SD_COPY=0` and
+`CCLAW_STM32H743_WORKSPACE_DIR=/path/to/small/workspace` to seed files into
+`/sdcard/cclaw/workspace`. Install `dosfstools` and `mtools` if you want the
+script to format the image as FAT and copy workspace files into it. Without
+those tools it still creates an empty block image for Renode attachment.
+
+Firmware UART chat exposes quick file commands backed by the same FatFs c-claw
+filesystem implementation:
+
+```text
+/ls [path]
+/cat <path>
+/write <path> <text>
+```
 
 The API key is never printed by the script, but it is embedded in the generated
 build header and ELF for real tests.

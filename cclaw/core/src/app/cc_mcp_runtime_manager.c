@@ -1,3 +1,110 @@
+/**
+ * 学习导读：cclaw/core/src/app/cc_mcp_runtime_manager.c
+ *
+ * 所属层次：核心层。
+ * 阅读重点：MCP 协议 JSON-RPC 状态机，重点看 initialize→notifications→
+ *           tools/list→tools/call 的调用链、transport vtable 的串行/并发
+ *           适配逻辑、tool bridge 命名规则以及 TTL/idle 管理。
+ * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
+ *           以代码行为和测试为准，并应同步修正注释。
+ */
+
+/**
+ * cc_mcp_runtime_manager.c — MCP 协议客户端运行时与工具桥接模块
+ *
+ * 本模块在整体架构中的角色：
+ * ─────────────────────────────
+ * 位于 App 层（业务逻辑层），是 SDK 侧 MCP 协议的完整状态机实现。它不启动
+ * 进程、不创建 socket、不依赖 curl/Win32，只通过 transport vtable 发送
+ * JSON-RPC 请求。具体 stdio、HTTP、SSE、streamable HTTP 等传输方式由
+ * app/platform 通过 transport factory 注入。
+ *
+ * 上游调用方：
+ *   - cc_agent_runtime.c —— 在运行时初始化阶段调用 load_tools 注册 MCP 工具
+ *   - cc_tool_executor.c —— 通过 tool vtable 间接调用 mcp_tool_call
+ *
+ * 下游依赖模块：
+ *   - cc_json.c —— JSON-RPC 请求构造与响应解析
+ *   - cc_tool_registry.c —— 将 MCP tool 注册为 C-Claw 工具
+ *   - transport vtable（外部注入）—— send_json / reset / is_serial / destroy
+ *   - cc_cancel_token.c —— 工具调用时的取消传播
+ *
+ * ─── 内部数据结构 ───────────────────────────────────────────────────
+ *
+ *   cc_mcp_server_runtime_t：
+ *     单个 MCP server 的运行时状态。持有 server 名称、transport 名称、
+ *     transport 实例、互斥锁、自增 request id、last_used_ms 时间戳、
+ *     idle_ttl_ms、connection_timeout_ms 和 needs_initialize 标记。
+ *
+ *   cc_mcp_tool_t：
+ *     单个 MCP 工具的桥接对象。持有 tool_name（MCP 原始名）、display_name
+ *     （mcp.<server>.<tool> 格式）、description、schema_json 和指向所属
+ *     server 的指针。通过 cc_tool_vtable 暴露给上层工具执行框架。
+ *
+ *   cc_mcp_runtime_manager（主结构体）：
+ *     持有 transport factory 函数指针、factory_user_data 和 servers 动态数组。
+ *
+ * ─── MCP 协议状态机 ─────────────────────────────────────────────────
+ *
+ *   每次 mcp_call_raw 调用经历的流程：
+ *
+ *   1. 检查 cancel token，已取消则立即返回
+ *   2. 持锁检查 idle TTL：
+ *      - 若距上次使用超过 idle_ttl_ms，调用 transport->reset 复位连接，
+ *        并标记 needs_initialize=1
+ *   3. 若非 initialize 请求，调用 ensure_initialized_locked：
+ *      - 若 needs_initialize==1，发送 initialize 请求（持锁，保证握手原子性）
+ *      - 成功后置 needs_initialize=0，记录 last_used_ms
+ *   4. 分配 request id（++next_id），更新 last_used_ms
+ *   5. 构建 JSON-RPC 请求（jsonrpc_request）
+ *   6. 调用 transport_send_locked_or_parallel：
+ *      - 串行 transport（is_serial 返回真）：在 server mutex 内发送，
+ *        保证同一时刻只有一个请求在 IO 路径上
+ *      - 并发 transport（is_serial 返回假）：释放 mutex 后发送，
+ *        允许多个请求同时在不同线程中执行
+ *   7. 验证响应 id 匹配（cc_mcp_jsonrpc_response_matches_request）
+ *   8. 解析响应 JSON，检查 error 字段
+ *
+ * ─── Tool Bridge 命名规则 ────────────────────────────────────────────
+ *
+ *   MCP 工具在 C-Claw 中以 "mcp.<server>.<tool>" 格式暴露，例如
+ *   "mcp.filesystem.read_file"。display_name 在 register_mcp_tool 中
+ *   由 snprintf 构造，确保名称全局唯一且可追溯到来源 server。
+ *
+ * ─── TTL 与重置管理 ─────────────────────────────────────────────────
+ *
+ *   idle_ttl_ms：从 config->mcp.session_idle_ttl_ms 传入。当 server
+ *   上次使用时间距今超过此值，在下次调用前自动调用 transport->reset
+ *   复位连接并重新 initialize。idle_ttl_ms <= 0 表示永不过期。
+ *
+ *   needs_initialize：标记 server 是否需要重新握手。创建时初始为 1，
+ *   每次 TTL 过期 reset 后也置为 1。
+ *
+ * ─── 设计决策 ───────────────────────────────────────────────────────
+ *
+ *   为什么 initialize 握手必须在 mutex 内完成？
+ *     initialize 是连接级握手，即使 HTTP transport 可以并发，握手也
+ *     必须在 mutex 保护下进行，避免两个线程同时发现 needs_initialize
+ *     并重复发送初始化请求，导致状态混乱。
+ *
+ *   为什么 mcp_call_raw 区分 transport 串行/并发语义？
+ *     串行 transport（如 stdio）只有一个 IO 线程，若不在 mutex 内发送，
+ *     多个请求会交错写入管道导致协议错乱。并发 transport（如 HTTP）可以
+ *     并行发送，持锁只保护 request id 分配和 TTL 状态。is_serial vtable
+ *     方法让 transport 自己声明其并发能力，manager 据此决定锁策略。
+ *
+ *   为什么 tools/list 失败被记录到 diagnostics 而非中断整个加载？
+ *     load_tools 遍历所有 MCP server，逐个 initialize + list_tools +
+ *     register。单个 server 失败时记录 diagnostics 后 continue，
+ *     不影响其他 server 的加载。这保证部分 MCP server 不可用不会导致
+ *     整个 agent 初始化失败。
+ *
+ *   为什么 mcp_tool_call 将 JSON-RPC error 转换为 cc_tool_result_t.error？
+ *     MCP 协议中 error 字段表示调用层面的错误（如工具不存在、参数非法），
+ *     不是传输层错误。tool bridge 将其映射为 result.ok=0 的 tool_result，
+ *     让上层 agent 可以像处理普通工具错误一样处理 MCP 错误，无需区分。
+ */
+
 #define _POSIX_C_SOURCE 200809L
 
 #include "cc/app/cc_mcp_runtime_manager.h"

@@ -7,6 +7,33 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_esp32_filesystem.c — ESP32 文件系统操作实现
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 ESP32 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_filesystem.h 端口接口在 ESP32（ESP-IDF）平台的具体实现，
+ *   通过虚表（vtable）模式向上层提供多态的文件系统操作。
+ *   底层依赖 ESP-IDF VFS/FATFS/SPIFFS，但通过标准 POSIX 风格 API
+ *   （fopen/fread/fwrite/opendir/readdir/mkdir/remove/access）操作，
+ *   与 POSIX 版本共享几乎相同的实现逻辑。
+ *
+ * 与 POSIX 版本的一致性：
+ *   ESP32 的 ESP-IDF 内置了 VFS 层，提供兼容 POSIX 的文件 I/O API，
+ *   因此本模块的实现与 cc_posix_filesystem.c 几乎可以互换。
+ *   主要区别在于：
+ *     - 本文件严格限定在 ESP_PLATFORM 条件下编译
+ *     - 目录创建（esp32_make_dir）自动逐级创建，处理 EEXIST
+ *     - 使用 cc_strdup 代替标准 strdup（项目内部封装）
+ *
+ * 虚表多态设计：
+ *   cc_filesystem_vtable_t 定义了一组函数指针（读/写/存在性检查/目录遍历/
+ *   创建目录/删除/销毁），本文件中的 esp32_vtable 静态变量将这些函数指针
+ *   绑定到 ESP32 版本的实现。cc_filesystem_get_default() 作为工厂函数，
+ *   分配实例并绑定虚表；cc_filesystem_get_posix() 别名指向同一个实现。
+ */
+
 #include "cc/ports/cc_filesystem.h"
 
 #ifdef ESP_PLATFORM

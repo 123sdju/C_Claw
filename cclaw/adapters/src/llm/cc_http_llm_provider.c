@@ -7,6 +7,89 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_http_llm_provider.c — HTTP LLM provider 传输层模块
+ *
+ * 本模块在整体架构中的角色：
+ * ─────────────────────────────
+ * 位于适配器层，是 LLM provider 两层策略中的**传输层**。负责 HTTP 生命周期管理
+ * （base_url/api_key/model 字符串所有权、HTTP 请求/响应收发），而 API 协议差异
+ * （build_request/parse_response/parse_stream_chunk）则委托给 cc_llm_protocol_t
+ * vtable 的具体实现（OpenAI/Ollama/Anthropic）。
+ *
+ * 两层策略（cc_llm_provider_t = cc_http_llm_provider + cc_llm_protocol_t）：
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ *   第一层 — cc_http_llm_provider（本模块）：
+ *     掌管 HTTP 通用逻辑：拥有并释放 base_url、api_key、model 字符串，
+ *     组装 HTTP POST 请求、设置超时、处理 HTTP 状态码错误转换。
+ *     流式场景下提供 SSE/NDJSON 两种流格式的通用分帧解析（按 \n\n 或 \n 拆分事件），
+ *     然后将每条 JSON 事件分派给协议层的 parse_stream_event。
+ *     不感知任何具体 API 的 JSON 格式差异。
+ *
+ *   第二层 — cc_llm_protocol_t vtable（OpenAI/Ollama/Anthropic 实现）：
+ *     只实现三种协议策略回调：build_request（构造 API 特有的 URL/header/body）、
+ *     parse_response（解析完整 JSON 响应）、parse_stream_event（解析流式 JSON 增量）。
+ *     不感知 HTTP 传输细节（连接、超时、取消令牌）。
+ *
+ * 上游调用方：
+ *   - cc_llm_provider_t 的客户端（runtime/agent 层）通过 chat/chat_stream 接口调用
+ *
+ * 下游依赖模块：
+ *   - cc_http_client.c — 底层 HTTP POST 执行（cc_http_client_perform）
+ *   - cc_llm_protocol_t vtable 实现 — build_request / parse_response / parse_stream_event
+ *   - cc_string_builder.c — URL 拼接、SSE data 字段拼接
+ *   - cc_json.c — 无直接依赖，由协议实现自行处理 JSON
+ *
+ * ─── 非流式调用流程 ─────────────────────────────────────────────────────
+ *
+ *   1. http_llm_chat() 被调用
+ *   2. 委托 protocol.vtable->build_request() 构造厂商 HTTP 请求
+ *   3. http_post_json_with_headers() 发送 POST，检查 2xx 状态码
+ *   4. 委托 protocol.vtable->parse_response() 解析响应 JSON
+ *   5. cc_llm_http_request_cleanup() 释放 HTTP 请求资源
+ *
+ * ─── 流式调用流程 ───────────────────────────────────────────────────────
+ *
+ *   1. http_llm_chat_stream() 被调用
+ *   2. 委托 protocol.vtable->build_request(stream=1) 构造流式 HTTP 请求
+ *   3. http_post_json_stream_with_headers() 以 stream_body_callback 回调
+ *      方式接收网络数据块
+ *   4. stream_body_callback() 将数据追加到缓冲区，根据 stream_kind 选择
+ *      SSE（\n\n 分帧）或 NDJSON（\n 分行）解析
+ *   5. dispatch_stream_event() 将每条 JSON 事件交给 protocol.vtable->parse_stream_event
+ *   6. 协议层的 on_chunk 回调最终通知到上层
+ *   7. 流结束时 emit_finished_once() 确保只发一次 FINISHED 事件
+ *
+ * ─── 流格式支持 ─────────────────────────────────────────────────────────
+ *
+ *   SSE（Server-Sent Events）：
+ *     - 双换行（\n\n 或 \r\n\r\n）分隔事件
+ *     - 每个事件内 "data:" 前缀的行拼接为 JSON payload
+ *     - 遇到 "data: [DONE]" 表示流结束
+ *     - 用于 OpenAI 和 Anthropic
+ *
+ *   NDJSON（Newline Delimited JSON）：
+ *     - 每行一个完整的 JSON 事件
+ *     - 用于 Ollama
+ *
+ *   process_sse_buffer / process_ndjson_buffer 会将已完整接收的事件消费掉，
+ *   未收齐的尾部片段保留在缓冲区中等待后续数据到达。
+ *
+ * ─── 设计决策 ─────────────────────────────────────────────────────────
+ *
+ *   为什么非流式超时 120s，流式超时 300s？
+ *     流式响应可能持续输出数分钟（如长推理场景），需要更长的超时容忍。
+ *     非流式响应体大小可控，120s 足够覆盖正常请求。
+ *
+ *   为什么 max_response_bytes 对流式设为 0？
+ *     流式响应体大小不可预知（取决于生成长度），因此不设上限。
+ *
+ *   为什么 http_llm_destroy 同时释放 protocol.self？
+ *     cc_http_llm_provider_create 接管 protocol.self 的所有权，
+ *     destroy 时统一释放，避免调用方重复管理两个对象生命周期。
+ */
+
 #include "cc/adapters/cc_http_llm_provider.h"
 #include "cc/util/cc_memory.h"
 #include "cc/util/cc_string_builder.h"

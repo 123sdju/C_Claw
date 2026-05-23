@@ -17,7 +17,7 @@
 7. [线程平台抽象层：一次编写，三平台运行](#7-线程平台抽象层一次编写三平台运行)
 8. [互斥锁实战详解：POSIX / Windows / ESP32](#8-互斥锁实战详解posix--windows--esp32)
 9. [核心数据结构的四种线程安全策略](#9-核心数据结构的四种线程安全策略)
-10. [并发测试体系：6 个测试覆盖全部共享状态](#10-并发测试体系6-个测试覆盖全部共享状态)
+10. [并发测试体系：21 个测试覆盖全部共享状态](#10-并发测试体系21-个测试覆盖全部共享状态)
 11. [事件总线深度解析：从内部实现到全链路应用](#11-事件总线深度解析从内部实现到全链路应用)
 12. [面试高频问答](#12-面试高频问答)
 
@@ -120,21 +120,22 @@ Windows 交叉工具链做最终编译验收。面试或复盘时要把它讲成
 ### 1.3 项目规模
 
 ```
-cclaw/                  ← 可移植 SDK（约 128 个 C/H 文件）
-  core/                 ← 核心：Agent 循环、消息模型、错误类型
-  ports/                ← 抽象接口：LLM、工具、存储、沙箱、事件
-  adapters/             ← 适配实现：OpenAI、SQLite、文件工具...
-  platforms/            ← 平台层：POSIX、Windows、ESP32
-  tests/                ← 单元/并发测试
+cclaw/                  ← 可移植 SDK（约 120+ 个 C/H 文件）
+  core/                 ← 核心：Agent 循环、消息模型、错误类型、json、config
+  ports/                ← 17 个抽象端口头文件（LLM、工具、存储、沙箱、事件、HTTP、文件系统、线程...）
+  adapters/             ← 适配实现：OpenAI/Ollama/Anthropic Provider、SQLite/JSON 存储、策略引擎...
+  platforms/            ← 平台层：POSIX、Windows、ESP32、FreeRTOS
+  tests/                ← 21 个单元/并发测试文件
 
-apps/                   ← 应用入口（约 31 个 C/H 文件）
-  posix/cli/            ← Linux/macOS CLI
-  windows/cli/          ← Windows CLI
-  esp32/                ← 嵌入式设备
+apps/                   ← 应用入口（约 40+ 个 C/H 文件）
+  posix/cli/            ← Linux/macOS CLI（gateway、feature、plugin、mcp、sandbox、tools + 4 个测试）
+  windows/cli/          ← Windows CLI（同 posix 对齐结构）
+  esp32/esp32_s3_qemu/  ← ESP32-S3 QEMU（GPIO tool、feature）
+  stm32/stm32h743i_eval_renode/ ← STM32H743 Renode（FreeRTOS/lwIP/HAL smoke）
 ```
 
-当前仓库约有 **160 个 C/H 文件**，其中测试源文件约 12 个。面试时不用背规模数字，
-但要能说清楚 `core/ports/adapters/platforms/apps` 的分层边界。
+当前仓库约有 **160+ 个 C/H 文件**，其中 ports/ 下 17 个端口头文件定义全部抽象接口，
+测试文件分布为核心层 15 个 + 适配器层 2 个 + 平台层 1 个 + CLI 应用层 4 个。面试时不用背规模数字，但要能说清楚 `core/ports/adapters/platforms/apps` 的分层边界。
 
 ---
 
@@ -253,6 +254,28 @@ struct cc_tool_vtable {
     );
     void (*destroy)(void *self);               // 析构
 };
+
+// ── 运行时服务集合（限制工具对 runtime 的访问范围）──
+typedef struct cc_runtime_services {
+    cc_event_bus_t *event_bus;          // 可选：发布进度事件
+    cc_logger_t *logger;                // 可选：诊断日志
+    cc_memory_store_t *memory_store;    // 可选：长期记忆
+    cc_tool_executor_pool_t *tool_pool; // 可选：并发池
+    cc_tool_approval_fn approve_tool_call; // 可选：人工审批回调
+    void *approval_user_data;
+} cc_runtime_services_t;
+
+// ── 工具调用上下文（执行时传入的环境信息）──
+typedef struct cc_tool_context {
+    const char *session_id;
+    const char *workspace_dir;
+    const char *user_id;
+    const cc_runtime_services_t *services;  // 受限服务集，避免工具拿到完整 runtime
+    cc_cancel_token_t *cancel_token;        // 协作式取消
+    int timeout_ms;                         // 策略超时
+    const char *lane_name;                  // tool pool lane 名称
+    unsigned long generation;               // registry 版本号
+} cc_tool_context_t;
 ```
 
 **具体实现之一：文件读取工具**
@@ -331,20 +354,20 @@ cc_result_t cc_file_read_tool_create(cc_filesystem_t fs, cc_tool_t *out_tool) {
 
 ### 2.5 高级技巧：两层 VTable（协议分层）
 
-C-Claw 的 LLM Provider 使用 **两层 VTable**，将 HTTP 传输和 API 协议解耦：
+C-Claw 的 LLM Provider 在适配器层使用 **两层 VTable** 将 HTTP 传输和 API 协议解耦：
 
 ```
-cc_llm_provider_t          ← 外层：HTTP 生命周期管理
-  ├── vtable->chat()       → 发送 HTTP 请求、接收响应
-  └── vtable->chat_stream() → 流式 HTTP 传输
-
-cc_llm_protocol_t          ← 内层：API 协议差异
+cc_llm_provider_t          ← 端口层：vtable->chat() / chat_stream() + destroy()
+     ↑ 工厂注入/组合
+cc_http_llm_provider       ← 适配器层：共享的 HTTP 传输实现（SSE/NDJSON 流式分帧）
+     ↑ 策略注入
+cc_llm_protocol_t          ← 适配器层：API 协议的 vtable 策略
   ├── vtable->build_request()  → OpenAI/Ollama/Anthropic 各自构造请求
   └── vtable->parse_response() → 各自解析响应格式
 ```
 
 ```c
-// 内层协议 vtable
+// 内层协议 vtable（定义在 cc_http_llm_provider.h）
 struct cc_llm_protocol {
     void *self;
     const cc_llm_protocol_vtable_t *vtable;
@@ -360,28 +383,28 @@ struct cc_llm_protocol_vtable {
 
 // OpenAI 协议适配器
 static const cc_llm_protocol_vtable_t openai_protocol_vtable = {
-    .name                = openai_protocol_name,
-    .build_request       = openai_build_request,     // POST /v1/chat/completions
-    .parse_response      = openai_parse_response,     // JSON → cc_llm_response_t
-    .parse_stream_event  = openai_parse_stream_event, // SSE → cc_stream_chunk_t
-    .destroy             = openai_protocol_destroy,
+    .name               = openai_protocol_name,
+    .build_request      = openai_build_request,     // POST /v1/chat/completions
+    .parse_response     = openai_parse_response,     // JSON → cc_llm_response_t
+    .parse_stream_event = openai_parse_stream_event, // SSE → cc_stream_chunk_t
+    .destroy            = openai_protocol_destroy,
 };
 
 // Anthropic 协议适配器
 static const cc_llm_protocol_vtable_t anthropic_protocol_vtable = {
-    .name                = anthropic_protocol_name,
-    .build_request       = anthropic_build_request,     // POST /v1/messages
-    .parse_response      = anthropic_parse_response,     // 不同的 JSON 格式
-    .parse_stream_event  = anthropic_parse_stream_event, // SSE 格式也不同
-    .destroy             = anthropic_protocol_destroy,
+    .name               = anthropic_protocol_name,
+    .build_request      = anthropic_build_request,     // POST /v1/messages
+    .parse_response     = anthropic_parse_response,     // 不同的 JSON 格式
+    .parse_stream_event = anthropic_parse_stream_event, // SSE 格式也不同
+    .destroy            = anthropic_protocol_destroy,
 };
 ```
 
 **这为什么是高级技巧？**
 
-- 新增 LLM 只需实现内层 protocol vtable，无需触碰 HTTP 层代码
-- HTTP 层可以独立测试（注入 mock protocol）
-- Protocol 可以独立测试（注入 mock HTTP client）
+- 端口层 `cc_llm_provider_t` 只暴露 `chat/chat_stream/destroy` 三个虚函数，对上层保持极简
+- 新增 LLM 只需实现内层 protocol vtable，通过 `cc_http_llm_provider_create()` 组合即可
+- HTTP 传输层可独立测试（注入 mock protocol），Protocol 可独立测试（注入 mock HTTP client）
 - 符合 **策略模式（Strategy Pattern）** + **开闭原则（OCP）**
 
 ---
@@ -447,12 +470,17 @@ struct cc_runtime_builder {
     cc_session_store_t store;
     cc_llm_provider_t llm;
     cc_policy_engine_t policy;
-    cc_memory_store_t memory_store;
+    cc_memory_store_t memory_store;       // 可选长期记忆存储（值类型）
     cc_sandbox_t sandbox;
     cc_tool_registry_t *tool_registry;
+    cc_tool_executor_pool_t *tool_pool;   // 工具并发池（lane 上限/timeout）
+    cc_run_queue_t *run_queue;            // 多 Agent run queue（可选）
+    cc_agent_manager_t *agent_manager;    // 多 Agent 编排入口（可选）
+    cc_skill_catalog_t *skill_catalog;    // Skill catalog（可选）
     cc_agent_runtime_t *runtime;
     char *system_prompt;
     void *plugin_state;
+    void *mcp_state;                   // MCP 加载器返回的不透明状态
 };
 
 // 单步构建——一次性装配所有组件
@@ -463,11 +491,14 @@ cc_result_t cc_runtime_builder_create(
 ) {
     // 1. 分配构建器
     // 2. 创建 logger → event_bus → filesystem
-    // 3. 通过 features 工厂创建 store/llm/policy/sandbox/memory
-    // 4. 遍历 features->tools 描述符表，逐一创建工具并注册
-    // 5. 加载插件
-    // 6. 组合 system_prompt
-    // 7. 将全部依赖注入 cc_agent_runtime_t
+        // 3. 通过 features 工厂创建 store/llm/policy/sandbox/memory
+        // 4. 遍历 features->tools 描述符表，逐一创建工具并注册
+        // 5. 加载插件（通过 features->load_plugins）
+        // 6. 加载 MCP servers（通过 features->load_mcp）
+        // 7. 创建 tool_pool、run_queue、agent_manager、skill_catalog
+        // 8. 组合 system_prompt
+        // 9. 构建并发布 tool_registry_snapshot
+        // 10. 将全部依赖注入 cc_agent_runtime_t
 }
 
 // 获取构建好的 product
@@ -547,6 +578,36 @@ struct cc_policy_engine_vtable {
 | **观察者** | `cc_event_bus` | "CLI 通过事件总线实时渲染流式输出" |
 | **策略** | `cc_policy_engine` | "运行时可替换的安全检查策略" |
 | **依赖注入** | `cc_runtime_feature_set` | "通过描述符表注入所有可替换组件" |
+| **代理/编排器** | `cc_agent_manager` | "多 Agent submit/collect/interrupt + cancel token 级联" |
+
+### 3.7 多 Agent 编排（cc_agent_manager）
+
+`cc_agent_manager_t` 是 SDK 层的多 Agent 编排入口。它不创建 LLM、store 或 plugin 进程，只保存
+`agent_id → runtime` 的映射，并把每次 `handle_message` 放入 `cc_run_queue_t` 以支持
+并发调度和协作式取消：
+
+```c
+// manager 选项
+typedef struct cc_agent_manager_options {
+    cc_agent_runtime_t *default_runtime;    // 默认 agent runtime
+    cc_run_queue_t *queue;                  // 共享的 run queue
+    int owns_queue;                         // manager 是否负责销毁 queue
+    const char *default_agent_id;           // 默认 agent id
+    cc_run_queue_action_t default_action;   // 默认提交动作
+} cc_agent_manager_options_t;
+
+// 核心接口
+cc_result_t cc_agent_manager_add_agent(manager, agent_id, runtime);
+cc_result_t cc_agent_manager_submit(manager, agent_id, session_id, user_input, &run_id);
+cc_result_t cc_agent_manager_collect(manager, run_id, &out_response);
+cc_result_t cc_agent_manager_interrupt(manager, agent_id, session_id);
+cc_result_t cc_agent_manager_reset_session(manager, agent_id, session_id);
+```
+
+**关键设计**：
+- `submit` 把交互输入映射为 run queue 的 `STEER` action——同 session 的 pending run 被替换，running run 收到 cancel token
+- `reset_session` 先取消 pending/running run，再通过 store 的 `clear_session` 清空历史消息
+- manager 本身不启动 watcher、不读取文件系统——热重载 plugin 和 skill 是 app/gateway 层的职责
 
 ---
 
@@ -732,6 +793,7 @@ typedef struct cc_agent_runtime_deps {
     cc_event_bus_t *event_bus;         // 指针借用（可选）
     cc_logger_t *logger;               // 指针借用（可选）
     cc_memory_store_t *memory_store;   // 指针借用（可选）
+    cc_tool_executor_pool_t *tool_pool;// 指针借用（可选，工具并发控制）
     cc_tool_approval_fn approve_tool_call; // 函数指针
     void *approval_user_data;
 } cc_agent_runtime_deps_t;
@@ -743,11 +805,13 @@ typedef struct cc_runtime_feature_set {
     const cc_tool_descriptor_t *tools;
     size_t tool_count;
     cc_runtime_session_store_create_fn create_session_store;
-    cc_runtime_memory_store_create_fn create_memory_store;
+    cc_runtime_memory_store_create_fn create_memory_store;   // 可选
     cc_runtime_policy_create_fn create_policy_engine;
-    cc_runtime_sandbox_create_fn create_sandbox;
-    cc_runtime_plugin_load_fn load_plugins;
-    cc_runtime_plugin_destroy_fn destroy_plugins;
+    cc_runtime_sandbox_create_fn create_sandbox;              // 可选
+    cc_runtime_plugin_load_fn load_plugins;                   // 可选
+    cc_runtime_plugin_destroy_fn destroy_plugins;             // 可选
+    cc_runtime_mcp_load_fn load_mcp;                          // 可选：MCP transport 注入
+    cc_runtime_mcp_destroy_fn destroy_mcp;                    // 可选
 } cc_runtime_feature_set_t;
 ```
 
@@ -763,18 +827,35 @@ typedef struct cc_runtime_feature_set {
 // 不透明类型 — 调用者不知道底层是什么
 typedef void *cc_thread_t;    // POSIX: pthread_t*, Windows: HANDLE, ESP32: TaskHandle_t
 typedef void *cc_mutex_t;     // POSIX: pthread_mutex_t*, Windows: CRITICAL_SECTION*, ESP32: SemaphoreHandle_t
+typedef void *cc_cond_t;      // POSIX: pthread_cond_t*, Windows: CONDITION_VARIABLE*, ESP32: 通过事件组模拟
 
-// 统一 API
+// 统一 API — 线程
 cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thread);
 cc_result_t cc_thread_join(cc_thread_t thread);
 
+// 统一 API — 互斥锁
 cc_result_t cc_mutex_create(cc_mutex_t *out_mutex);
 void        cc_mutex_destroy(cc_mutex_t mutex);
 void        cc_mutex_lock(cc_mutex_t mutex);
 void        cc_mutex_unlock(cc_mutex_t mutex);
+
+// 统一 API — 条件变量（用于 run queue、tool pool 等等待唤醒场景）
+cc_result_t cc_cond_create(cc_cond_t *out_cond);
+void        cc_cond_destroy(cc_cond_t cond);
+void        cc_cond_wait(cc_cond_t cond, cc_mutex_t mutex);
+int         cc_cond_timedwait(cc_cond_t cond, cc_mutex_t mutex, int timeout_ms);
+void        cc_cond_signal(cc_cond_t cond);
+void        cc_cond_broadcast(cc_cond_t cond);
 ```
 
-**关键设计决策：为什么用 `void *` 而非结构体封装？**
+**关键设计决策：为什么条件变量放在 port 层？**
+
+run queue、plugin worker pool、MCP runtime sweep 都需要阻塞等待能力。
+如果只用轮询 sleep，会在桌面浪费 CPU，也会让 ESP 这类设备更耗电。
+`cc_cond_timedwait` 配合协作式取消令牌：core 队列或 tool pool 可以每隔几十毫秒醒来
+查询 `cc_cancel_token`，而不需要平台层知道上层取消令牌的具体语义。
+
+**关键设计决策：为什么 `cc_mutex_t` 用 `void *` 而非结构体封装？**
 
 ```c
 // 方案 A（本项目采用）：不透明指针
@@ -930,9 +1011,11 @@ void cc_mutex_unlock(cc_mutex_t mutex) {
 > 项目没有使用 C11 `_Atomic`、CAS 操作或读写锁，所有同步完全依赖 `cc_mutex_t`。
 > 但在使用方式上，有四种不同的策略模式。
 
-### 9.1 策略一：Freeze 模式（工具注册表）
+### 9.1 策略一：Freeze + Snapshot 模式（工具注册表）
 
-**核心思想**：将可变状态分两阶段 — 初始化阶段可写，冻结后变为只读。
+**核心思想**：两层机制配合——freeze 保证单个 registry 不可变，snapshot 在此基础上用 generation 实现热重载。
+
+**Freeze 层（cc_tool_registry）**：将可变状态分两阶段 — 初始化阶段可写，冻结后变为只读。每个 registry 实例独立 freeze，不可逆。
 
 ```c
 // 文件: cclaw/core/src/core/cc_tool_registry.c
@@ -1028,6 +1111,53 @@ cc_result_t cc_tool_registry_find(..., cc_tool_t *out_tool) {
     }
 }
 ```
+问：为什么不用 `const cc_tool_t *` 指向内部位置？
+答：无法保证线程安全——锁释放后内部指针变成悬空引用。返回浅拷贝让调用者在锁外安全使用。
+
+**Snapshot 层（cc_tool_registry_snapshot）**：在 freeze 的基础上，用 generation（版本号）+ ref_count（引用计数）实现工具热重载。它不是替代 freeze，而是把多个已冻结的 registry 串成一个"版本链"：
+
+```c
+// 文件: cclaw/core/src/app/cc_tool_registry_snapshot.c
+
+struct cc_tool_registry_snapshot {
+    cc_tool_registry_t *registry;   // 本 generation 的已冻结注册表
+    unsigned long generation;       // 单调递增版本号
+    int owns_registry;              // 是否负责销毁 registry
+    size_t ref_count;               // 引用计数（当前在用此 snapshot 的 run 数）
+    cc_mutex_t mutex;
+};
+```
+
+**热重载流程**（runtime_builder 的 `cc_runtime_builder_reload()`）：
+
+```
+1. 构建新 tool_registry（空）
+2. 遍历 features→tools 注册新工具
+3. cc_tool_registry_freeze(new_registry)     ← 新 registry 冻结！
+4. cc_tool_registry_snapshot_create(          ← 包装为 snapshot
+       new_registry, generation+1, owns=1)
+5. 原子 swap: 旧 snapshot → retired 列表
+              新 snapshot → 当前活跃
+6. 旧 snapshot 的 ref_count 降到 0 后自动销毁
+```
+
+```
+[旧 generation N]                [新 generation N+1]
+                    reload()
+ registry (frozen) ────────→  registry (frozen)   ← 也是冻结的！
+ snapshot (ref=3)               snapshot (ref=1)
+   ├─ run A 持有
+   ├─ run B 持有
+   └─ run C 持有
+                                 └─ 新 run D acquire
+```
+
+- **reload 失败**时不替换 snapshot，旧 generation 继续服务
+- **reload 成功**后旧 registry 进入 retired 列表，等 ref_count=0 时销毁
+- 每个 registry **依然需要 freeze**——如果不冻结，run 期间的 add 调用会破坏一致性
+
+**面试要点**：用两句话讲清楚 freeze 和 snapshot 的关系——
+"freeze 保证单个 registry 是不可变的（冻结后不能 add）。snapshot 在 freeze 之上加了引用计数和版本号，让热重载时新旧 registry 同时存在——旧的继续服务已有 run，新的接管后续 run。"
 
 ### 9.2 策略二：快照模式 / Snapshot Pattern（事件总线）
 
@@ -1107,10 +1237,12 @@ struct cc_logger {
 
 void cc_logger_log(cc_logger_t *logger, cc_log_level_t level, const char *fmt, ...)
 {
+    if (!logger) return;
+
     cc_mutex_lock(logger->mutex);
     // ═══════════════════════ 锁保护区间开始 ═══════════════════════
 
-    // 级别过滤
+    // 级别过滤（在格式化之前做，避免无用的 CPU 和 I/O 开销）
     if (level < logger->level) {
         cc_mutex_unlock(logger->mutex);
         return;
@@ -1121,11 +1253,11 @@ void cc_logger_log(cc_logger_t *logger, cc_log_level_t level, const char *fmt, .
     struct tm tm_info;
     localtime_r(&now, &tm_info);  // ← _r 后缀 = reentrant（线程安全）
     //           ^ 调用者提供缓冲区，不使用 static 变量
+    char time_buf[32];
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_info);
 
-    // 输出前缀：[时间] [级别] [模块名]
-    fprintf(stderr, "[%02d:%02d:%02d] [%s] [%s] ",
-            tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec,
-            level_string(level), logger->name);
+    // 输出前缀：[日期 时间] [级别] [模块名]
+    fprintf(stderr, "[%s] [%s] [%s] ", time_buf, level_string(level), logger->name);
 
     // 输出消息体
     va_list args;
@@ -1217,9 +1349,9 @@ static cc_result_t inmem_get(void *self, const char *key, cc_memory_entry_t *out
 
 ---
 
-## 10. 并发测试体系：6 个测试覆盖全部共享状态
+## 10. 并发测试体系：21 个测试覆盖全部共享状态
 
-### 10.1 测试矩阵
+### 10.1 并发测试矩阵
 
 | 测试文件 | 测试目标 | 线程数 | 压力规模 | 验证内容 |
 |----------|---------|--------|---------|---------|
@@ -1229,6 +1361,28 @@ static cc_result_t inmem_get(void *self, const char *key, cc_memory_entry_t *out
 | `test_logger_concurrent` | 并发日志写入 | 4 | 800 条日志 | 无崩溃、无死锁 |
 | `test_memory_store_concurrent` | 存储并发追加 | 4 | 400 条消息 | 每个 session 恰好 100 条 |
 | `test_runtime_concurrent_sessions` | Runtime 多 session | 4 | 4 session 并行 | 独立 session 无干扰 |
+
+### 10.0 扩展测试套件（当前版本新增）
+
+除上述 6 个并发测试外，当前版本还包含了以下专项测试：
+
+| 测试文件 | 测试目标 |
+|----------|---------|
+| `test_run_queue_session_serial` | run queue session 串行执行语义 |
+| `test_run_queue_async_interrupt` | run queue 异步中断和 cancel token |
+| `test_tool_executor_pool_lane` | tool pool lane 并发上限和排队 |
+| `test_cancel_token` | cancel token 创建/取消/清理语义 |
+| `test_sse_parser` | SSE 增量状态机分 chunk 解析 |
+| `test_skill_catalog_prompt` | skill catalog SKILL.md 解析和 prompt 生成 |
+| `test_mcp_runtime_manager_fake_transport` | MCP transport fake 注入和 tools/list |
+| `test_mcp_jsonrpc_matcher` | MCP JSON-RPC 响应匹配 |
+| `test_plugin_protocol_envelope` | JSON-RPC 2.0 envelope 构建/解析 |
+| `test_config_runtime_sections` | config runtime section 解析 |
+| `test_config_missing_defaults` | config 默认值降级 |
+| `test_runtime_request_config` | runtime request 配置参数构造 |
+| `test_tool_executor_policy_approval` | 工具执行策略审批流程 |
+| `test_process_capture` | POSIX 进程输出捕获 |
+| `test_message_envelope_serialization` | 消息信封序列化 |
 
 ### 10.2 基础测试：互斥锁能否阻止竞态
 
@@ -1985,7 +2139,7 @@ cc_event_bus_subscribe(bus, "my_module.status_changed", my_handler, NULL);
 
 ### Q3: "你在这个项目中用了哪些设计模式？"
 
-**答**：项目核心使用了 6 种设计模式：
+**答**：项目核心使用了 7 种设计模式：
 
 1. **VTable 多态**（手写虚函数表）— 所有端口层接口
 2. **工厂方法** — `cc_storage_factory_create_store()` 按配置选后端
@@ -1993,6 +2147,7 @@ cc_event_bus_subscribe(bus, "my_module.status_changed", my_handler, NULL);
 4. **注册表模式** — `cc_tool_registry` 工具的中央索引
 5. **观察者模式** — `cc_event_bus` 发布-订阅流式输出
 6. **策略模式** — `cc_policy_engine` 可替换的安全检查
+7. **代理模式 / 编排器模式** — `cc_agent_manager` 多 Agent 调度与生命周期管理
 
 其中构建器模式最值得展开——它解决了"创建一个依赖 10+ 个组件的复杂对象"的问题：
 ```c
@@ -2024,7 +2179,11 @@ cc_runtime_builder_destroy(builder);
 
 **答**：本项目通过 **平台抽象 + 四种同步策略** 实现线程安全：
 
-**1. 平台抽象**：用 `cc_mutex_t` / `cc_thread_t` 不透明类型封装 POSIX pthread、Windows CRITICAL_SECTION 和 ESP32 FreeRTOS，上层代码不感知平台差异。POSIX 端显式使用递归锁，Windows 的 `CRITICAL_SECTION` 也支持递归；ESP32 当前用普通 FreeRTOS mutex，因此上层设计不能依赖递归锁语义，关键模块仍要把锁边界设计清楚。
+**1. 平台抽象**：用 `cc_mutex_t` / `cc_thread_t` / `cc_cond_t` 不透明类型封装
+POSIX pthread、Windows CRITICAL_SECTION/CONDITION_VARIABLE 和 ESP32 FreeRTOS 信号量。
+POSIX 端显式使用递归锁，Windows 的 `CRITICAL_SECTION` 也支持递归；ESP32 当前用普通
+FreeRTOS mutex，因此上层设计不能依赖递归锁语义。条件变量用于 run queue、tool pool 的
+阻塞等待，`cc_cond_timedwait` 配合协作式取消令牌，每隔几十毫秒醒来查询 cancel token。
 
 **2. 四种同步策略**：
 
@@ -2035,7 +2194,7 @@ cc_runtime_builder_destroy(builder);
 | 全程持锁 | `cc_logger` | 从级别判断到 fflush 全程持锁 |
 | 标准互斥 | 所有存储后端 | lock → 读写 → unlock |
 
-**3. 并发测试**：6 个测试文件，覆盖互斥锁基础 (8线程/8万次)、freeze 并发读、事件嵌套、日志并发、存储并发和 Runtime 多 session 场景。
+**3. 并发测试**：21 个测试文件，覆盖互斥锁基础 (8线程/8万次)、freeze 并发读、事件嵌套、日志并发、存储并发、Runtime 多 session，以及 run queue、cancel token、tool pool、SSE parser、skill catalog、MCP runtime、plugin protocol 等专项单测。
 
 ```c
 // freeze 模式示例
@@ -2158,11 +2317,12 @@ for (i = 0; i < snapshot_count; i++) {
 **答**：可以讲三个诚实但不致命的点：
 
 1. 事件总线是同步分发，没有异步队列和 handler 隔离；handler 崩溃或阻塞会影响发布线程。
-2. 工具注册表和事件总线都使用固定容量数组，简单稳定，但需要容量上限和错误处理配合。
+2. 工具注册表和事件总线都使用固定容量数组（MAX_TOOLS=64, MAX_HANDLERS=64），简单稳定，嵌入式场景充分，但桌面端大量工具时可能需要改为动态扩容。
 3. 存储工厂里 SQLite 失败会降级到 JSON，这提高可用性，但生产环境要配合日志/告警，否则可能掩盖数据库故障。
+4. 事件总线目前不支持 `unsubscribe`，订阅关系假设为初始化阶段注册后运行期静态；如果需要运行时动态订阅/退订，需要扩展接口。
 
-更进一步可以补一句：如果继续优化，我会优先完善事件/工具的观测指标、补齐流式降级路径测试，
-并把头文件注释中与实现不一致的地方同步修正。
+更进一步可以补一句：如果继续优化，我会优先完善事件/工具的观测指标、补齐流式降级路径测试。
+头文件注释与实现不一致的问题已在当前版本修正完毕（见 docs/architecture.md 和 ports/ 头文件注释）。
 
 ### Q12: "如何证明这个项目不是玩具 Demo？"
 
@@ -2171,8 +2331,11 @@ for (i = 0; i < snapshot_count; i++) {
 - 有明确分层：`core/ports/adapters/platforms/apps`，核心逻辑不直接依赖 curl、pthread、Win32 或 ESP-IDF。
 - 有可裁剪 profile：桌面、Windows、ESP32、core-minimal 通过 CMake 开关控制功能进入二进制。
 - 有生命周期管理：Runtime Builder 统一创建和销毁 logger、event bus、store、llm、policy、sandbox、registry。
-- 有并发测试：mutex、registry freeze、event bus nested publish、logger、memory store、runtime sessions 都有压力测试。
+- 有并发测试：mutex、registry freeze、event bus nested publish、logger、memory store、runtime sessions、run queue async interrupt、cancel token、tool pool lane 都有压力测试。
 - 有安全边界：文件工具限制 workspace，工具执行前经过 policy engine，shell 走 sandbox/审批。
+- 有多 Agent 编排：`cc_agent_manager` 支持 submit/collect/interrupt，通过 run queue + cancel token 实现 agent 间并发调度和协作式取消。
+- 有条件变量：`cc_cond_t` + `cc_cond_timedwait` 配合 cancel token，在 run queue、tool pool 等场景实现阻塞等待而非轮询，尤其对 ESP32 省电有意义。
+- 有工具热重载：`cc_tool_registry_snapshot` 通过 generation + ref_count 支持工具集热更新，reload 失败时旧 registry 继续服务。
 
 ---
 
@@ -2205,15 +2368,28 @@ ctest --test-dir build/sdk/core-minimal --output-on-failure
 
 | 学习目标 | 文件 | 关键内容 |
 |---------|------|---------|
-| VTable 定义 | [cc_tool.h](../cclaw/ports/include/cc/ports/cc_tool.h) | tool vtable 模式 |
-| VTable 定义 | [cc_llm_provider.h](../cclaw/ports/include/cc/ports/cc_llm_provider.h) | 两层 vtable 设计 |
-| VTable 定义 | [cc_policy_engine.h](../cclaw/ports/include/cc/ports/cc_policy_engine.h) | 策略模式 + 风险等级模型 |
-| 工厂模式 | [cc_storage_factory.c](../cclaw/adapters/src/storage/cc_storage_factory.c) | 配置驱动工厂 |
-| 构建器模式 | [cc_runtime_builder.c](../cclaw/core/src/app/cc_runtime_builder.c) | 聚合 10+ 依赖 |
-| 注册表模式 | [cc_tool_registry.h](../cclaw/ports/include/cc/ports/cc_tool_registry.h) | freeze 机制 |
-| 依赖注入 | [cc_runtime_features.h](../cclaw/core/include/cc/app/cc_runtime_features.h) | 描述符表注入 |
-| Agent 循环 | [cc_agent_runtime.h](../cclaw/core/include/cc/app/cc_agent_runtime.h) | ReAct 循环入口 |
-| 错误处理 | [cc_result.h](../cclaw/core/include/cc/core/cc_result.h) | 统一结果类型 |
+| VTable 定义 | [cc_tool.h](../cclaw/ports/include/cc/ports/cc_tool.h) | tool vtable 模式 + cc_runtime_services_t |
+| VTable 定义 | [cc_llm_provider.h](../cclaw/ports/include/cc/ports/cc_llm_provider.h) | provider vtable + cancel_token/think_mode |
+| VTable 定义 | [cc_policy_engine.h](../cclaw/ports/include/cc/ports/cc_policy_engine.h) | 策略模式 + SAFE/MEDIUM/DANGEROUS 风险等级 |
+| 线程抽象 | [cc_thread.h](../cclaw/ports/include/cc/ports/cc_thread.h) | cc_mutex_t / cc_thread_t / cc_cond_t 三平台抽象 |
+| HTTP 端口 | [cc_http_client.h](../cclaw/ports/include/cc/ports/cc_http_client.h) | 函数式端口（非 vtable）+ cancel_token |
+| 会话存储 | [cc_session_store.h](../cclaw/ports/include/cc/ports/cc_session_store.h) | session store vtable（含 clear_session） |
+| 工厂模式 | [cc_storage_factory.c](../cclaw/adapters/src/storage/cc_storage_factory.c) | 配置驱动工厂 + SQLite→JSON 降级 |
+| 构建器模式 | [cc_runtime_builder.c](../cclaw/core/src/app/cc_runtime_builder.c) | 聚合 10+ 依赖 + 级联生命周期 |
+| 注册表模式 | [cc_tool_registry.h](../cclaw/ports/include/cc/ports/cc_tool_registry.h) | freeze/is_frozen/count/list_names |
+| 注册表 Snapshot | [cc_tool_registry_snapshot.c](../cclaw/core/src/app/cc_tool_registry_snapshot.c) | generation + ref_count 热重载 |
+| 事件总线 | [cc_event_bus.c](../cclaw/core/src/core/cc_event_bus.c) | snapshot 模式发布-订阅 |
+| 多 Agent 编排 | [cc_agent_manager.h](../cclaw/core/include/cc/app/cc_agent_manager.h) | submit/collect/interrupt/reset |
+| 协作式取消 | [cc_cancel_token.c](../cclaw/core/src/app/cc_cancel_token.c) | cancel token + cc_cond_timedwait |
+| Run Queue | [cc_run_queue.c](../cclaw/core/src/app/cc_run_queue.c) | STEER/DROP 策略 + cancel 级联 |
+| Tool Pool | [cc_tool_executor_pool.c](../cclaw/core/src/app/cc_tool_executor_pool.c) | lane 并发上限 + timeout + cancel |
+| Skill 目录 | [cc_skill_catalog.c](../cclaw/core/src/app/cc_skill_catalog.c) | AgentSkills SKILL.md 解析 |
+| MCP 运行时 | [cc_mcp_runtime_manager.c](../cclaw/core/src/app/cc_mcp_runtime_manager.c) | MCP transport + tools/list |
+| 插件协议 | [cc_plugin_protocol.c](../cclaw/core/src/app/cc_plugin_protocol.c) | JSON-RPC 2.0 envelope |
+| 依赖注入 | [cc_runtime_features.h](../cclaw/core/include/cc/app/cc_runtime_features.h) | cc_runtime_feature_set_t 描述符表 |
+| Agent 循环 | [cc_agent_runtime.h](../cclaw/core/include/cc/app/cc_agent_runtime.h) | ReAct 循环 + deps/options/cancel_token |
+| 错误处理 | [cc_result.h](../cclaw/core/include/cc/core/cc_result.h) | cc_result_t + cc_result_errf |
+| SSE 解析器 | [cc_sse_parser.c](../cclaw/adapters/src/llm/cc_sse_parser.c) | 增量状态机分 chunk |
 | 架构文档 | [architecture.md](../cclaw/docs/architecture.md) | 分层架构、profile、扩展点 |
 
 ---

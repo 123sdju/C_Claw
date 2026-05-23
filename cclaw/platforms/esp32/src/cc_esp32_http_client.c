@@ -7,6 +7,36 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_esp32_http_client.c — 基于 ESP-IDF esp_http_client 的 HTTP 客户端实现
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 ESP32 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_http_client.h 端口接口在 ESP32（ESP-IDF）平台的具体实现，
+ *   基于 esp_http_client 库提供 HTTP/HTTPS 客户端能力。TLS 通过 esp_crt_bundle_attach
+ *   绑定 Mozilla CA 证书包，无需手动管理证书文件。向上层（如 LLM provider、
+ *   MCP transport 模块）提供统一的 cc_http_client_perform() / cc_http_response_free()
+ *   接口，适合在内存受限的 IoT 设备上运行。
+ *
+ * 事件驱动回调架构：
+ *   与 POSIX/libcurl 版本不同，ESP-IDF esp_http_client 通过单一事件处理函数分发数据：
+ *     - HTTP_EVENT_ON_HEADER：逐对接收响应头键值对（evt->header_key/header_value）
+ *     - HTTP_EVENT_ON_DATA：接收响应体分块，传递给 on_body 或累积到响应体
+ *   cc_esp32_http_ctx_t 回调上下文集成了取消令牌检查、流式回调转发和错误累积。
+ *
+ * HTTP 方法支持：
+ *   - GET / POST：原生支持（esp_http_client_set_method）
+ *   - 其他方法：通过 X-HTTP-Method-Override header 兜底（POST + header）
+ *
+ * 与 POSIX/libcurl 版本的关键区别：
+ *   - 使用 esp_http_client 事件回调而非 libcurl WRITEFUNCTION/HEADERFUNCTION
+ *   - 事件处理函数返回 ESP_FAIL 中止传输（等价于 libcurl 返回 0）
+ *   - 请求体通过 esp_http_client_set_post_field 设置（固定长度字符串）
+ *   - 无进度回调（xferinfo），取消只在事件回调中检查
+ *   - buffer_size 固定为 2048 字节（ESP32 内存受限环境）
+ *   - response_header_append 直接从键值对拼接，无需解析 "Name: Value" 行
+ */
 
 #ifdef ESP_PLATFORM
 #include "cc/ports/cc_http_client.h"

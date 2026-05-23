@@ -1,3 +1,48 @@
+/**
+ * 学习导读：cclaw/platforms/freertos/src/cc_freertos_lwip_http_client.c
+ *
+ * 所属层次：平台层。
+ * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
+ * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
+ *           以代码行为和测试为准，并应同步修正注释。
+ */
+
+/**
+ * cc_freertos_lwip_http_client.c — 基于 lwIP 裸 socket 的 HTTP 客户端实现
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 FreeRTOS 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_http_client.h 端口接口在裸 FreeRTOS + lwIP 环境的具体实现，
+ *   不使用 libcurl 或任何第三方 HTTP 库，直接从 TCP socket 构造 HTTP/1.0 请求
+ *   并解析响应。不依赖文件系统、进程或动态加载。向上层提供统一的
+ *   cc_http_client_perform() / cc_http_response_free() 接口。
+ *
+ * 核心架构（纯 lwIP socket + 手动 HTTP 构造）：
+ *   1. parse_url() — 手动解析 HTTP/HTTPS URL（scheme、host、port、path）
+ *   2. resolve_ipv4() — IPv4 地址解析，优先 inet_addr()，回退 lwip_getaddrinfo()
+ *   3. 构造 HTTP/1.0 请求头（Connection: close，禁止 keep-alive）
+ *   4. transport_write_all() — 循环发送直到全部数据发出
+ *   5. transport_read() — 接收原始 HTTP 响应，累积到动态缓冲区
+ *   6. 手动解析响应：查找 "\r\n\r\n" 分割头部和 body，提取状态码
+ *   7. 支持流式回调：若 request->on_body 非空，一次性回调整个 body
+ *
+ * TLS 支持（可选，基于 mbedTLS）：
+ *   由 CCLAW_FREERTOS_ENABLE_MBEDTLS 编译宏控制。启用后：
+ *     - start_tls() 执行 mbedTLS 握手（VERIFY_NONE，使用 xorshift RNG）
+ *     - tls_send / tls_recv 将 mbedTLS 直接绑定到 lwIP socket 的 BIO
+ *     - 支持 ECDHE-RSA/ECDSA + AES-GCM 密码套件
+ *
+ * 限制与设计决策：
+ *   - HTTP/1.0 协议：不处理 chunked encoding 或 keep-alive
+ *   - 不支持取消令牌：cancel_token 字段未在实现中使用
+ *   - 不支持流式 SSE：流式回调在完整响应接收后一次性调用
+ *   - 无 header 解析：响应头被丢弃，仅提取状态码和 body
+ *   - 仅 IPv4：不支持 IPv6
+ *   - 缓冲区：header 构造 768 字节，读取分块 512 字节
+ *   - 超时：通过 lwip_setsockopt SO_RCVTIMEO/SO_SNDTIMEO 设置 socket 超时
+ */
+
 #include "cc/ports/cc_http_client.h"
 
 #include <ctype.h>

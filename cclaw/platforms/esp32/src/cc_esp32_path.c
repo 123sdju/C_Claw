@@ -7,6 +7,28 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_esp32_path.c — ESP32 路径操作实现
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 ESP32 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_path.h 端口接口在 ESP32（ESP-IDF）平台的具体实现，
+ *   提供路径拼接、规范化（realpath）、沙箱边界检查、父目录获取和
+ *   文件存在性检查等基础路径操作。上层代码（如 Sandbox 沙箱模块）
+ *   通过统一的 cc_path_* 函数操作路径。
+ *
+ * 路径操作实现：
+ *   - cc_path_join：使用 '/' 分隔符拼接路径
+ *   - cc_path_canonical：通过 realpath() 解析真实路径，失败时回退为输入副本
+ *   - cc_path_is_within：先规范化再前缀匹配，防止路径穿越攻击
+ *   - cc_path_dirname：查找最后一个 '/' 截取父目录
+ *   - cc_path_exists：通过 access(F_OK) 检查存在性
+ *
+ * 因为 ESP-IDF 提供了兼容 POSIX 的 VFS 层，本实现与 POSIX 版本几乎一致。
+ * PATH_MAX 默认定义为 256（ESP32 内存受限环境）。
+ */
+
 #include "cc/ports/cc_path.h"
 
 #ifdef ESP_PLATFORM

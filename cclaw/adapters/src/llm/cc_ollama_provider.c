@@ -7,6 +7,92 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_ollama_provider.c — Ollama API 协议策略模块
+ *
+ * 本模块在整体架构中的角色：
+ * ─────────────────────────────
+ * 位于适配器层，是 LLM provider 两层策略中的**协议层**。只实现
+ * cc_llm_protocol_t vtable 的四个回调，负责 Ollama Chat API 特有的
+ * JSON 格式转换。HTTP 传输细节完全由 cc_http_llm_provider 处理。
+ *
+ * 本模块不持有任何私有状态（self 始终为 NULL），因此不需要 destroy 回调。
+ * Ollama 作为本地部署方案，不需要 API key 认证。
+ *
+ * 上游调用方：
+ *   - cc_http_llm_provider.c — 通过 cc_llm_protocol_t vtable 委托调用
+ *     build_request / parse_response / parse_stream_event
+ *
+ * 下游依赖模块：
+ *   - cc_json.c — JSON 对象构造与解析
+ *   - cc_string_builder.c — URL 拼接
+ *   - cc_http_llm_provider.h — cc_llm_http_request_t 结构体
+ *
+ * ─── build_request — 构造 Ollama HTTP 请求 ──────────────────────────────
+ *
+ *   终端点：  POST {base_url}/api/chat
+ *   认证方式：无需认证（api_key 参数被忽略）
+ *   Content-Type：application/json
+ *   流格式：  NDJSON（CC_LLM_STREAM_NDJSON）
+ *
+ *   请求体 JSON 字段：
+ *     - model    —— 优先用 request->model，回退到 default_model
+ *     - messages —— request->messages_json 解析后直接嵌入
+ *     - stream   —— 布尔值，控制是否启用流式
+ *     - tools    —— request->tools_json 解析后嵌入（非空数组时）
+ *     - options  —— 嵌套对象，包含 temperature 和 num_predict：
+ *       - temperature —— request->temperature
+ *       - num_predict —— request->max_tokens（Ollama 使用不同命名）
+ *
+ *   与 OpenAI 的关键差异：
+ *     - 终端点为 /api/chat 而非 /v1/chat/completions
+ *     - 参数命名不同：num_predict 替代 max_tokens
+ *     - 参数嵌套在 options 对象内，而非顶层平铺
+ *     - 无需 API key
+ *     - 流格式为 NDJSON 而非 SSE
+ *
+ * ─── parse_response — 解析非流式响应 ────────────────────────────────────
+ *
+ *   响应 JSON 结构（Ollama Chat API）：
+ *     error                                  —— API 错误（字符串形式）
+ *     message.content                        —— 文本回复（→ out_response.text）
+ *     message.reasoning_content              —— 推理链内容
+ *     message.tool_calls[0]                  —— 工具调用
+ *       .id / .function.name / .function.arguments
+ *     done                                   —— 布尔值，true 表示完成
+ *
+ *   与 OpenAI 的关键差异：
+ *     - 无 choices 包装层，message 直接作为顶层字段
+ *     - 完成标志是 done 布尔值而非 finish_reason 字符串
+ *     - tool_call arguments 可能是 JSON 对象而非字符串，这里做了兼容处理
+ *       （优先取字符串值，否则用 cc_json_stringify 序列化）
+ *
+ * ─── parse_stream_event — 解析流式 NDJSON 事件 ──────────────────────────
+ *
+ *   每条 NDJSON 行是一个完整的 JSON 对象：
+ *     error                                  —— 流式 API 错误
+ *     message.content                        —— 文本增量 → CC_STREAM_CHUNK_TEXT
+ *     message.reasoning_content              —— 推理增量 → CC_STREAM_CHUNK_THINKING
+ *     message.tool_calls[i]                  —— 工具调用（一次性完整对象）：
+ *       .function.name      → CC_STREAM_CHUNK_TOOL_START
+ *       .function.arguments → CC_STREAM_CHUNK_TOOL_DELTA
+ *     done = true                            —— out_finished = 1
+ *
+ *   与 OpenAI 流式的关键差异：
+ *     - Ollama 的 tool_calls 是一次性完整对象，不是增量 delta
+ *       → 直接在 TOOL_DELTA 中发送完整 arguments 字符串
+ *     - 收到 tool_calls 后立即发 TOOL_END（因为不会再收到后续增量）
+ *     - 工具调用出现在 message.tool_calls 而非 delta.tool_calls
+ *
+ * ─── 默认值与创建 ────────────────────────────────────────────────────────
+ *
+ *   cc_ollama_provider_create() 将 protocol.self 设为 NULL，委托
+ *   cc_http_llm_provider_create() 组合传输层与协议层：
+ *     - 默认 base_url：http://localhost:11434（Ollama 默认端口）
+ *     - 默认 model：   qwen2.5-coder:7b
+ *     - api_key：      NULL（无需认证）
+ */
+
 #include "cc/adapters/cc_http_llm_provider.h"
 #include "cc/util/cc_json.h"
 #include "cc/util/cc_string_builder.h"

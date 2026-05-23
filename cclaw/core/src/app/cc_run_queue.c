@@ -1,3 +1,125 @@
+/**
+ * 学习导读：cclaw/core/src/app/cc_run_queue.c
+ *
+ * 所属层次：核心层。
+ * 阅读重点：这里是 SDK 的统一并发调度器，重点看 session 串行语义、lane
+ *          并行度控制、协作式取消（cancel token）和 worker 线程池调度。
+ * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
+ *           以代码行为和测试为准，并应同步修正注释。
+ */
+
+/**
+ * cc_run_queue.c — 跨平台 Agent run 并发调度队列
+ *
+ * 本模块在整体架构中的角色：
+ * ─────────────────────────────
+ * 位于 App 层（业务逻辑层），是 SDK 层唯一的多线程 job queue。它对上提供
+ * submit/collect/run 三种提交模式，对内管理 worker 线程池、4 条 lane 的
+ * 并发限制以及最多 128 个活跃 session 的状态追踪。所有平台（POSIX、Windows、
+ * ESP32）复用同一套实现，不依赖平台特定 API。
+ *
+ * 上游调用方：
+ *   - cc_agent_manager.c —— 将每次 handle_message 提交到 run queue，
+ *     通过 submit_with_token 让 task 感知 cancel token
+ *   - 高层 app（CLI/ESP）—— 直接使用 submit + collect 或同步 run 接口
+ *
+ * 下游依赖模块：
+ *   - cc_thread.c / cc_mutex / cc_cond —— 线程、互斥锁、条件变量原语
+ *   - cc_cancel_token.c —— 协作式取消，worker 在执行前后检查 cancel token
+ *
+ * ─── 数据结构 ───────────────────────────────────────────────────────
+ *
+ *   cc_run_queue_job_t：
+ *     单个异步 job。持有唯一 id、session_key、归属 lane、action 语义、
+ *     task 函数指针（含 with_token 版本）、user_data、cancel_source、
+ *     执行结果和状态（PENDING/RUNNING/COMPLETED）。通过单向链表串联。
+ *
+ *   cc_run_queue_session_state_t：
+ *     追踪某个 session_key 的飞行中 job 数量和 generation 号。generation
+ *     在每次 interrupt 时递增，供 pending job 识别过期输入。
+ *
+ *   cc_run_queue（主结构体）：
+ *     包含配置、4 条 lane 的飞行计数、最多 128 个 session 状态槽、全局
+ *     飞行/等待计数器、next_run_id 自增编号、shutting_down 标记、jobs
+ *     链表头、worker 线程数组及 mutex/cond 同步原语。
+ *
+ * ─── 四条 Lane 的并发模型 ───────────────────────────────────────────
+ *
+ *   CC_RUN_QUEUE_LANE_MAIN（默认并发 4）：
+ *     主 agent 交互 turn，cc_agent_manager 提交的消息 run。
+ *
+ *   CC_RUN_QUEUE_LANE_SUBAGENT（默认并发 8）：
+ *     子 agent 委托调用，并发度更高以允许并行子任务。
+ *
+ *   CC_RUN_QUEUE_LANE_PLUGIN（默认并发 4）：
+ *     plugin 工具调用。
+ *
+ *   CC_RUN_QUEUE_LANE_MCP（默认并发 4）：
+ *     MCP 工具调用。
+ *
+ *   每条 lane 独立维护 in_flight 计数，worker 在 find_runnable_job 中
+ *   检查 lane 并发上限和 session 并发上限（默认 per_session_concurrency=1，
+ *   即同一 session 串行），都满足时才会取出 job 执行。
+ *
+ * ─── Action 语义 ────────────────────────────────────────────────────
+ *
+ *   STEER：提交时取消同 session 的所有 pending 和 running job（通过 cancel
+ *          source），然后追加新 job。适用于用户发起新一轮交互输入。
+ *
+ *   FOLLOWUP：追加 job，不取消已有任务。适用于工具回调等补充任务。
+ *
+ *   COLLECT：取消同 session 的 pending job，但不中断正在运行的 job。
+ *            适用于只等待结果而不希望被后续输入打断的场景。
+ *
+ *   INTERRUPT：仅取消（同 STEER），不追加新 job。适用于端侧中断请求。
+ *
+ * ─── Worker 调度流程 ────────────────────────────────────────────────
+ *
+ *   1. worker 在 cond 上等待，被 submit 或 release 唤醒
+ *   2. 持锁调用 find_runnable_job_locked：
+ *      a. 遍历 jobs 链表找首个 PENDING job
+ *      b. 查 lane_index，无效 lane 则标记完成并跳过
+ *      c. 查 session 槽，不存在则创建（最多 128 个活跃 session）
+ *      d. 检查 session.in_flight < per_session_concurrency 且
+ *         lane_in_flight[lane] < lane_concurrency
+ *      e. 满足条件则递增计数、置状态为 RUNNING、返回该 job
+ *   3. worker 释放锁，在锁外执行 task
+ *   4. 执行完毕，持锁调用 finish_running_job_locked：
+ *      a. 递减 lane_in_flight 和 session.in_flight
+ *      b. 清理空闲 session 槽（in_flight==0 的 session）
+ *      c. 置状态为 COMPLETED
+ *   5. broadcast cond，唤醒其他 worker 或 collect 等待者
+ *
+ * ─── 设计决策 ───────────────────────────────────────────────────────
+ *
+ *   为什么 worker 在锁外执行 task？
+ *     worker 取到 job 后立即释放 mutex 再执行 task。这样长时间运行的
+ *     task 不会阻塞其他 session 的 submit/collect 操作，也不会阻塞其他
+ *     worker 从链表取新 job。task 内部通过 cancel_token 实现协作取消。
+ *
+ *   为什么 worker_count = 各 lane 并发之和（上限 32）？
+ *     每个 lane 的并发限制由 lane_in_flight 独立执行，但 worker 线程池
+ *     大小等于所有 lane 并发之和，确保每条 lane 达到上限时都有足够的
+ *     worker 可用。上限 32 避免配置错误在桌面创建过多线程，也是 ESP
+ *     profile 的保守保护。
+ *
+ *   为什么 session 数组是固定大小 CC_RUN_QUEUE_MAX_ACTIVE_SESSIONS=128？
+ *     session 数组是线性查找的静态槽池。128 足够覆盖同时活跃的 session
+ *     数，超出时创建失败并取消 job。空闲 session 在 in_flight 归零时
+ *     立即清理，用 swap-with-last 减少内存移动。
+ *
+ *   为什么任务取消是协作式的？
+ *     队列通过 cancel_source_cancel 标记取消，worker 在执行前后检查
+ *     token。队列不强制 kill 线程——plugin worker、MCP transport、shell
+ *     子进程各自在安全点释放资源。这是"请求取消"而非"强制终止"语义。
+ *
+ *   为什么 submit_with_token 的 user_data 默认只借用？
+ *     user_data 生命周期由调用方管理。cc_run_queue_submit（不带 token
+ *     版本）内部包装了一个 owns_user_data 标记，在 job 取消未执行时由
+ *     队列负责清理；带 token 版本的调用方需要自行保证 user_data 在
+ *     collect 前有效。
+ */
+
 #include "cc/app/cc_run_queue.h"
 #include "cc/ports/cc_thread.h"
 

@@ -7,6 +7,30 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_posix_thread.c — POSIX pthread 线程与同步原语封装
+ *
+ * 在整体架构中的角色和层次：
+ *   本模块位于 Platform 层的 POSIX 平台实现子层。
+ *   Platform 层是整个系统的最底层，负责封装操作系统差异。
+ *   本文件是 cc_thread.h 端口接口在 POSIX（Linux/macOS/BSD/Unix）平台的具体实现，
+ *   基于 POSIX pthread 提供线程创建/等待、互斥锁和条件变量等同步原语。
+ *   向上层（如 cc_agent_runtime_t、event bus、logger 模块）提供统一的线程管理接口。
+ *
+ * 线程模型（pthread_t 堆分配包装）：
+ *   pthread_t 在不同平台大小不固定，为保持 cc_thread_t（void*）的不透明性，
+ *   本模块将 pthread_t 分配在堆上，create 返回 malloc 的 pthread_t*，
+ *   join 负责 pthread_join 后 free 该包装。句柄只能 join 一次。
+ *
+ * 互斥锁模型（递归 PTHREAD_MUTEX_RECURSIVE）：
+ *   默认使用递归锁，让 event bus、logger 等模块在少量重入场景下更稳妥。
+ *   上层仍应尽量缩短持锁区间，不把递归语义作为主要设计依赖。
+ *
+ * 条件变量模型：
+ *   标准 pthread_cond_t 包装，支持无限等待和超时等待（clock_gettime +
+ *   pthread_cond_timedwait）。超时返回 0，正常唤醒返回 1。
+ */
+
 #include "cc/ports/cc_thread.h"
 
 #include <errno.h>

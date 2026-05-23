@@ -7,6 +7,123 @@
  *           以代码行为和测试为准，并应同步修正注释。
  */
 
+/**
+ * cc_anthropic_provider.c — Anthropic Messages API 协议策略模块
+ *
+ * 本模块在整体架构中的角色：
+ * ─────────────────────────────
+ * 位于适配器层，是 LLM provider 两层策略中的**协议层**。只实现
+ * cc_llm_protocol_t vtable 的四个回调，负责 Anthropic Messages API 特有的
+ * JSON 格式转换。这是四个协议实现中**格式转换最复杂**的模块，因为 Anthropic
+ * API 的消息结构、工具定义格式与 OpenAI 原生格式差异最大。
+ *
+ * 本模块不持有任何私有状态（self 始终为 NULL），因此不需要 destroy 回调。
+ *
+ * 上游调用方：
+ *   - cc_http_llm_provider.c — 通过 cc_llm_protocol_t vtable 委托调用
+ *     build_request / parse_response / parse_stream_event
+ *
+ * 下游依赖模块：
+ *   - cc_json.c — JSON 对象构造与解析
+ *   - cc_string_builder.c — URL 拼接、system prompt 拼接、tool result 格式化
+ *   - cc_http_llm_provider.h — cc_llm_http_request_t 结构体
+ *
+ * ─── 消息格式转换（OpenAI 格式 → Anthropic 格式）──────────────────────
+ *
+ *   Anthropic Messages API 与 OpenAI Chat Completions API 的消息结构不同：
+ *
+ *   1. System 消息提升为顶层字段：
+ *      OpenAI 的 system role 消息在 messages 数组中；Anthropic 要求 system
+ *      是请求体的顶层字符串字段。本模块遍历所有 system role 消息，将 content
+ *      用换行符拼接，设为 body.system；这些消息不再出现在 messages 数组中。
+ *
+ *   2. Tool role 消息转为 User role：
+ *      OpenAI 有独立的 tool role 用于工具调用结果；Anthropic 没有 tool role，
+ *      需要用 user role 发送格式化的工具返回文本：
+ *        "Tool result {tool_call_id}: {content}"
+ *
+ *   3. Assistant 消息保留：role 不变，只取 content 字段。
+ *
+ *   4. 其他 role（user 等）：保留 role，取 content 字段。
+ *
+ * ─── 工具格式转换（OpenAI function 格式 → Anthropic tool 格式）─────────
+ *
+ *   OpenAI 工具定义：
+ *     { type: "function", function: { name, description, parameters } }
+ *
+ *   Anthropic 工具定义：
+ *     { name, description, input_schema }
+ *
+ *   parameters 对象被序列化后重新解析为 input_schema，实现格式平铺。
+ *   空工具数组不会被设置到请求体中。
+ *
+ * ─── build_request — 构造 Anthropic HTTP 请求 ──────────────────────────
+ *
+ *   终端点：  POST {base_url}/v1/messages
+ *   认证方式：x-api-key: {api_key}（必需）
+ *   版本头：  anthropic-version: 2023-06-01
+ *   Content-Type：application/json
+ *   流格式：  SSE（CC_LLM_STREAM_SSE）
+ *
+ *   请求体 JSON 字段：
+ *     - model       —— 优先用 request->model，回退到 default_model
+ *     - max_tokens  —— request->max_tokens（Anthropic 必需字段）
+ *     - temperature —— request->temperature
+ *     - stream      —— 布尔值
+ *     - system      —— 拼接后的 system prompt（顶层字符串）
+ *     - messages    —— 格式转换后的消息数组
+ *     - tools       —— 格式转换后的工具数组
+ *
+ * ─── parse_response — 解析非流式响应 ───────────────────────────────────
+ *
+ *   响应 JSON 结构（Anthropic Messages API）：
+ *     error.message                       —— API 错误消息
+ *     content[]                           —— 内容块数组：
+ *       { type: "text", text: "..." }      —— 文本块，拼接所有文本块内容
+ *       { type: "tool_use", id, name, input } —— 工具调用块，只取第一个
+ *     stop_reason                         —— "end_turn" 表示正常结束
+ *
+ *   与 OpenAI 的关键差异：
+ *     - content 是数组而非字符串，需要遍历拼接所有 text 类型的块
+ *     - 工具调用结构不同：id/name/input 是 content 块的直接子字段
+ *     - arguments 在 Anthropic 中名为 input
+ *
+ * ─── parse_stream_event — 解析流式 SSE 事件 ────────────────────────────
+ *
+ *   Anthropic 流式事件使用 type 字段区分事件类型，与 OpenAI 的 choices/delta
+ *   结构完全不同：
+ *
+ *   content_block_start：
+ *     content_block.type = "tool_use" → CC_STREAM_CHUNK_TOOL_START
+ *     （携带 name 和 id）
+ *
+ *   content_block_delta：
+ *     delta.type = "text_delta"       → CC_STREAM_CHUNK_TEXT
+ *     delta.type = "thinking_delta"   → CC_STREAM_CHUNK_THINKING
+ *     delta.type = "input_json_delta" → CC_STREAM_CHUNK_TOOL_DELTA
+ *     （携带 partial_json 增量）
+ *
+ *   message_delta：
+ *     delta.stop_reason = "tool_use"  → CC_STREAM_CHUNK_TOOL_END
+ *     delta.stop_reason = "end_turn"  → out_finished = 1
+ *
+ *   message_stop：
+ *     → out_finished = 1
+ *
+ *   与 OpenAI 流式的关键差异：
+ *     - 事件按 type 路由而非遍历 choices 数组
+ *     - 工具调用 delta 是 partial_json 字符串（增量 JSON 片段）
+ *     - 有专门的 thinking_delta 事件类型用于推理链
+ *     - 结束信号可能是 message_delta.stop_reason 或 message_stop
+ *
+ * ─── 默认值与创建 ────────────────────────────────────────────────────────
+ *
+ *   cc_anthropic_provider_create() 将 protocol.self 设为 NULL，委托
+ *   cc_http_llm_provider_create() 组合传输层与协议层：
+ *     - 默认 base_url：https://api.anthropic.com
+ *     - 默认 model：   claude-3-5-haiku-latest
+ */
+
 #include "cc/adapters/cc_http_llm_provider.h"
 #include "cc/util/cc_json.h"
 #include "cc/util/cc_string_builder.h"
