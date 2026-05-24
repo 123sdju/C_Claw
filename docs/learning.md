@@ -17,9 +17,12 @@
 7. [线程平台抽象层：一次编写，三平台运行](#7-线程平台抽象层一次编写三平台运行)
 8. [互斥锁实战详解：POSIX / Windows / ESP32](#8-互斥锁实战详解posix--windows--esp32)
 9. [核心数据结构的四种线程安全策略](#9-核心数据结构的四种线程安全策略)
-10. [并发测试体系：21 个测试覆盖全部共享状态](#10-并发测试体系21-个测试覆盖全部共享状态)
+10. [并发测试体系：27 个 CTest 覆盖关键共享状态](#10-并发测试体系27-个-ctest-覆盖关键共享状态)
 11. [事件总线深度解析：从内部实现到全链路应用](#11-事件总线深度解析从内部实现到全链路应用)
 12. [面试高频问答](#12-面试高频问答)
+13. [简历指标取舍：优先讲工程价值，数字只作证据](#13-简历指标取舍优先讲工程价值数字只作证据)
+14. [面试准备路线：从项目介绍到源码深挖](#14-面试准备路线从项目介绍到源码深挖)
+15. [性能与体积 Benchmark 准备清单](#15-性能与体积-benchmark-准备清单)
 
 ---
 
@@ -1349,7 +1352,7 @@ static cc_result_t inmem_get(void *self, const char *key, cc_memory_entry_t *out
 
 ---
 
-## 10. 并发测试体系：21 个测试覆盖全部共享状态
+## 10. 并发测试体系：27 个 CTest 覆盖关键共享状态
 
 ### 10.1 并发测试矩阵
 
@@ -2194,7 +2197,7 @@ FreeRTOS mutex，因此上层设计不能依赖递归锁语义。条件变量用
 | 全程持锁 | `cc_logger` | 从级别判断到 fflush 全程持锁 |
 | 标准互斥 | 所有存储后端 | lock → 读写 → unlock |
 
-**3. 并发测试**：21 个测试文件，覆盖互斥锁基础 (8线程/8万次)、freeze 并发读、事件嵌套、日志并发、存储并发、Runtime 多 session，以及 run queue、cancel token、tool pool、SSE parser、skill catalog、MCP runtime、plugin protocol 等专项单测。
+**3. 并发测试**：POSIX CLI 当前 27 项 CTest 全部通过，覆盖互斥锁基础 (8线程/8万次)、freeze 并发读、事件嵌套、日志并发、存储并发、Runtime 多 session，以及 run queue、cancel token、tool pool、SSE parser、skill catalog、MCP runtime、plugin protocol 等专项单测。
 
 ```c
 // freeze 模式示例
@@ -2336,6 +2339,684 @@ for (i = 0; i < snapshot_count; i++) {
 - 有多 Agent 编排：`cc_agent_manager` 支持 submit/collect/interrupt，通过 run queue + cancel token 实现 agent 间并发调度和协作式取消。
 - 有条件变量：`cc_cond_t` + `cc_cond_timedwait` 配合 cancel token，在 run queue、tool pool 等场景实现阻塞等待而非轮询，尤其对 ESP32 省电有意义。
 - 有工具热重载：`cc_tool_registry_snapshot` 通过 generation + ref_count 支持工具集热更新，reload 失败时旧 registry 继续服务。
+
+---
+
+## 13. 简历指标取舍：优先讲工程价值，数字只作证据
+
+这个项目不需要强行堆性能量化。C-Claw 的价值主要是 **纯 C 工程能力、跨平台裁剪、
+接口抽象、并发安全和可测试性**，不是传统高 QPS 后端服务。简历正文应优先讲清楚
+架构价值和工程边界；数字只作为证据，能稳稳解释再写，不能解释就放到面试备查材料里。
+
+### 13.1 简历正文优先写什么
+
+优先写这些工程事实，而不是性能承诺：
+
+| 指标 | 推荐写法 | 价值 |
+|------|----------|------|
+| LLM 后端 | 支持 OpenAI-compatible / Ollama / Anthropic 3 类 LLM 后端 | 体现协议抽象能力 |
+| 存储后端 | 支持 SQLite / JSON 文件 / Memory 3 类会话或记忆存储 | 体现端口-适配器设计 |
+| 构建 Profile | 支持 POSIX CLI、Windows CLI、core-minimal、ESP32-S3 QEMU、STM32H743 Renode 5 类构建目标 | 体现跨平台和裁剪 |
+| 自动化测试 | POSIX CLI 当前 27 项 CTest 全部通过 | 体现工程质量 |
+| 嵌入式验收 | ESP32-S3 QEMU 和 STM32H743 Renode 有 smoke 验收路径 | 体现不是纯桌面 demo |
+| 插件协议 | JSON-RPC 2.0 over stdio，插件可用任意语言实现 | 体现扩展性 |
+
+简历里推荐组合成一句：
+
+> 基于纯 C 实现 AI Agent Runtime，采用 Ports & Adapters 架构解耦 LLM、工具、存储和平台能力，支持 3 类 LLM 后端、3 类存储后端、JSON-RPC 插件工具系统，并通过 5 类 CMake Profile 覆盖 POSIX、Windows、ESP32-S3 QEMU、STM32H743 Renode 等构建目标；编写 27 项 CTest 覆盖并发队列、插件协议、工具执行和配置加载等核心路径。
+
+如果简历空间很紧，可以不写任何性能数字，只保留"多后端、多 profile、测试覆盖"这些工程指标。
+这些数字不是为了显得更大，而是为了证明项目不是口头设计。
+
+### 13.2 不建议直接放进简历的性能指标
+
+下面这些指标更适合做面试备查材料。只有当岗位明显关注嵌入式资源占用、系统性能或工具链优化，
+并且你已经实测过，才考虑写进简历：
+
+这些指标很有含金量，但必须先保留命令输出或日志，最好记录机器环境：
+
+| 待测指标 | 为什么值得测 | 可写到简历的形式 |
+|----------|--------------|------------------|
+| core-minimal 二进制/静态库体积 | 证明构建裁剪有效 | 最小核心构建产物约 xx KB/MB |
+| POSIX CLI 二进制体积 | 证明 C runtime 的部署成本 | 桌面 CLI 单文件产物约 xx MB |
+| 插件 stdio 调用延迟 | 证明 JSON-RPC 插件机制开销可控 | 本地插件调用平均 xx ms |
+| run queue 并发调度耗时 | 证明多 session 调度能力 | N 个 session 并发提交，平均调度耗时 xx ms |
+| 冷启动耗时 | 证明 CLI 工具可用性 | CLI 冷启动到 help 输出约 xx ms |
+| ESP32/STM32 固件大小 | 嵌入式方向很加分 | ESP32 QEMU 固件约 xx KiB，占 factory 分区 xx% |
+
+如果没有基准版本，不要写"提升 xx%"。可以写"控制在 xx"、"平均 xx"、"覆盖 xx"，
+这些是单点测量，解释成本低。
+
+### 13.3 明确不要写的指标
+
+- 不写"高并发"：除非做过明确压测并能说明并发模型、机器配置和瓶颈。
+- 不写"性能提升 xx%"：除非有优化前后的 commit、命令和日志。
+- 不把代码行数作为主指标：代码量可以口头说明规模，但简历上优先写测试、构建目标、后端数量。
+- 不把 Windows CLI 说成已完整验证：当前可以说"源码和 CMake 结构已对齐，需 Windows 环境最终验收"。
+
+### 13.4 简历版本模板
+
+**三行版本**：
+
+> C-Claw｜纯 C AI Agent Runtime  
+> 基于 Ports & Adapters 架构开发纯 C Agent 运行时，用 `struct + vtable + void *self` 实现接口抽象、依赖注入和跨平台适配，核心支持 ReAct 工具调用循环、流式输出、上下文管理和长期记忆。  
+> 接入 OpenAI-compatible / Ollama / Anthropic 3 类 LLM 后端，支持 SQLite / JSON / Memory 3 类存储，以及文件、Shell、HTTP、Memory、JSON-RPC 插件工具系统。  
+> 通过 CMake Profile 支持 POSIX、Windows、ESP32-S3 QEMU、STM32H743 Renode 等多平台裁剪构建，编写 27 项 CTest 覆盖并发调度、插件协议、工具执行和配置加载等关键路径。
+
+**偏系统开发版本**：
+
+> 设计纯 C Agent Runtime 的端口抽象层，将 LLM Provider、Tool、Session Store、Memory Store、Policy Engine、Sandbox、Event Bus 等能力统一为 vtable 接口，并通过 Runtime Builder 进行依赖注入和生命周期托管，降低核心层对 curl、pthread、Win32、ESP-IDF 等平台能力的耦合。
+
+**偏嵌入式/跨平台版本**：
+
+> 通过 CMake Profile 和平台端口实现同一套 Agent Core 在 POSIX CLI、Windows CLI、ESP32-S3 QEMU、STM32H743 Renode 和 core-minimal 之间裁剪复用；设备端只保留必要文件系统、线程、HTTP、UART/FreeRTOS 适配，桌面能力不进入核心层。
+
+---
+
+## 14. 面试准备路线：从项目介绍到源码深挖
+
+### 14.1 15 秒版本
+
+> C-Claw 是我用纯 C 实现的 AI Agent Runtime。它的目标是让同一套 Agent Core 可以在桌面、服务器和嵌入式设备上复用，所以我用 Ports & Adapters 把 LLM、工具、存储、平台能力解耦，并用 C 的 vtable 模式实现多态和依赖注入。
+
+### 14.2 60 秒版本
+
+> 这个项目的核心链路是 ReAct Agent 循环：用户输入先写入 session store，context builder 根据历史消息、长期记忆和工具 schema 组装 LLM messages；LLM 如果返回工具调用，tool executor 会从 registry 查找工具，经过 policy engine 检查后执行，把 tool result 写回 session，再进入下一轮 LLM；如果没有工具调用，就输出最终文本。  
+> 架构上，core 层只依赖 ports 里的接口，不直接依赖 OpenAI、SQLite、curl 或具体平台。OpenAI/Ollama/Anthropic、SQLite/JSON、POSIX/Windows/ESP32 都作为 adapter 注入。项目还实现了 run queue、cancel token、tool pool、event bus 和 JSON-RPC 插件系统，并用 27 项 CTest 覆盖关键并发和协议路径。
+
+### 14.3 3 分钟深挖版本
+
+面试官让你"详细讲讲项目"时，可以按下面顺序讲：
+
+1. **背景**：为什么做纯 C Agent Runtime。重点讲可移植、可裁剪、资源受限设备，而不是跟 Python 框架比生态。
+2. **主链路**：用户输入、session store、context builder、LLM provider、tool executor、tool result、下一轮 LLM。
+3. **架构边界**：`core/ports/adapters/platforms/apps` 各自负责什么，为什么 core 不能直接引用平台实现。
+4. **C 多态**：用 `struct + vtable + void *self`，值类型浅拷贝，`destroy(self)` 负责释放具体实现。
+5. **并发设计**：同 session 串行、跨 lane 并发、cancel token 协作式取消、事件总线快照分发。
+6. **工程证据**：5 类 profile、3 类 LLM、3 类存储、JSON-RPC 插件、27 项 CTest。
+7. **不足和后续**：观测指标、benchmark、Windows 真机验收、事件总线异步化。
+
+### 14.4 STAR 故事模板
+
+**故事 1：从耦合实现重构到 Ports & Adapters**
+
+| STAR | 内容 |
+|------|------|
+| Situation | 早期桌面能力、LLM 接入、存储和平台代码容易混在核心逻辑里 |
+| Task | 让同一套 Agent Core 能在 POSIX、Windows、ESP32、STM32 profile 下复用 |
+| Action | 抽象 `cc_llm_provider_t`、`cc_tool_t`、`cc_session_store_t`、`cc_http_client_t` 等端口，用 Runtime Builder 注入具体 adapter，用 CMake Profile 控制能力裁剪 |
+| Result | core 层不直接依赖 curl、pthread、Win32 或 ESP-IDF；新增 LLM 后端或平台主要改 adapter/feature descriptor，不改 Agent 主循环 |
+
+**故事 2：事件总线为什么用快照模式**
+
+| STAR | 内容 |
+|------|------|
+| Situation | Runtime、工具执行、流式输出、CLI 渲染都需要发布事件，handler 内可能重入 publish/subscribe |
+| Task | 保证并发发布和嵌套发布时不死锁、不长时间持锁、不破坏 handler 数组遍历 |
+| Action | publish 时锁内筛选并浅拷贝 handler 快照，释放锁后逐个调用回调 |
+| Result | handler 可以安全重入发布事件，锁持有时间短；代价是当前 publish 看不到发布中新增的订阅者 |
+
+**故事 3：工具调用为什么放到 registry + policy + executor**
+
+| STAR | 内容 |
+|------|------|
+| Situation | Agent 工具数量会增长，包含文件、Shell、HTTP、Memory、插件等不同风险等级能力 |
+| Task | 避免 Runtime 里写大量 `if tool_name == ...`，同时给危险工具加策略边界 |
+| Action | 每个工具实现 `cc_tool_vtable_t`，统一注册到 registry；执行前由 tool executor 查找工具、构造上下文、调用 policy engine，再执行工具并发布事件 |
+| Result | 新增工具只影响工具实现和 feature descriptor，Runtime 主循环保持稳定；Shell/文件等能力可以被策略层统一控制 |
+
+### 14.5 面试追问清单
+
+面试前至少把下面问题各准备 1 分钟答案。回答时不要背概念，最好都落回本项目里的模块名、
+设计取舍和代价。
+
+**Q1：为什么用 C 而不是 Python / Rust / Go？**
+
+**答**：这个项目的目标不是快速做一个应用层 Agent，而是探索 Agent Runtime 在桌面和
+嵌入式/资源受限环境之间如何复用。C 的优势是 ABI 简单、运行时依赖少、容易做平台裁剪，
+也更贴近 ESP32、STM32、FreeRTOS 这类环境。  
+如果用 Python，工具生态会更快，但很难自然下沉到嵌入式 profile；如果用 Rust，内存安全更强，
+但 FFI、工具链和板级适配成本更高。这里选择 C，是为了把重点放在 runtime 边界、生命周期、
+接口抽象和平台移植上。
+
+**追问补充**：不是说 C 比 Rust/Go 更适合所有场景，而是这个项目的训练目标和部署假设更偏
+系统层、可裁剪和跨平台端口。
+
+**Q2：C 里怎么实现多态？**
+
+**答**：项目统一使用 `struct + vtable + void *self`。对外暴露的是一个值类型句柄，比如
+`cc_tool_t` 或 `cc_llm_provider_t`，里面有 `self` 指向具体实现的私有数据，`vtable`
+指向一组函数指针。调用方只通过 vtable 调 `chat`、`call`、`destroy` 等接口，不知道背后是
+OpenAI、Ollama、SQLite、JSON store 还是插件工具。
+
+```c
+typedef struct cc_tool {
+    void *self;
+    const cc_tool_vtable_t *vtable;
+} cc_tool_t;
+```
+
+**追问补充**：它和 C++ 虚函数类似，但 C++ 的 vtable 由编译器生成，C-Claw 是手写函数指针表；
+`this` 指针也不是隐式的，而是显式传入 `void *self`。
+
+**Q3：如何避免内存泄漏？**
+
+**答**：核心原则是所有权明确和生命周期集中管理。项目里多数对象遵循 `create -> use -> destroy`，
+谁创建谁释放；`cc_tool_t`、`cc_llm_provider_t` 这类句柄可以浅拷贝，但浅拷贝不转移 `self`
+所有权；复杂组件由 `cc_runtime_builder` 统一装配，失败路径和销毁路径做级联清理。错误处理也用
+`cc_result_t` 显式返回，避免错误路径漏掉释放。
+
+**追问补充**：C 没有 RAII，所以最容易出问题的是中途失败路径。这个项目的做法是把复杂依赖创建
+集中到 builder/factory，减少到处手写清理逻辑。
+
+**Q4：工具调用失败怎么办？**
+
+**答**：工具失败不应该直接让进程退出。Agent 的语义里，工具结果也是 observation 的一部分。
+所以 `cc_tool_executor_execute()` 可以返回一个工具失败结果，例如 `ok=0` 和错误文本，
+然后把这个 tool result 写回 session store。下一轮 LLM 能看到失败原因，决定修正参数、换工具，
+或者向用户解释失败。
+
+**追问补充**：只有基础 runtime 创建失败、配置 JSON 严重错误、内存分配失败这类系统级问题才应该
+阻止启动；单个工具找不到或执行失败属于 Agent 循环里的可恢复错误。
+
+**Q5：同一个 session 为什么要串行？**
+
+**答**：同一个 session 的消息历史有严格顺序。如果两个请求同时写同一个 session，可能出现上下文
+交叉、工具结果对应错 assistant tool call、最终回答基于不一致历史的问题。所以 run queue 的策略是
+同 session 串行，保证消息顺序；不同 session 可以进入不同 lane 并发执行，提高吞吐。
+
+**追问补充**：这不是简单限制并发，而是在一致性和并发之间做边界划分：session 内保证顺序，
+session 间释放并发。
+
+**Q6：cancel token 是什么？**
+
+**答**：`cc_cancel_token_t` 是协作式取消边界。它不强杀线程，而是让 run queue、tool pool、
+插件 worker、MCP transport、LLM stream 等在安全点检查“是否已取消”。等待条件变量时也会用
+timed wait 周期性醒来检查 token，这样既不会忙等，也能及时响应 interrupt。
+
+**追问补充**：强杀线程在 C 里很危险，容易留下锁、内存、pipe、socket 等资源处于不一致状态。
+协作式取消更保守，但更容易保证清理路径正确。
+
+**Q7：新增一个 LLM 后端要改哪里？**
+
+**答**：优先复用 HTTP LLM provider，只新增协议策略。HTTP 层负责请求生命周期、headers/body
+发送、状态码处理、stream 分帧；具体后端只实现 URL、headers、JSON body、普通响应解析和流式事件解析。
+然后在 feature descriptor 里注册 provider，并补配置项和测试。
+
+**追问补充**：这就是两层 vtable 的价值。新增后端不应该复制一份 HTTP transport，也不应该改
+Agent Runtime 主循环。
+
+**Q8：JSON-RPC 插件有什么风险？**
+
+**答**：主要风险有四类：第一是进程生命周期，插件启动失败或退出不能拖垮 runtime；第二是超时和取消，
+请求不能无限等；第三是响应串线，stdio 上多个请求必须靠 JSON-RPC id 匹配；第四是 schema 和错误处理，
+插件返回非法 JSON 或错误响应时要转成工具错误。项目里取消读取后会复位 worker，避免旧响应污染后续请求。
+
+**追问补充**：JSON-RPC over stdio 的优点是语言无关、实现简单、隔离性比动态库好；代价是序列化、
+进程通信和生命周期管理成本更高。
+
+**Q9：事件总线同步分发有什么问题？**
+
+**答**：同步分发的主要问题是 handler 在发布线程里执行，如果 handler 很慢、阻塞或崩溃，会影响
+发布方。当前项目用快照模式解决的是锁边界和重入问题：锁内只复制 handler 快照，锁外回调，避免
+handler 内 publish/subscribe 导致死锁或遍历失效。但它没有解决 handler 隔离和异步调度问题。
+
+**追问补充**：如果继续演进，可以加异步事件队列、worker 线程、handler 超时和背压策略。
+当前同步模型更简单，适合 runtime 内部诊断和 CLI 渲染。
+
+**Q10：如何证明这个项目不是 demo？**
+
+**答**：我会从工程证据证明，而不是只说功能多。第一，分层清楚，`core/ports/adapters/platforms/apps`
+各有边界，core 不直接依赖 curl、pthread、Win32 或 ESP-IDF；第二，有 5 类 CMake Profile，
+能做桌面、core-minimal 和板级裁剪；第三，有 OpenAI-compatible、Ollama、Anthropic 3 类 LLM 后端，
+SQLite、JSON、Memory 3 类存储；第四，有 JSON-RPC 插件、run queue、cancel token、tool pool、
+event bus 等 runtime 组件；第五，POSIX CLI 当前 27 项 CTest 全部通过，覆盖并发、协议、工具执行和配置路径。
+
+**追问补充**：我不会把未完整验收的环境说满，比如 Windows CLI 可以说结构已对齐，但仍需要 Windows
+真机或交叉工具链做最终编译验证。
+
+**Q11：这个项目最大的技术难点是什么？**
+
+**答**：最大的难点不是某一个 API，而是如何在 C 里保持复杂 runtime 的边界清晰。Agent Runtime
+会同时碰到 LLM、工具、存储、插件、并发、平台适配和生命周期管理，如果没有端口抽象，很快会变成
+到处都是 `if provider == ...` 和平台条件编译。这个项目把变化点都收敛到 vtable、factory、
+feature descriptor 和 CMake profile 里，让主循环保持稳定。
+
+**追问补充**：面试时可以接着讲 `cc_runtime_builder`，它是依赖注入和生命周期管理的关键入口。
+
+**Q12：如果让你继续优化，下一步做什么？**
+
+**答**：我会优先做三件事。第一，补 benchmark 和观测指标，比如插件调用延迟、core-minimal 体积、
+run queue 调度耗时，让项目有更清楚的工程数据。第二，完善 Windows 真机和更多板级 profile 的验收。
+第三，把事件总线和插件 worker 的监控做得更完整，比如超时统计、错误分类和异步事件队列。
+
+**追问补充**：这里不要说“重写成某某语言”。更好的回答是沿着现有架构补验证、补观测、补边界能力。
+
+### 14.6 现场演示顺序
+
+如果面试允许展示终端，推荐用 3 分钟演示：
+
+```bash
+cmake --preset posix-cli
+cmake --build --preset posix-cli
+ctest --test-dir build/app/posix/cli --output-on-failure
+./build/app/posix/cli/bin/c-claw --help
+```
+
+演示时不要边跑边解释所有源码。建议只说三件事：
+
+1. profile 决定构建入口和能力裁剪。
+2. 测试覆盖并发队列、插件协议、工具执行、配置加载等核心路径。
+3. CLI 是一个 app gateway，真正的 Agent Runtime 在 core 层。
+
+### 14.7 工具数据交互与跨线程模型
+
+面试官如果问"工具的数据是怎么传的"或"工具是不是跨线程执行"，不要只回答"通过函数调用"。
+更完整的回答应该分成 **数据流、调用接口、并发边界、插件/MCP 特例** 四层。
+
+**1. 工具调用的数据流**
+
+工具调用发生在 ReAct 循环中。LLM 不直接执行工具，而是返回一个结构化的 tool call：
+
+```text
+用户输入
+  ↓
+Agent Runtime 构建 messages + tool schema
+  ↓
+LLM 返回 tool_call: { id, name, arguments_json }
+  ↓
+cc_tool_executor_execute()
+  ↓
+tool_registry 根据 name 查找 cc_tool_t
+  ↓
+policy_engine 做安全检查和人工审批
+  ↓
+tool.vtable->call(...)
+  ↓
+工具填充 cc_tool_result_t
+  ↓
+runtime 写入 session store，形成 role="tool" 的消息
+  ↓
+下一轮 LLM 读取 tool result，继续推理或输出最终答案
+```
+
+这个设计的关键点是：工具结果不是临时变量里用完就丢，而是写回 session store。
+下一轮构建上下文时，`cc_context_builder` 会把 assistant 的 tool call 和 tool 的 result
+都还原成 LLM API 需要的 messages。这样 LLM 能看到 observation，符合 ReAct 模式。
+
+**2. 工具统一调用接口**
+
+所有工具都实现同一个 vtable 接口：
+
+```c
+cc_result_t (*call)(
+    void *self,
+    const char *args_json,
+    const cc_tool_context_t *ctx,
+    cc_tool_result_t *out_result
+);
+```
+
+这四个参数分别承担不同职责：
+
+| 参数 | 含义 | 所有权 |
+|------|------|--------|
+| `self` | 工具自己的私有数据，例如插件 worker、文件工具配置、HTTP client | 工具实现拥有，调用方只借用 |
+| `args_json` | LLM 生成的工具参数 JSON 字符串 | 调用方借给工具，工具不能释放 |
+| `ctx` | 本次调用上下文：session、workspace、runtime services、cancel token、timeout、lane | 调用方临时提供，工具只借用 |
+| `out_result` | 工具输出结果 | 工具填充，调用方负责后续销毁字段 |
+
+成功时工具通常填：
+
+```c
+out_result->ok = 1;
+out_result->content = strdup("{\"content\":\"...\"}");
+```
+
+失败时工具通常填：
+
+```c
+out_result->ok = 0;
+out_result->error = strdup("File not found");
+```
+
+注意：`cc_result_t` 表示"工具调用函数本身有没有系统级异常"，`cc_tool_result_t.ok`
+表示"这次工具业务执行是否成功"。例如文件不存在、参数错误、policy 拒绝这类情况通常会变成
+`out_result->ok = 0`，然后作为 observation 写回给 LLM，而不是直接中断整个 Agent。
+
+**3. `cc_tool_context_t` 传了哪些运行时能力**
+
+工具不会拿到完整 `cc_agent_runtime_t`，只拿到受限上下文：
+
+```c
+typedef struct cc_tool_context {
+    const char *session_id;
+    const char *workspace_dir;
+    const char *user_id;
+    const cc_runtime_services_t *services;
+    cc_cancel_token_t *cancel_token;
+    int timeout_ms;
+    const char *lane_name;
+    unsigned long generation;
+} cc_tool_context_t;
+```
+
+这么做有两个好处：
+
+1. **边界更安全**：工具只能访问被允许的服务，比如 event bus、logger、memory store、
+   tool pool、审批回调，不能随意改 runtime 内部状态。
+2. **更容易裁剪**：不同 profile 可以不给某些 service，例如嵌入式 profile 可以禁用 shell、
+   plugin、SQLite 等能力，工具只需要判断对应服务是否为 NULL。
+
+面试时可以强调：`ctx` 是一次调用的"环境包"，不是长期持有对象。工具不应该把 `ctx` 指针保存到
+异步任务里长期使用；如果确实要异步执行，需要深拷贝必要字段并明确生命周期。
+
+**4. 单次工具调用本身是同步函数调用**
+
+在 `cc_tool_executor_execute_with_options()` 中，真正执行工具的是一行 vtable 调用：
+
+```c
+rc = tool.vtable->call(
+    tool.self,
+    call->arguments_json,
+    &ctx,
+    out_result
+);
+```
+
+这意味着：**单次工具调用本身不是自动开线程的**。executor 调用工具时，是在当前执行线程里同步等待
+工具返回。工具返回后，runtime 才会释放 tool pool ticket、发布 finished 事件、把结果写回 session。
+
+所以对"是否跨线程"的准确回答是：
+
+> 工具调用本身是同步函数调用；跨线程并发发生在外层 run queue 或具体 adapter 内部。
+
+比如某个 Agent run 被 run queue 放到 worker 线程执行，那么这个 run 里面的工具调用就在那个 worker
+线程里同步执行。工具 executor 不会为每次 tool call 额外创建一个线程。
+
+**5. Tool Executor Pool 不是线程池，而是并发闸门**
+
+`cc_tool_executor_pool` 很容易被误解成线程池，但它实际上只负责 lane 级准入控制和 timeout 策略。
+
+这里的 lane 可以理解成"工具执行车道"或"工具分类队列"。**lane 级并发闸门**的意思是：
+按工具类别划分不同 lane，每个 lane 设置最大并发数；工具执行前必须先拿到这个 lane 的名额，
+拿不到就等待，执行完再释放名额。
+
+执行前：
+
+```text
+build_tool_lane_name(call->name)
+  ↓
+cc_tool_executor_pool_acquire_with_cancel(pool, lane_name, cancel_token, &ticket)
+  ↓
+tool.vtable->call(...)
+  ↓
+cc_tool_executor_pool_release(pool, ticket)
+```
+
+lane 名称大致这样映射：
+
+```text
+普通工具              → tool.<name>
+plugin.<id>.<tool>    → plugin.<id>
+mcp.<server>.<tool>   → mcp.<server>
+```
+
+这样配置可以限制一类工具的并发。例如 shell 工具可以限制为 1，HTTP 工具可以允许多个并发，
+插件工具可以按 plugin 维度限流。
+
+举个例子，如果 `tool.shell_run` 的并发上限是 1：
+
+```text
+第 1 个 shell_run 进来：
+  in_flight = 0 < 1
+  允许执行，in_flight++
+
+第 2 个 shell_run 进来：
+  in_flight = 1 >= 1
+  没有名额，进入条件变量等待
+
+第 1 个 shell_run 执行完：
+  in_flight--
+  cond_broadcast 唤醒等待者
+
+第 2 个 shell_run 获得名额：
+  in_flight++
+  开始执行
+```
+
+所以它像一个闸门：
+
+```text
+          tool.shell_run lane
+请求 1 ──> [ 有名额 ] ──> 执行
+请求 2 ──> [ 没名额 ] ──> 等待
+请求 3 ──> [ 没名额 ] ──> 等待
+```
+
+它和线程池的区别：
+
+| 概念 | 职责 |
+|------|------|
+| 线程池 | 创建/管理 worker 线程，把任务放到 worker 上执行 |
+| lane 并发闸门 | 不执行任务，只判断某类工具当前能不能开始执行 |
+ 
+为什么需要 lane 而不是全局一个并发数？因为不同工具的风险和资源消耗不同：
+
+```text
+shell_run       风险高，通常应该限制为 1
+http_request    可以允许多个并发
+plugin 工具     可能共享同一个外部进程，需要按 plugin 限流
+mcp 工具        可能共享同一个 MCP server，需要按 server 限流
+```
+
+pool 内部用 `mutex + cond` 维护每条 lane 的 `in_flight`：
+
+```text
+如果 in_flight < concurrency:
+    in_flight++
+    允许执行
+否则:
+    cond_timedwait 50ms
+    醒来后检查 cancel_token
+```
+
+执行结束后：
+
+```text
+in_flight--
+cond_broadcast 唤醒等待者
+```
+
+所以 pool 的职责是：
+
+- 控制同类工具最多同时多少个调用在飞行中。
+- 给工具提供本次调用的 `timeout_ms`。
+- 等待 lane 名额时响应 cancel token。
+- 不拥有工具，不调用工具，不创建执行线程。
+
+**6. 插件工具和 MCP 工具的数据交互**
+
+插件和 MCP 在 runtime 看来仍然是普通工具：它们也注册成 `cc_tool_t`，也通过
+`tool.vtable->call(...)` 被调用。区别在于它们的 `call` 内部会把本地函数调用转成外部协议。
+
+插件工具常见链路：
+
+```text
+tool.vtable->call
+  ↓
+plugin adapter
+  ↓
+JSON-RPC 2.0 request
+  ↓
+stdin/stdout
+  ↓
+外部插件进程
+  ↓
+JSON-RPC response
+  ↓
+cc_tool_result_t
+```
+
+MCP 工具常见链路：
+
+```text
+tool.vtable->call
+  ↓
+MCP tool bridge
+  ↓
+MCP transport
+  ↓
+外部 MCP server
+  ↓
+tools/call result
+  ↓
+cc_tool_result_t
+```
+
+也就是说，runtime 层看到的是统一工具接口；跨进程、stdio、HTTP、MCP transport 等细节被封装在
+具体 adapter 里。这是端口-适配器架构的价值：Agent Runtime 不需要知道工具到底是本地函数、
+外部进程还是远程服务。
+
+**7. 面试回答模板**
+
+> 工具的数据交互是通过统一的 `cc_tool_vtable_t.call` 完成的。LLM 返回的 tool call 会被解析成
+> `cc_tool_call_t`，里面有工具 id、工具名和 JSON 参数。tool executor 从 registry 查找工具，
+> 经过 policy engine 检查后，把 `args_json`、`cc_tool_context_t` 和 `cc_tool_result_t`
+> 传给工具。工具解析 JSON 参数，执行逻辑，把成功内容或错误写入 `out_result`。runtime 再把结果
+> 作为 `role="tool"` 的消息写回 session store，下一轮 LLM 就能看到 observation。
+>
+> 单次工具调用本身是同步函数调用，不是每次调用都新开线程。跨线程并发发生在外层 run queue，
+> 而 `cc_tool_executor_pool` 不是线程池，它只是 lane 级并发闸门，负责限制某类工具同时执行的数量、
+> 提供 timeout，并在等待时响应 cancel token。插件和 MCP 工具在 runtime 看来仍是普通工具，
+> 只是它们的 `call` 内部会转成 JSON-RPC、stdio、HTTP 或 MCP transport。
+
+---
+
+## 15. 性能与体积 Benchmark 准备清单
+
+### 15.1 先记录环境
+
+所有 benchmark 都要先记录环境，否则数字没有可比性：
+
+```bash
+uname -a
+cc --version
+cmake --version
+```
+
+建议把结果写到本地笔记，不一定提交到仓库。简历里只放稳定、可复测、能解释的数字。
+
+### 15.2 体积指标
+
+POSIX CLI：
+
+```bash
+cmake --preset posix-cli
+cmake --build --preset posix-cli
+ls -lh build/app/posix/cli/bin/c-claw
+size build/app/posix/cli/bin/c-claw
+```
+
+core-minimal：
+
+```bash
+cmake --preset core-minimal
+cmake --build --preset core-minimal
+find build/sdk/core-minimal -maxdepth 3 -type f \( -name '*.a' -o -perm -111 \) -exec ls -lh {} \;
+```
+
+ESP32 QEMU 固件：
+
+```bash
+. "$IDF_PATH/export.sh"
+./scripts/esp32_s3_qemu.sh build
+ls -lh build/app/esp32/esp32_s3_qemu/*.bin
+```
+
+可写口径：
+
+> core-minimal 构建产物约 xx，POSIX CLI 单文件约 xx，ESP32-S3 QEMU 固件约 xx KiB。
+
+### 15.3 测试耗时指标
+
+```bash
+ctest --test-dir build/app/posix/cli --output-on-failure
+ctest --test-dir build/sdk/core-minimal --output-on-failure
+```
+
+可写口径：
+
+> POSIX CLI 27 项 CTest 在本地约 xx 秒完成，覆盖并发、插件、MCP、工具执行和配置路径。
+
+注意：测试耗时受机器影响很大，简历上通常不必写秒数；面试中可以作为补充证据。
+
+### 15.4 冷启动指标
+
+如果系统有 `/usr/bin/time`：
+
+```bash
+/usr/bin/time -f 'elapsed=%e sec maxrss=%M KB' ./build/app/posix/cli/bin/c-claw --help
+```
+
+可写口径：
+
+> CLI 冷启动到 help 输出约 xx ms，峰值 RSS 约 xx MB。
+
+### 15.5 插件调用延迟指标
+
+插件 benchmark 比较适合这个项目，因为 JSON-RPC over stdio 是明确的工程亮点。建议新增一个
+专门 benchmark，而不是复用功能测试：
+
+```text
+目标：启动一个 echo plugin，连续调用 1000 次，记录平均/中位/p95 延迟。
+关注点：JSON encode/decode、stdio flush/read、请求 id 匹配、超时处理。
+注意：第一次调用可能包含进程启动成本，应单独统计 cold start 和 warm call。
+```
+
+可写口径：
+
+> 本地 warm stdio 插件调用平均 xx ms，p95 xx ms；cold start 单独约 xx ms。
+
+### 15.6 Run Queue 并发指标
+
+建议设计一个 fake LLM / fake tool benchmark，避免真实网络 API 影响结果：
+
+```text
+目标：提交 N 个 session，每个 session M 个任务；同 session 必须串行，不同 session 可以跨 lane 并发。
+记录：总耗时、完成任务数、取消任务数、平均排队时间。
+验证：消息顺序正确，cancel token 能打断等待中的任务。
+```
+
+可写口径：
+
+> 使用 fake backend 压测 run queue，N 个 session / M 个任务下保持同 session 顺序一致，跨 lane 并发完成，总耗时约 xx。
+
+### 15.7 Benchmark 结果记录模板
+
+```markdown
+## Benchmark YYYY-MM-DD
+
+环境：
+- OS:
+- CPU:
+- Compiler:
+- Build type:
+- Commit:
+
+结果：
+- POSIX CLI size:
+- core-minimal size:
+- ctest posix-cli:
+- ctest core-minimal:
+- CLI cold start:
+- Plugin warm call avg/p95:
+- Run queue workload:
+
+结论：
+- 可以写进简历的数字：
+- 不能写或需要复测的数字：
+```
 
 ---
 
