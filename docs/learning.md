@@ -17,7 +17,7 @@
 7. [线程平台抽象层：一次编写，三平台运行](#7-线程平台抽象层一次编写三平台运行)
 8. [互斥锁实战详解：POSIX / Windows / ESP32](#8-互斥锁实战详解posix--windows--esp32)
 9. [核心数据结构的四种线程安全策略](#9-核心数据结构的四种线程安全策略)
-10. [并发测试体系：27 个 CTest 覆盖关键共享状态](#10-并发测试体系27-个-ctest-覆盖关键共享状态)
+10. [并发测试体系：28 个 CTest 覆盖关键共享状态](#10-并发测试体系28-个-ctest-覆盖关键共享状态)
 11. [事件总线深度解析：从内部实现到全链路应用](#11-事件总线深度解析从内部实现到全链路应用)
 12. [面试高频问答](#12-面试高频问答)
 13. [简历指标取舍：优先讲工程价值，数字只作证据](#13-简历指标取舍优先讲工程价值数字只作证据)
@@ -38,12 +38,12 @@
 
 1. **纯 C 多态**：用 `struct + vtable + void *self` 实现端口抽象，替代 C++ 虚函数。
 2. **端口-适配器架构**：核心 Runtime 只依赖 `ports/`，OpenAI、SQLite、POSIX/Windows/ESP32 都是外层适配。
-3. **并发安全设计**：工具注册表用 freeze 模式，事件总线用快照模式，日志和存储用互斥锁保护。
+3. **并发安全设计**：工具注册表用 freeze 模式，事件总线支持同步快照和异步队列，日志和存储用互斥锁保护。
 
 **两个风险点**：
 
 1. `cc_tool_t`、`cc_llm_provider_t` 这类值类型是浅拷贝，必须讲清楚 self 的所有权归谁。
-2. 事件总线是同步分发，handler 不应该做长时间阻塞；快照模式解决的是重入和锁持有时间，不是异步队列。
+2. 事件总线底层默认同步，Runtime Builder 使用异步队列提供 handler 阻塞隔离；同进程 handler 崩溃仍会影响整个进程。
 
 **推荐阅读顺序**：
 
@@ -85,8 +85,8 @@ build/sdk/  SDK 裁剪构建产物
 当前已验证的入口：
 
 ```text
-POSIX CLI tests       build/app/posix/cli          27/27 passed
-core-minimal tests    build/sdk/core-minimal       18/18 passed
+POSIX CLI tests       build/app/posix/cli          28/28 passed
+core-minimal tests    build/sdk/core-minimal       19/19 passed
 ESP32-S3 QEMU         build/app/esp32/esp32_s3_qemu  CCLAW_QEMU_PASS
 STM32H743 Renode      build/app/stm32/stm32h743i_eval_renode  CCLAW_STM32H743_RENODE_PASS
 ```
@@ -128,17 +128,17 @@ cclaw/                  ← 可移植 SDK（约 120+ 个 C/H 文件）
   ports/                ← 17 个抽象端口头文件（LLM、工具、存储、沙箱、事件、HTTP、文件系统、线程...）
   adapters/             ← 适配实现：OpenAI/Ollama/Anthropic Provider、SQLite/JSON 存储、策略引擎...
   platforms/            ← 平台层：POSIX、Windows、ESP32、FreeRTOS
-  tests/                ← 21 个单元/并发测试文件
+  tests/                ← 22 个单元/并发测试文件
 
 apps/                   ← 应用入口（约 40+ 个 C/H 文件）
-  posix/cli/            ← Linux/macOS CLI（gateway、feature、plugin、mcp、sandbox、tools + 4 个测试）
+  posix/cli/            ← Linux/macOS CLI（gateway、feature、plugin、mcp、sandbox、tools + 5 个测试）
   windows/cli/          ← Windows CLI（同 posix 对齐结构）
   esp32/esp32_s3_qemu/  ← ESP32-S3 QEMU（GPIO tool、feature）
   stm32/stm32h743i_eval_renode/ ← STM32H743 Renode（FreeRTOS/lwIP/HAL smoke）
 ```
 
 当前仓库约有 **160+ 个 C/H 文件**，其中 ports/ 下 17 个端口头文件定义全部抽象接口，
-测试文件分布为核心层 15 个 + 适配器层 2 个 + 平台层 1 个 + CLI 应用层 4 个。面试时不用背规模数字，但要能说清楚 `core/ports/adapters/platforms/apps` 的分层边界。
+测试文件分布为核心层 18 个 + 适配器层 3 个 + 平台层 1 个 + POSIX CLI 应用层 5 个，测试源文件共计 27 份。面试时不用背规模数字，但要能说清楚 `core/ports/adapters/platforms/apps` 的分层边界。
 
 ---
 
@@ -1162,9 +1162,9 @@ struct cc_tool_registry_snapshot {
 **面试要点**：用两句话讲清楚 freeze 和 snapshot 的关系——
 "freeze 保证单个 registry 是不可变的（冻结后不能 add）。snapshot 在 freeze 之上加了引用计数和版本号，让热重载时新旧 registry 同时存在——旧的继续服务已有 run，新的接管后续 run。"
 
-### 9.2 策略二：快照模式 / Snapshot Pattern（事件总线）
+### 9.2 策略二：快照模式 + 异步队列（事件总线）
 
-**核心思想**：锁内只做浅拷贝，锁外执行可能耗时的回调——这是项目中最精妙的并发设计。
+**核心思想**：同步模式锁内只做浅拷贝、锁外执行回调；异步模式在快照后把每个 handler job 放进有界队列，由 worker 执行。Runtime Builder 默认使用异步模式，让慢 handler 不再阻塞发布线程。
 
 ```c
 // 文件: cclaw/core/src/core/cc_event_bus.c
@@ -1172,7 +1172,12 @@ struct cc_tool_registry_snapshot {
 struct cc_event_bus {
     cc_event_handler_entry_t handlers[64];  // 固定容量
     size_t count;
+    cc_event_bus_mode_t mode;               // sync / async
+    cc_event_job_t *jobs_head;              // 异步队列
+    size_t pending_count;
+    size_t running_count;
     cc_mutex_t mutex;
+    cc_cond_t cond;
 };
 
 cc_result_t cc_event_bus_publish(
@@ -1195,12 +1200,14 @@ cc_result_t cc_event_bus_publish(
     }
     cc_mutex_unlock(bus->mutex);
     // ═══════════════════════════════════════════
-    // 锁已释放！阶段 2：执行 handler 回调
+    // 锁已释放！阶段 2：
+    // - 同步模式：直接执行 handler
+    // - 异步模式：复制事件字符串并入队，由 worker 执行
     // ═══════════════════════════════════════════
 
     for (size_t i = 0; i < snapshot_count; i++) {
         snapshot[i].handler(event_type, event_json, snapshot[i].user_data);
-        //      ^^^^^^^^^^^^^^^^ 回调可以在 handler 内安全调用 subscribe/publish
+        //      ^^^^^^^^^^^^^^^^ 同步模式锁外回调；异步模式对应为 enqueue job
     }
     return cc_result_ok();
 }
@@ -1212,9 +1219,10 @@ cc_result_t cc_event_bus_publish(
 |------|------------|---------|
 | handler 内调用 `subscribe` | 可能长时间持锁，且修改正在遍历的集合 | ✅ 当前发布只使用旧快照 |
 | handler 内调用 `publish` | 依赖递归锁才不死锁，语义复杂 | ✅ 外层锁已释放，嵌套发布清晰 |
-| handler 执行时间长（写文件、网络 IO） | 其他线程阻塞 | ✅ 不阻塞其他线程 |
+| handler 执行时间长（写文件、网络 IO） | 发布线程被拖住 | ✅ Runtime 异步总线隔离发布线程阻塞 |
 
 当前事件总线没有 `unsubscribe` 接口，订阅关系按"初始化阶段注册，运行期基本静态"来设计。
+异步模式不提供进程级崩溃隔离：handler 如果触发 segfault，同进程仍会终止；要隔离崩溃需要进程级插件/worker。
 
 **面试追问：为什么用栈上的 `snapshot[64]` 而不用 `malloc`？**
 
@@ -1352,7 +1360,7 @@ static cc_result_t inmem_get(void *self, const char *key, cc_memory_entry_t *out
 
 ---
 
-## 10. 并发测试体系：27 个 CTest 覆盖关键共享状态
+## 10. 并发测试体系：28 个 CTest 覆盖关键共享状态
 
 ### 10.1 并发测试矩阵
 
@@ -1361,6 +1369,7 @@ static cc_result_t inmem_get(void *self, const char *key, cc_memory_entry_t *out
 | `test_thread_mutex` | Mutex 基础正确性 | 8 | 80,000 次自增 | 最终计数 == 80,000 |
 | `test_tool_registry_freeze` | freeze 后并发读 | 4 | 4,000 次 find+schema | 无崩溃、返回一致 |
 | `test_event_bus_concurrent` | 发布/订阅 + 嵌套事件 | 4 | 800 发布 + 800 嵌套 | 事件计数完整 |
+| `test_event_bus_async` | 异步事件总线 | 1-4 worker | 阻塞 handler + 背压队列 | 阻塞隔离、FIFO、drain、嵌套 publish |
 | `test_logger_concurrent` | 并发日志写入 | 4 | 800 条日志 | 无崩溃、无死锁 |
 | `test_memory_store_concurrent` | 存储并发追加 | 4 | 400 条消息 | 每个 session 恰好 100 条 |
 | `test_runtime_concurrent_sessions` | Runtime 多 session | 4 | 4 session 并行 | 独立 session 无干扰 |
@@ -1543,8 +1552,13 @@ typedef void (*cc_event_handler_fn)(
 );
 
 // 对外 API
-cc_result_t cc_event_bus_create(cc_event_bus_t **out_bus);
+cc_event_bus_config_t cc_event_bus_default_config(void);
+cc_result_t cc_event_bus_create(cc_event_bus_t **out_bus);  // 默认同步
+cc_result_t cc_event_bus_create_with_config(
+    const cc_event_bus_config_t *config,
+    cc_event_bus_t **out_bus);
 void        cc_event_bus_destroy(cc_event_bus_t *bus);
+cc_result_t cc_event_bus_flush(cc_event_bus_t *bus);
 cc_result_t cc_event_bus_subscribe(cc_event_bus_t *bus, const char *event_type,
                                     cc_event_handler_fn handler, void *user_data);
 cc_result_t cc_event_bus_publish(cc_event_bus_t *bus, const char *event_type,
@@ -1564,13 +1578,24 @@ typedef struct {
     //  NULL = 通配订阅者，接收所有类型的事件
     cc_event_handler_fn handler;    // 回调函数指针
     void *user_data;                // 透传给回调的自定义上下文
+    int busy;                       // 异步模式：同一 handler 函数 + user_data FIFO
 } cc_event_handler_entry_t;
 
 // ── 事件总线本身 ──
 struct cc_event_bus {
     cc_event_handler_entry_t handlers[64];  // 固定数组，按注册顺序排列
     size_t count;                           // 当前已注册数量 [0, 64)
+    cc_event_bus_mode_t mode;               // 默认同步，可配置异步
+    cc_event_job_t *jobs_head;              // 异步 handler job 队列
+    cc_event_job_t *jobs_tail;
+    size_t pending_count;                   // 队列中等待执行的 job 数
+    size_t running_count;                   // worker 正在执行的 job 数
+    size_t max_pending;                     // 有界队列容量
+    cc_thread_t *workers;                   // 异步 worker 池
+    size_t worker_count;
+    int shutting_down;
     cc_mutex_t mutex;                       // 保护 subscribe 和 publish 的并发访问
+    cc_cond_t cond;                         // 队列非空/有容量/flush 完成通知
 };
 ```
 
@@ -1591,9 +1616,12 @@ struct cc_event_bus {
 ```
 程序启动
   │
-  ├── cc_event_bus_create(&bus)
+  ├── cc_event_bus_create(&bus)                         // 底层默认同步
+  │   或 Runtime Builder:
+  │     cc_event_bus_create_with_config(async_config)   // 主运行时默认异步
   │     ├── calloc 整个总线结构体（所有槽位清零）
   │     └── cc_mutex_create 创建互斥锁
+  │        异步模式额外创建 cond、worker 池和有界队列
   │
   ├── CLI Gateway 订阅 6 种流式事件
   │     cc_event_bus_subscribe(bus, "stream.thinking", handler, NULL)
@@ -1611,6 +1639,7 @@ struct cc_event_bus {
   │
   └── 程序结束
         cc_event_bus_destroy(bus)
+          ├── 异步模式先设置 shutting_down，drain 队列并 join worker
           ├── 遍历释放所有 event_type 字符串
           ├── cc_mutex_destroy 销毁互斥锁
           └── free 总线结构体
@@ -1673,7 +1702,7 @@ cc_event_bus_subscribe(bus, NULL, global_logger, log_file_handle);
 
 ### 11.5 Publish：发布事件（核心分发逻辑）
 
-这是整个事件总线最核心的函数，包含线程安全的**快照策略（Snapshot Pattern）**：
+这是整个事件总线最核心的函数，包含线程安全的**快照策略（Snapshot Pattern）**。同步模式在锁外直接回调；异步模式复制事件字符串并把每个匹配 handler 作为 job 入队：
 
 ```c
 cc_result_t cc_event_bus_publish(
@@ -1688,7 +1717,7 @@ cc_result_t cc_event_bus_publish(
     // ══════════════════════════════════════════════════════
     // 阶段 1：持锁 — 构建匹配的 handler 快照
     // ══════════════════════════════════════════════════════
-    cc_event_handler_entry_t snapshot[MAX_HANDLERS];  // 栈上分配 ~1.5KB
+    cc_event_handler_snapshot_t snapshot[MAX_HANDLERS];  // 栈上分配
     size_t snapshot_count = 0;
 
     cc_mutex_lock(bus->mutex);
@@ -1699,21 +1728,34 @@ cc_result_t cc_event_bus_publish(
         if (entry->event_type == NULL ||                         // 通配订阅
             strcmp(entry->event_type, event_type) == 0) {        // 精确匹配
 
-            snapshot[snapshot_count++] = *entry;  // 浅拷贝三个指针字段
+            snapshot[snapshot_count++] = make_snapshot(i, entry);
         }
     }
     cc_mutex_unlock(bus->mutex);
     // ══════════════════════════════════════════
-    // 锁已释放！阶段 2：执行 handler
+    // 锁已释放！阶段 2：同步回调或异步入队
     // ══════════════════════════════════════════
 
     for (size_t i = 0; i < snapshot_count; i++) {
-        snapshot[i].handler(event_type, event_json, snapshot[i].user_data);
-        //       ^^^^^^^^^ 回调中可以安全调用 subscribe/publish
+        if (bus->mode == CC_EVENT_BUS_MODE_ASYNC)
+            enqueue_async_job(bus, &snapshot[i], event_type, event_json);
+        else
+            snapshot[i].handler(event_type, event_json, snapshot[i].user_data);
     }
     return cc_result_ok();
 }
 ```
+
+#### 异步队列与阻塞隔离
+
+Runtime Builder 创建事件总线时使用 `CC_EVENT_BUS_MODE_ASYNC`。异步模式的入队单位是“一个事件匹配到的一个 handler 调用”，worker 池从队列中取 job 执行：
+
+- `publish` 复制 `event_type/event_json` 后入队，慢 handler 不再卡住发布线程。
+- 队列满时发布线程阻塞等待容量，避免默认丢事件。
+- `destroy` 会 drain 已入队事件并等待 worker 退出。
+- 同一个 handler 函数 + `user_data` 一次只允许一个 job 运行，因此 CLI 流式输出这类共享回调保持 FIFO。
+- 不同 handler 可以并行运行，不再保证跨 handler 的全局顺序。
+- 这只是阻塞隔离，不是崩溃隔离；handler 在同一进程内 segfault 仍会终止进程。
 
 #### 快照策略详解（Snapshot Pattern）
 
@@ -2074,7 +2116,10 @@ cc_event_bus_publish_typed(bus, TOOL_START, &tool_event);
 | 决策 | 选择 | 理由 |
 |------|------|------|
 | 存储结构 | 固定数组 (64) | 订阅者数量确定，无动态扩容需求 |
-| 调用模式 | 同步调用 | 简化错误处理，"publish 返回 = 所有 handler 已执行" |
+| 调用模式 | 默认同步，Runtime 异步 | 保持底层兼容，同时让主运行时获得阻塞隔离 |
+| 异步背压 | 队列满时阻塞 | 不默认丢事件，保持审计/流式通知可靠性 |
+| worker 默认 | 桌面 4，嵌入式 1 | 桌面吞吐优先，ESP32/FreeRTOS 控制资源占用 |
+| handler 顺序 | 同 handler 函数 + user_data FIFO | 保护 CLI 流式输出等共享回调的内部顺序 |
 | 线程安全 | mutex + 快照 | 避免 handler 内 subscribe/publish 导致的死锁 |
 | 事件类型 | 自由字符串 | 允许运行时动态注册，无需重新编译 |
 | 负载格式 | JSON 字符串 | 灵活的结构化数据，不同事件类型格式不同 |
@@ -2197,7 +2242,7 @@ FreeRTOS mutex，因此上层设计不能依赖递归锁语义。条件变量用
 | 全程持锁 | `cc_logger` | 从级别判断到 fflush 全程持锁 |
 | 标准互斥 | 所有存储后端 | lock → 读写 → unlock |
 
-**3. 并发测试**：POSIX CLI 当前 27 项 CTest 全部通过，覆盖互斥锁基础 (8线程/8万次)、freeze 并发读、事件嵌套、日志并发、存储并发、Runtime 多 session，以及 run queue、cancel token、tool pool、SSE parser、skill catalog、MCP runtime、plugin protocol 等专项单测。
+**3. 并发测试**：POSIX CLI 当前 28 项 CTest 全部通过，覆盖互斥锁基础 (8线程/8万次)、freeze 并发读、事件同步嵌套、事件异步队列、日志并发、存储并发、Runtime 多 session，以及 run queue、cancel token、tool pool、SSE parser、skill catalog、MCP runtime、plugin protocol 等专项单测。
 
 ```c
 // freeze 模式示例
@@ -2319,7 +2364,7 @@ for (i = 0; i < snapshot_count; i++) {
 
 **答**：可以讲三个诚实但不致命的点：
 
-1. 事件总线是同步分发，没有异步队列和 handler 隔离；handler 崩溃或阻塞会影响发布线程。
+1. 事件总线已支持异步队列和 handler 阻塞隔离，但这不是崩溃隔离；handler segfault 仍会影响同一进程。
 2. 工具注册表和事件总线都使用固定容量数组（MAX_TOOLS=64, MAX_HANDLERS=64），简单稳定，嵌入式场景充分，但桌面端大量工具时可能需要改为动态扩容。
 3. 存储工厂里 SQLite 失败会降级到 JSON，这提高可用性，但生产环境要配合日志/告警，否则可能掩盖数据库故障。
 4. 事件总线目前不支持 `unsubscribe`，订阅关系假设为初始化阶段注册后运行期静态；如果需要运行时动态订阅/退订，需要扩展接口。
@@ -2357,13 +2402,13 @@ for (i = 0; i < snapshot_count; i++) {
 | LLM 后端 | 支持 OpenAI-compatible / Ollama / Anthropic 3 类 LLM 后端 | 体现协议抽象能力 |
 | 存储后端 | 支持 SQLite / JSON 文件 / Memory 3 类会话或记忆存储 | 体现端口-适配器设计 |
 | 构建 Profile | 支持 POSIX CLI、Windows CLI、core-minimal、ESP32-S3 QEMU、STM32H743 Renode 5 类构建目标 | 体现跨平台和裁剪 |
-| 自动化测试 | POSIX CLI 当前 27 项 CTest 全部通过 | 体现工程质量 |
+| 自动化测试 | POSIX CLI 当前 28 项 CTest 全部通过 | 体现工程质量 |
 | 嵌入式验收 | ESP32-S3 QEMU 和 STM32H743 Renode 有 smoke 验收路径 | 体现不是纯桌面 demo |
 | 插件协议 | JSON-RPC 2.0 over stdio，插件可用任意语言实现 | 体现扩展性 |
 
 简历里推荐组合成一句：
 
-> 基于纯 C 实现 AI Agent Runtime，采用 Ports & Adapters 架构解耦 LLM、工具、存储和平台能力，支持 3 类 LLM 后端、3 类存储后端、JSON-RPC 插件工具系统，并通过 5 类 CMake Profile 覆盖 POSIX、Windows、ESP32-S3 QEMU、STM32H743 Renode 等构建目标；编写 27 项 CTest 覆盖并发队列、插件协议、工具执行和配置加载等核心路径。
+> 基于纯 C 实现 AI Agent Runtime，采用 Ports & Adapters 架构解耦 LLM、工具、存储和平台能力，支持 3 类 LLM 后端、3 类存储后端、JSON-RPC 插件工具系统，并通过 5 类 CMake Profile 覆盖 POSIX、Windows、ESP32-S3 QEMU、STM32H743 Renode 等构建目标；编写 28 项 CTest 覆盖并发队列、插件协议、工具执行和配置加载等核心路径。
 
 如果简历空间很紧，可以不写任何性能数字，只保留"多后端、多 profile、测试覆盖"这些工程指标。
 这些数字不是为了显得更大，而是为了证明项目不是口头设计。
@@ -2401,7 +2446,7 @@ for (i = 0; i < snapshot_count; i++) {
 > C-Claw｜纯 C AI Agent Runtime  
 > 基于 Ports & Adapters 架构开发纯 C Agent 运行时，用 `struct + vtable + void *self` 实现接口抽象、依赖注入和跨平台适配，核心支持 ReAct 工具调用循环、流式输出、上下文管理和长期记忆。  
 > 接入 OpenAI-compatible / Ollama / Anthropic 3 类 LLM 后端，支持 SQLite / JSON / Memory 3 类存储，以及文件、Shell、HTTP、Memory、JSON-RPC 插件工具系统。  
-> 通过 CMake Profile 支持 POSIX、Windows、ESP32-S3 QEMU、STM32H743 Renode 等多平台裁剪构建，编写 27 项 CTest 覆盖并发调度、插件协议、工具执行和配置加载等关键路径。
+> 通过 CMake Profile 支持 POSIX、Windows、ESP32-S3 QEMU、STM32H743 Renode 等多平台裁剪构建，编写 28 项 CTest 覆盖并发调度、插件协议、工具执行和配置加载等关键路径。
 
 **偏系统开发版本**：
 
@@ -2422,7 +2467,7 @@ for (i = 0; i < snapshot_count; i++) {
 ### 14.2 60 秒版本
 
 > 这个项目的核心链路是 ReAct Agent 循环：用户输入先写入 session store，context builder 根据历史消息、长期记忆和工具 schema 组装 LLM messages；LLM 如果返回工具调用，tool executor 会从 registry 查找工具，经过 policy engine 检查后执行，把 tool result 写回 session，再进入下一轮 LLM；如果没有工具调用，就输出最终文本。  
-> 架构上，core 层只依赖 ports 里的接口，不直接依赖 OpenAI、SQLite、curl 或具体平台。OpenAI/Ollama/Anthropic、SQLite/JSON、POSIX/Windows/ESP32 都作为 adapter 注入。项目还实现了 run queue、cancel token、tool pool、event bus 和 JSON-RPC 插件系统，并用 27 项 CTest 覆盖关键并发和协议路径。
+> 架构上，core 层只依赖 ports 里的接口，不直接依赖 OpenAI、SQLite、curl 或具体平台。OpenAI/Ollama/Anthropic、SQLite/JSON、POSIX/Windows/ESP32 都作为 adapter 注入。项目还实现了 run queue、cancel token、tool pool、event bus 和 JSON-RPC 插件系统，并用 28 项 CTest 覆盖关键并发和协议路径。
 
 ### 14.3 3 分钟深挖版本
 
@@ -2432,9 +2477,9 @@ for (i = 0; i < snapshot_count; i++) {
 2. **主链路**：用户输入、session store、context builder、LLM provider、tool executor、tool result、下一轮 LLM。
 3. **架构边界**：`core/ports/adapters/platforms/apps` 各自负责什么，为什么 core 不能直接引用平台实现。
 4. **C 多态**：用 `struct + vtable + void *self`，值类型浅拷贝，`destroy(self)` 负责释放具体实现。
-5. **并发设计**：同 session 串行、跨 lane 并发、cancel token 协作式取消、事件总线快照分发。
-6. **工程证据**：5 类 profile、3 类 LLM、3 类存储、JSON-RPC 插件、27 项 CTest。
-7. **不足和后续**：观测指标、benchmark、Windows 真机验收、事件总线异步化。
+5. **并发设计**：同 session 串行、跨 lane 并发、cancel token 协作式取消、事件总线底层同步快照 + Runtime 异步队列。
+6. **工程证据**：5 类 profile、3 类 LLM、3 类存储、JSON-RPC 插件、28 项 CTest。
+7. **不足和后续**：观测指标、handler 超时/错误统计、benchmark、Windows 真机验收。
 
 ### 14.4 STAR 故事模板
 
@@ -2555,14 +2600,15 @@ Agent Runtime 主循环。
 **追问补充**：JSON-RPC over stdio 的优点是语言无关、实现简单、隔离性比动态库好；代价是序列化、
 进程通信和生命周期管理成本更高。
 
-**Q9：事件总线同步分发有什么问题？**
+**Q9：事件总线同步分发有什么问题？现在怎么处理？**
 
-**答**：同步分发的主要问题是 handler 在发布线程里执行，如果 handler 很慢、阻塞或崩溃，会影响
-发布方。当前项目用快照模式解决的是锁边界和重入问题：锁内只复制 handler 快照，锁外回调，避免
-handler 内 publish/subscribe 导致死锁或遍历失效。但它没有解决 handler 隔离和异步调度问题。
+**答**：同步分发的主要问题是 handler 在发布线程里执行，如果 handler 很慢或阻塞，会影响发布方。
+当前项目保留同步模式作为默认底层 API，同时 Runtime Builder 使用异步事件总线：锁内复制 handler
+快照，锁外把每个 handler job 放进有界队列，由 worker 池执行。同一个 handler 函数 + `user_data` 保持 FIFO，不同
+handler 可以并行，因此慢 handler 不再拖住发布线程。
 
-**追问补充**：如果继续演进，可以加异步事件队列、worker 线程、handler 超时和背压策略。
-当前同步模型更简单，适合 runtime 内部诊断和 CLI 渲染。
+**追问补充**：这解决的是阻塞隔离，不是崩溃隔离。C handler 如果在同一进程里 segfault，进程仍会退出；
+要隔离崩溃需要把 handler 放到插件进程或外部 worker。
 
 **Q10：如何证明这个项目不是 demo？**
 
@@ -2570,7 +2616,7 @@ handler 内 publish/subscribe 导致死锁或遍历失效。但它没有解决 h
 各有边界，core 不直接依赖 curl、pthread、Win32 或 ESP-IDF；第二，有 5 类 CMake Profile，
 能做桌面、core-minimal 和板级裁剪；第三，有 OpenAI-compatible、Ollama、Anthropic 3 类 LLM 后端，
 SQLite、JSON、Memory 3 类存储；第四，有 JSON-RPC 插件、run queue、cancel token、tool pool、
-event bus 等 runtime 组件；第五，POSIX CLI 当前 27 项 CTest 全部通过，覆盖并发、协议、工具执行和配置路径。
+event bus 等 runtime 组件；第五，POSIX CLI 当前 28 项 CTest 全部通过，覆盖并发、协议、工具执行和配置路径。
 
 **追问补充**：我不会把未完整验收的环境说满，比如 Windows CLI 可以说结构已对齐，但仍需要 Windows
 真机或交叉工具链做最终编译验证。
@@ -2947,7 +2993,7 @@ ctest --test-dir build/sdk/core-minimal --output-on-failure
 
 可写口径：
 
-> POSIX CLI 27 项 CTest 在本地约 xx 秒完成，覆盖并发、插件、MCP、工具执行和配置路径。
+> POSIX CLI 28 项 CTest 在本地约 xx 秒完成，覆盖并发、插件、MCP、工具执行和配置路径。
 
 注意：测试耗时受机器影响很大，简历上通常不必写秒数；面试中可以作为补充证据。
 
@@ -3059,7 +3105,7 @@ ctest --test-dir build/sdk/core-minimal --output-on-failure
 | 构建器模式 | [cc_runtime_builder.c](../cclaw/core/src/app/cc_runtime_builder.c) | 聚合 10+ 依赖 + 级联生命周期 |
 | 注册表模式 | [cc_tool_registry.h](../cclaw/ports/include/cc/ports/cc_tool_registry.h) | freeze/is_frozen/count/list_names |
 | 注册表 Snapshot | [cc_tool_registry_snapshot.c](../cclaw/core/src/app/cc_tool_registry_snapshot.c) | generation + ref_count 热重载 |
-| 事件总线 | [cc_event_bus.c](../cclaw/core/src/core/cc_event_bus.c) | snapshot 模式发布-订阅 |
+| 事件总线 | [cc_event_bus.c](../cclaw/core/src/core/cc_event_bus.c) | 同步快照 + 异步队列发布-订阅 |
 | 多 Agent 编排 | [cc_agent_manager.h](../cclaw/core/include/cc/app/cc_agent_manager.h) | submit/collect/interrupt/reset |
 | 协作式取消 | [cc_cancel_token.c](../cclaw/core/src/app/cc_cancel_token.c) | cancel token + cc_cond_timedwait |
 | Run Queue | [cc_run_queue.c](../cclaw/core/src/app/cc_run_queue.c) | STEER/DROP 策略 + cancel 级联 |

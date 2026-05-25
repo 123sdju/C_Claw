@@ -410,6 +410,9 @@ Shell 工具持有自己的 sandbox 副本，销毁工具时也会销毁该 sand
 ## 11. 事件系统
 
 `cc_event_bus_t` 支持按事件名订阅，也支持 `NULL` 通配订阅。
+`cc_event_bus_create()` 默认创建同步总线；Runtime Builder 使用
+`cc_event_bus_create_with_config()` 创建异步总线，以隔离慢 handler 对发布线程的阻塞。
+异步模式不隔离同进程崩溃。
 
 常见事件：
 

@@ -15,6 +15,7 @@ set(C_CLAW_CORE_TESTS
     test_tool_registry_freeze
     test_logger_concurrent
     test_event_bus_concurrent
+    test_event_bus_async
     test_runtime_concurrent_sessions
     test_runtime_request_config
     test_config_missing_defaults

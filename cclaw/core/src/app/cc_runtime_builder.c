@@ -617,7 +617,9 @@ cc_result_t cc_runtime_builder_create(
     if (rc.code != CC_OK) goto fail;
     cc_logger_log(builder->logger, CC_LOG_INFO, "c-claw starting...");
 
-    rc = cc_event_bus_create(&builder->event_bus);
+    cc_event_bus_config_t event_bus_config = cc_event_bus_default_config();
+    event_bus_config.mode = CC_EVENT_BUS_MODE_ASYNC;
+    rc = cc_event_bus_create_with_config(&event_bus_config, &builder->event_bus);
     if (rc.code != CC_OK) goto fail;
     rc = cc_filesystem_get_default(&builder->fs);
     if (rc.code != CC_OK) goto fail;
