@@ -1,44 +1,25 @@
 # C-Claw SDK
 
-C-Claw SDK is a pure C Agent runtime foundation. This branch keeps only the
-portable SDK, SDK tests, profiles, platform ports, adapters, and documentation.
-Product gateways and application-specific tools live in downstream projects.
+C-Claw SDK 是一个纯 C Agent Runtime 基础库。当前 `sdk` 分支只保留 SDK
+源码、构建脚本、测试和接口说明，不保留 POSIX CLI、板级应用、示例插件或构建产物。
 
-The SDK uses Ports & Adapters with `struct + vtable + void *self` so an
-application can inject LLM providers, tools, storage, policy, platform services,
-and its own gateway without changing the core runtime.
+SDK 的复用方式是源码子目录集成：下游应用通过 `add_subdirectory(cclaw)` 引入
+`c_claw_runtime`，再由应用自己提供 gateway、配置路径和 `cc_runtime_feature_set_t`
+能力表。
 
-## What Is Included
+## 目录
 
 ```text
-cclaw/core/       Agent loop, runtime builder, sessions, tools, queue, MCP, skills
-cclaw/ports/      Public vtable interfaces for platform and service boundaries
-cclaw/adapters/   Built-in storage, memory, file/http tools, policy, LLM adapters
-cclaw/platforms/  POSIX, Windows, ESP32, and FreeRTOS port implementations
-cclaw/profiles/   SDK build profiles
-cclaw/tests/      SDK unit and behavior tests
-docs/             Configuration and SDK integration notes
+cclaw/core/       Agent 主循环、runtime builder、session、queue、MCP、skills
+cclaw/ports/      SDK 对外端口接口，使用 struct + vtable + void *self 表达多态
+cclaw/adapters/   SDK 内置适配器：存储、记忆、文件/HTTP 工具、LLM provider、policy
+cclaw/platforms/  POSIX、Windows、ESP32、FreeRTOS 平台端口实现
+cclaw/profiles/   SDK 构建 profile
+cclaw/tests/      SDK 行为测试
+docs/sdk-api.md   SDK 接口说明
 ```
 
-This branch intentionally does not build an executable. A downstream
-application links `c_claw_runtime`, provides a `cc_runtime_feature_set_t`, loads
-configuration, and calls the runtime from its own gateway.
-
-## Requirements
-
-- CMake >= 3.16 for direct `-S/-B` builds.
-- CMake >= 3.21 for the provided `CMakePresets.json`.
-- A C99 compiler.
-- Threads on POSIX/Windows builds.
-- libcurl only when HTTP-backed features are enabled, such as OpenAI/Ollama/
-  Anthropic providers, `http.request`, or HTTP MCP transport.
-
-SQLite and cJSON are vendored. JSON and in-memory storage remain available when
-SQLite is disabled.
-
-## Build And Test
-
-Preset path:
+## 构建
 
 ```bash
 cmake --preset core-minimal
@@ -46,75 +27,52 @@ cmake --build --preset core-minimal
 ctest --preset core-minimal
 ```
 
-Equivalent explicit path:
+不使用 preset 时：
 
 ```bash
-cmake -S . -B build/sdk/core-minimal -DCC_PROFILE=core-minimal -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake -S . -B build/sdk/core-minimal -DCC_PROFILE=core-minimal
 cmake --build build/sdk/core-minimal
 ctest --test-dir build/sdk/core-minimal --output-on-failure
 ```
 
-The default SDK profile is `core-minimal`. It builds `c_claw_runtime` plus SDK
-tests with no gateway, process plugin manager, shell tool, or product app.
+`build/` 是本地编译结果目录，不应提交到仓库。
 
-## Using From An Application
-
-For source-subdirectory reuse, add the SDK and link the runtime:
+## 下游应用接入
 
 ```cmake
 add_subdirectory(vendor/C_Claw/cclaw)
 
-add_executable(my_agent main.c my_features.c)
+add_executable(my_agent
+    src/main.c
+    src/my_features.c
+)
 target_link_libraries(my_agent PRIVATE c_claw_runtime)
 ```
 
-The application owns:
+应用层负责：
 
-- configuration file location and API keys;
-- gateway/UI/transport entrypoint;
-- the `cc_runtime_feature_set_t` table passed to `cc_runtime_builder_create`;
-- application-specific tools, plugin process management, MCP transports, and
-  hardware integrations.
+- 加载配置文件和 API key；
+- 实现 CLI、Web、UART、HTTP 等 gateway；
+- 提供 `cc_runtime_feature_set_t`，声明可用 LLM、工具、存储、policy、plugin/MCP loader；
+- 实现应用私有工具、进程插件管理、MCP transport 和硬件能力。
 
-The SDK provides public factories for common building blocks:
+SDK 负责：
 
-- `cc/adapters/cc_llm_providers.h`
-- `cc/adapters/cc_builtin_tools.h`
-- `cc/adapters/cc_default_policy_engine.h`
-- `cc/ports/cc_storage_factory.h`
-- `cc/ports/cc_memory_tool_factory.h`
+- `cc_agent_runtime_t` Agent 主循环；
+- `cc_runtime_builder_t` 组合根和资源释放顺序；
+- `cc_agent_manager_t` 多 agent/session 调度入口；
+- `cc_run_queue_t` session 串行、lane 并发和协作式取消；
+- `cc_tool_executor_t` 工具调用、policy 检查和 tool result 写回；
+- `cc_plugin_protocol` JSON-RPC envelope；
+- `cc_mcp_runtime_manager_t` MCP client runtime 和 tool bridge；
+- `cc_skill_catalog_t` SKILL.md 解析和 prompt snapshot；
+- 平台端口和通用 adapter。
 
-See [docs/sdk-usage.md](docs/sdk-usage.md) for a minimal feature-set pattern.
+## 接口文档
 
-## Main Build Options
+只保留一份 SDK 接口说明：
 
-| Option | Default in `core-minimal` | Notes |
-|--------|---------------------------|-------|
-| `CC_PROFILE` | `core-minimal` | SDK profile selection. |
-| `CC_TARGET_PLATFORM` | `auto` | Resolves to `posix`, `windows`, `esp32`, or `freertos`. |
-| `CC_ENABLE_FILE_TOOLS` | ON | Compiles file read/write tool factories. |
-| `CC_ENABLE_MEMORY` | ON | Compiles memory store and memory tool support. |
-| `CC_ENABLE_RUN_QUEUE` | ON | Enables session serialization and queue actions. |
-| `CC_ENABLE_TOOL_POOL` | ON | Enables lane concurrency and timeout coordination. |
-| `CC_ENABLE_SKILLS` | ON | Enables SKILL.md catalog parsing. |
-| `CC_ENABLE_SQLITE` | OFF | Enables SQLite session and memory backends. |
-| `CC_ENABLE_OPENAI` | OFF | Enables OpenAI-compatible HTTP provider factory. |
-| `CC_ENABLE_OLLAMA` | OFF | Enables Ollama HTTP provider factory. |
-| `CC_ENABLE_ANTHROPIC` | OFF | Enables Anthropic HTTP provider factory. |
-| `CC_ENABLE_HTTP_TOOL` | OFF | Enables `http.request` tool factory. |
-| `CC_ENABLE_MCP` | OFF | Enables SDK MCP runtime/tool bridge. |
-
-Command-line `-D` values override profile defaults.
-
-## Documentation
-
-- [docs/configuration.md](docs/configuration.md): SDK configuration model.
-- [docs/sdk-usage.md](docs/sdk-usage.md): downstream integration guide.
-- [cclaw/docs/architecture.md](cclaw/docs/architecture.md): SDK architecture.
-- [cclaw/docs/concurrency.md](cclaw/docs/concurrency.md): queue, cancel, pool, reload semantics.
-- [cclaw/docs/mcp.md](cclaw/docs/mcp.md): MCP runtime and transport boundary.
-- [cclaw/docs/plugins.md](cclaw/docs/plugins.md): plugin protocol boundary.
-- [cclaw/docs/skills.md](cclaw/docs/skills.md): SKILL.md catalog behavior.
+- [docs/sdk-api.md](docs/sdk-api.md)
 
 ## License
 
