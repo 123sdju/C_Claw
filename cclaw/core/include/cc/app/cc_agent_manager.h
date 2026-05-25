@@ -6,7 +6,7 @@
  * manager 不创建 LLM、store、plugin 进程，也不读取文件 watcher。它只保存
  * agent id 到 runtime 的映射，并把每次 handle_message 放进 run queue。
  * 这样 SDK 层可以支持多 agent/session 语义，而 app 层仍然可以自由决定
- * 如何加载 config、如何热重载 plugin、如何展示 CLI。
+ * 如何加载 config、如何热重载 plugin、如何展示 gateway。
  */
 
 #ifndef CC_AGENT_MANAGER_H

@@ -201,7 +201,7 @@ typedef struct cc_config {
                                   *   1 = 默认调用流式 LLM API
                                   *   0 = 默认调用同步 LLM API，运行时可由 gateway 命令切换
                                   *   默认值：0 */
-    int debug_mode;              /**< CLI / gateway 是否默认开启调试输出：
+    int debug_mode;              /**< gateway 是否默认开启调试输出：
                                   *   1 = 启动时开启内部调试输出
                                   *   0 = 默认关闭，运行时可由 gateway 命令切换
                                   *   默认值：0 */

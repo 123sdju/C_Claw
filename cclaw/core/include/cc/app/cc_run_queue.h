@@ -3,7 +3,7 @@
  *
  * 所属层次：核心 SDK。
  *
- * 这个模块不依赖 POSIX 进程、文件 watcher 或 CLI，因此可以留在 core 中并
+ * 这个模块不依赖 POSIX 进程、文件 watcher 或 gateway，因此可以留在 core 中并
  * 被 ESP profile 复用。它提供一个可移植 job queue：
  *   - 同一个 session key 默认串行，避免两次 turn 同时写同一段历史。
  *   - 不同 lane 可以按配置并发，例如 main、subagent、plugin、mcp。

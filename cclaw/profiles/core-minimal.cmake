@@ -4,12 +4,11 @@
 # 注释说明：如果注释与代码冲突，以代码行为和测试为准。
 set(CC_PROFILE_TARGET_PLATFORM auto)
 
-# core-minimal 保留核心 runtime、文件工具和记忆能力，关闭 CLI、shell、插件和外部 LLM。
-# 它适合验证 core/adapters/platform 的基础可编译性，不依赖桌面交互入口。
+# core-minimal 保留核心 runtime、文件工具和记忆能力，关闭 shell、插件和外部 LLM。
+# 它适合验证 core/adapters/platform 的基础可编译性，不依赖应用 gateway。
 set(CC_PROFILE_ENABLE_FILE_TOOLS ON)
 set(CC_PROFILE_ENABLE_HTTP_TOOL OFF)
 set(CC_PROFILE_ENABLE_MEMORY ON)
-set(CC_PROFILE_ENABLE_CLI OFF)
 set(CC_PROFILE_ENABLE_SHELL OFF)
 set(CC_PROFILE_ENABLE_PLUGIN OFF)
 set(CC_PROFILE_ENABLE_MULTI_AGENT ON)

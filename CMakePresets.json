@@ -1,74 +1,32 @@
 {
-  "version": 6,
+  "version": 3,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 16,
+    "minor": 21,
     "patch": 0
   },
   "configurePresets": [
     {
-      "name": "posix-cli",
-      "displayName": "POSIX CLI",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/app/posix/cli",
-      "cacheVariables": {
-        "CC_PROFILE": "posix-cli",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
-    },
-    {
       "name": "core-minimal",
-      "displayName": "Core Minimal",
+      "displayName": "C-Claw SDK Core Minimal",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/sdk/core-minimal",
       "cacheVariables": {
         "CC_PROFILE": "core-minimal",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
-    },
-    {
-      "name": "stm32mp135-board",
-      "displayName": "STM32MP135 Board",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/app/posix/stm32mp135_board",
-      "cacheVariables": {
-        "CC_PROFILE": "stm32mp135-board",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
     }
   ],
   "buildPresets": [
     {
-      "name": "posix-cli",
-      "configurePreset": "posix-cli"
-    },
-    {
       "name": "core-minimal",
       "configurePreset": "core-minimal"
-    },
-    {
-      "name": "stm32mp135-board",
-      "configurePreset": "stm32mp135-board"
     }
   ],
   "testPresets": [
     {
-      "name": "posix-cli",
-      "configurePreset": "posix-cli",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
       "name": "core-minimal",
       "configurePreset": "core-minimal",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "stm32mp135-board",
-      "configurePreset": "stm32mp135-board",
       "output": {
         "outputOnFailure": true
       }

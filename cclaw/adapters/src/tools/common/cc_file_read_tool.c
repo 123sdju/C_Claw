@@ -23,6 +23,7 @@
  *   - 强制解析 JSON 参数并校验 path 必填
  */
 
+#include "cc/adapters/cc_builtin_tools.h"
 #include "cc/ports/cc_tool.h"
 #include "cc/ports/cc_filesystem.h"
 #include "cc/ports/cc_path.h"

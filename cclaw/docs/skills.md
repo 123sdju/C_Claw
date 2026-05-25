@@ -54,8 +54,8 @@ prompt snapshot 由 runtime builder 构建。reload 成功后新 run 使用新 p
 ## Watcher 与裁剪
 
 `CC_ENABLE_SKILLS` 控制 SDK catalog 是否编译。`CC_ENABLE_SKILL_WATCHER` 只控制
-app 层 watcher，默认桌面开启、ESP 关闭。
+应用层是否编译 watcher。
 
-watcher 不属于 SDK。桌面 app 用 polling + mtime + debounce 检测 `config.json`
-或 skill 文件变化，再调用 runtime builder reload。设备 app 可以保留静态 skill
-catalog，同时不编译 watcher 和桌面文件监听逻辑。
+watcher 不属于 SDK。应用可以用 polling、mtime、平台通知或其它机制检测
+`config.json` 或 skill 文件变化，再调用 runtime builder reload。设备应用可以保留
+静态 skill catalog，同时不编译 watcher。

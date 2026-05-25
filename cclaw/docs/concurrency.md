@@ -2,7 +2,7 @@
 
 POSIX 和 Windows 共享同一套 SDK 并发语义。平台层只提供 `cc_thread`、
 `cc_mutex`、`cc_cond`、process 和 HTTP transport；queue、cancel、tool pool、
-snapshot 和 MCP cache 不在两个 app 里重复实现。
+snapshot 和 MCP cache 不在应用里重复实现。
 
 ## Run Queue
 
@@ -10,7 +10,7 @@ snapshot 和 MCP cache 不在两个 app 里重复实现。
 
 - 同一个 `session_key` 默认串行，避免两次 turn 同时写同一段 session history。
 - 不同 lane 可以并发：`main`、`subagent`、`plugin`、`mcp`。
-- `steer`、`followup`、`collect`、`interrupt` 在 SDK 层定义，CLI 只调用 manager。
+- `steer`、`followup`、`collect`、`interrupt` 在 SDK 层定义，gateway 只调用 manager。
 
 `session_key` 由 agent manager 组合为 `agent_id + session_id`。这样同一 session 在
 不同 agent 下不会互相阻塞。
@@ -66,7 +66,7 @@ tool registry snapshot 是 generation + refcount 模型：
 - 已经开始的 run 持有旧 snapshot，直到 run 结束 release。
 - reload 失败时不 swap，当前 generation 继续服务。
 
-POSIX/Windows watcher 只负责发现文件变化和触发 reload；安全发布和 rollback 规则属于 SDK。
+应用 watcher 只负责发现文件变化和触发 reload；安全发布和 rollback 规则属于 SDK。
 
 ## 平台端口
 
@@ -77,5 +77,5 @@ POSIX 使用 pthread/cond 和 POSIX process/pipe，Windows 使用对应 Win32 th
 - process pipe transport 能把 timeout/cancel 映射为平台等待退出。
 - HTTP client 支持 body callback 取消，SSE/streamable HTTP 不需要等完整 body 入内存。
 
-ESP profile 默认关闭 plugin、stdio MCP、watcher、shell、SQLite 和 active memory，
+设备 profile 通常关闭 plugin、stdio MCP、watcher、shell、SQLite 和 active memory，
 并可关闭 tool pool，以减少线程、pipe 和存储依赖。

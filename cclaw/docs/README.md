@@ -1,8 +1,8 @@
-# c-claw SDK docs
+# C-Claw SDK Docs
 
 `cclaw/` is the portable SDK layer. Keep runtime, port, adapter, profile, and
-kernel-style testing notes here. Application-specific usage belongs under
-`apps/<platform>/<app>/docs/`.
+kernel-style testing notes here. Product-specific gateway and deployment docs
+belong in downstream application repositories.
 
 - [architecture.md](architecture.md): SDK architecture, profiles, and extension points.
 - [concurrency.md](concurrency.md): shared POSIX/Windows/ESP queue, cancel, pool, and reload semantics.

@@ -5,7 +5,7 @@
  * 阅读重点：JSON-RPC 2.0 请求/响应的构建与解析。本模块不做进程管理、不碰
  *          pipe/stdin/stdout，只把 C-Claw tool call 编成单行 JSON-RPC 2.0
  *          envelope，并把插件回包拆成 result/error。具体 transport 由
- *          POSIX/Windows app 层提供。
+ *          应用层提供。
  * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
  *           以代码行为和测试为准，并应同步修正注释。
  */
@@ -20,7 +20,7 @@
  * 进程生命周期、pipe 读写或任何平台特定操作。
  *
  * 上游调用方：
- *   - cc_plugin_runner（POSIX/Windows app 层）—— 调用 build_request()
+ *   - 应用层 plugin runner —— 调用 build_request()
  *     构造请求 JSON，再自行写入子进程 stdin；从 stdout 读到一行后调
  *     parse_response() 解析为 result/error
  *
@@ -43,9 +43,8 @@
 #include <stdlib.h>
 
 /*
- * Plugin protocol 留在 core，因为 JSON-RPC envelope 与平台无关。POSIX/Windows
- * app 只负责把 request_json 写入子进程 stdin，并把 stdout line 交回这里解析。
- * 这样两个桌面 app 不会各自维护一份协议细节。
+ * Plugin protocol 留在 core，因为 JSON-RPC envelope 与平台无关。应用层只负责把
+ * request_json 写入 transport，并把 response line 交回这里解析。
  */
 char *cc_plugin_protocol_build_request(
     const char *method,

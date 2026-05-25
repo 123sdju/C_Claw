@@ -205,7 +205,7 @@ int cc_agent_runtime_get_thinking_mode(cc_agent_runtime_t *runtime);
  * cc_agent_runtime_set_tool_approval — 更新人工工具审批回调。
  *
  * runtime 只保存函数指针和 user_data，不取得 user_data 的所有权。该接口用于
- * CLI gateway 在运行时注入交互式审批逻辑。
+ * gateway 在运行时注入交互式审批逻辑。
  *
  * @param runtime 借用的 runtime；NULL 时函数直接返回。
  * @param approve_tool_call 可选审批回调；NULL 表示禁用人工审批。
@@ -311,7 +311,7 @@ cc_result_t cc_agent_runtime_handle_message_with_options(
  *   - stream.tool.end → 工具调用执行完毕
  *   - stream.finished → 流结束
  *
- * CLI / Web Gateway 通过订阅这些事件实现实时展示效果。
+ * Gateway / Web UI 通过订阅这些事件实现实时展示效果。
  *
  * 如果 LLM Provider 不支持 chat_stream：
  *   自动降级为同步 chat 模式，事件总线发布最终的完整文本。

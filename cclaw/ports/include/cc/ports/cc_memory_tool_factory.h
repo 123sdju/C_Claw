@@ -20,7 +20,7 @@
  *   1. **工具创建**：将底层记忆存储封装为 Agent 可调用的标准工具
  *      （cc_tool_t），使 LLM 能够通过函数调用接口读写记忆。
  *
- *   2. **存储创建**：根据后端标识符（如 "file"、"sqlite"）和配置路径，
+ *   2. **存储创建**：根据后端标识符（如 "json_file"、"sqlite"）和配置路径，
  *      创建具体的 cc_memory_store_t 实例（适配器）。
  *
  * ─── 架构定位 ─────────────────────────────────────────────────────────
@@ -58,18 +58,19 @@
  * ─── 存储后端 ─────────────────────────────────────────────────────────
  *
  *   cc_memory_store_factory_create() 支持的 backend 参数：
- *     - "file"   : 基于 JSON 文件的存储后端。简单、无需额外依赖。
+ *     - "json_file" : 基于 JSON 文件的存储后端。简单、无需额外依赖。
  *                  适合单机开发和轻量级场景。path 参数指定 JSON 文件路径。
  *     - "sqlite" : 基于 SQLite 的存储后端。支持并发读写、事务、
  *                  复杂查询。适合生产环境。path 参数指定数据库文件路径。
- *     - "memory" : 纯内存存储后端。进程退出后数据丢失。
+ *     - "inmem"  : 纯内存存储后端。进程退出后数据丢失。
+ *     - "noop"   : 空操作后端，用于禁用记忆能力。
  *                  适合测试和不需持久化的场景。path 参数忽略。
  *
  * ─── 使用模式 ─────────────────────────────────────────────────────────
  *
  *   // 1. 创建记忆存储后端
  *   cc_memory_store_t store;
- *   cc_memory_store_factory_create(&store, "file", "./agent_memory.json");
+ *   cc_memory_store_factory_create(&store, "json_file", "./agent_memory.json");
  *
  *   // 2. 将存储包装为 Agent 工具
  *   cc_tool_t memory_tool;
@@ -129,9 +130,10 @@ cc_result_t cc_memory_tool_create(cc_memory_store_t *store, cc_tool_t *out_tool)
  * 这是记忆存储的工厂函数，类似于依赖注入中的 Provider。
  *
  * 工厂函数内部通过字符串匹配来选择后端实现：
- *   - "file"    → JSON 文件存储
+ *   - "json_file" → JSON 文件存储
  *   - "sqlite"  → SQLite 数据库存储
- *   - "memory"  → 纯内存存储
+ *   - "inmem"   → 纯内存存储
+ *   - "noop"    → 空操作存储
  *   未来可能扩展更多后端（如 Redis、PostgreSQL 等）。
  *
  * 创建的 cc_memory_store_t 实例的 vtable 会被完整填充，
@@ -141,12 +143,13 @@ cc_result_t cc_memory_tool_create(cc_memory_store_t *store, cc_tool_t *out_tool)
  * @param out_store  输出：填充完整的存储实例。
  *                   调用方负责 cc_memory_store_destroy()。
  * @param backend    后端类型标识符字符串（不可为 NULL）。
- *                   目前支持 "file"、"sqlite"、"memory"。
+ *                   目前支持 "json_file"、"sqlite"、"inmem"、"noop"。
  *                   不支持的 backend 将返回 CC_ERR_INVALID_ARGUMENT。
  * @param path       存储后端的数据路径（可为 NULL）。
- *                   - "file":    JSON 文件的完整路径
+ *                   - "json_file": JSON 文件的完整路径
  *                   - "sqlite":  SQLite 数据库文件路径
- *                   - "memory":  忽略此参数
+ *                   - "inmem":   忽略此参数
+ *                   - "noop":    忽略此参数
  *                   - 为 NULL 时使用默认路径
  * @return           CC_OK 表示存储实例创建成功，
  *                   CC_ERR_INVALID_ARGUMENT 表示不支持的 backend 类型，

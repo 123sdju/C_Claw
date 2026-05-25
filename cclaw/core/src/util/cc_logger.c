@@ -64,7 +64,7 @@
  *           线程安全：通过 mutex 保护读写，多个线程可安全地同时访问
  *   mutex — 互斥锁，保护 level 字段的读写一致性
  *           WHY 需要 mutex：在运行时可能通过 cc_logger_set_level 动态调整
- *           日志级别（如 CLI 用户切换调试模式），而此时另一个线程可能正在
+ *           日志级别（如 gateway 用户切换调试模式），而此时另一个线程可能正在
  *           调用 cc_logger_log 检查 level 阈值。mutex 防止数据竞争和
  *           部分写入（torn write），虽然 int 在大多数平台天然原子，
  *           但 mutex 提供了明确的内存序保证（happens-before语义）。

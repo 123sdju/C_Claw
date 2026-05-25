@@ -1,34 +1,13 @@
-# 配置项说明
+# SDK Configuration
 
-配置文件路径：`config.json`。主配置模型把 `model`、`storage`、`agents`、
-`queue`、`tools`、`plugins`、`skills`、`mcp`、`memory`、`sandbox`、`cli`
-放在同一个文件里。运行时能力首先由 CMake 决定：未编译进来的能力不能靠
-`config.json` 打开。
+`cc_config_t` is the SDK runtime configuration model. Applications choose where
+the JSON file lives, load it with `cc_config_load()`, and pass the resulting
+config to `cc_runtime_builder_create()`.
 
-## 构建裁剪
+Compile-time options still win over runtime configuration: a capability that was
+not compiled into `c_claw_runtime` cannot be enabled from JSON.
 
-| CMake 选项 | 桌面默认 | ESP 默认 | 说明 |
-|------------|----------|----------|------|
-| `CC_ENABLE_MULTI_AGENT` | 开 | 开 | 多 agent manager 核心映射 |
-| `CC_ENABLE_RUN_QUEUE` | 开 | 开 | 同 session 串行、跨 lane 并发的 run queue |
-| `CC_ENABLE_TOOL_POOL` | 开 | 关 | tool/plugin/MCP lane 并发池 |
-| `CC_ENABLE_SKILLS` | 开 | 开 | 静态 skill catalog 能力 |
-| `CC_ENABLE_SKILL_WATCHER` | 开 | 关 | 文件 watcher，属于 app 层 |
-| `CC_ENABLE_PLUGIN` | 开 | 关 | 外部进程 plugin 工具 |
-| `CC_ENABLE_PLUGIN_HOT_RELOAD` | 开 | 关 | plugin generation 热重载 |
-| `CC_ENABLE_PLUGIN_WORKERS` | 开 | 关 | plugin worker pool |
-| `CC_ENABLE_MCP` | 开 | 关 | MCP runtime/tool bridge |
-| `CC_ENABLE_MCP_STDIO` | 开 | 关 | stdio MCP transport |
-| `CC_ENABLE_MCP_HTTP` | 开 | 关 | HTTP/SSE/streamable HTTP transport |
-| `CC_ENABLE_SUBAGENTS` | 开 | 关 | subagent service |
-| `CC_ENABLE_ACTIVE_MEMORY` | 开 | 关 | active memory hook，run 后写入摘要或事实 |
-| `CC_ENABLE_SHELL` | 开 | 关 | shell 工具和 local sandbox |
-| `CC_ENABLE_SQLITE` | POSIX 开 | 关 | SQLite 存储 |
-
-ESP profile 默认关闭 plugin、hot reload、stdio MCP、watcher、shell、SQLite，
-只保留轻量 core runtime、JSON/in-memory 存储、可选静态 skills 和 memory。
-
-## config.json 示例
+## Example
 
 ```json
 {
@@ -37,20 +16,22 @@ ESP profile 默认关闭 plugin、hot reload、stdio MCP、watcher、shell、SQL
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com",
     "api_key": "",
+    "api_key_env": "OPENAI_API_KEY",
     "max_tokens": 4096,
     "temperature": 0.7,
     "thinking_mode": 0,
     "stream_mode": 0
   },
   "storage": {
-    "type": "sqlite"
+    "type": "json",
+    "path": "./runtime/data/sessions.json"
   },
   "agents": {
     "defaults": {
       "id": "default",
       "workspace": "./workspace",
       "agentDir": ".agents/default",
-      "systemPromptFile": "soul.md",
+      "systemPromptFile": "./prompts/system.md",
       "skills": ["core"]
     },
     "list": []
@@ -63,44 +44,20 @@ ESP profile 默认关闭 plugin、hot reload、stdio MCP、watcher、shell、SQL
     "maxPendingPerSession": 20
   },
   "tools": {
-    "enabled": ["read", "write", "shell", "memory"],
+    "enabled": ["read", "write", "memory"],
     "defaultTimeoutMs": 30000,
-    "perTool": {
-      "shell_run": { "concurrency": 1, "timeoutMs": 30000 }
-    }
+    "perTool": {}
   },
   "plugins": {
     "hotReload": true,
     "reloadDebounceMs": 300,
-    "entries": {
-      "weather": {
-        "enabled": true,
-        "command": "python3",
-        "args": ["./plugins/weather.py"],
-        "workers": 1,
-        "timeoutMs": 30000,
-        "maxInFlight": 1,
-        "restartOnCrash": true,
-        "skills": ["./plugins/weather/skills"],
-        "tools": [
-          {
-            "name": "weather.query",
-            "description": "查询城市天气",
-            "parameters": {
-              "type": "object",
-              "properties": { "city": { "type": "string" } },
-              "required": ["city"]
-            }
-          }
-        ]
-      }
-    }
+    "entries": {}
   },
   "skills": {
     "load": {
-      "watch": true,
+      "watch": false,
       "watchDebounceMs": 250,
-      "extraDirs": [".agents/skills", "~/.cclaw/skills"]
+      "extraDirs": [".agents/skills"]
     }
   },
   "mcp": {
@@ -110,16 +67,16 @@ ESP profile 默认关闭 plugin、hot reload、stdio MCP、watcher、shell、SQL
   },
   "memory": {
     "backend": "json_file",
-    "path": "./data/memory.json",
+    "path": "./runtime/data/memory.json",
     "active": {
-      "enabled": true,
+      "enabled": false,
       "writeSummary": true,
       "maxValueChars": 1600,
       "category": "active_summary"
     }
   },
   "sandbox": {
-    "type": "local",
+    "type": "none",
     "timeout_ms": 30000,
     "shell_requires_approval": true
   },
@@ -137,68 +94,59 @@ ESP profile 默认关闭 plugin、hot reload、stdio MCP、watcher、shell、SQL
 }
 ```
 
-## 分段说明
+## Sections
 
-`model`：LLM provider、模型名、API 地址、token、temperature、thinking/stream 开关。
-`thinking_mode=1` 时 loader 会强制打开 `stream_mode`，方便 CLI 展示推理增量。
+`model` selects the configured provider name, model, API URL, key, token limit,
+temperature, and stream flags. `api_key_env` lets the app keep secrets outside
+the tracked JSON file. `thinking_mode=1` forces `stream_mode=1`.
 
-`storage`：会话存储。`type` 支持 `sqlite`、`json`、`memory` 等 profile 可用后端。
-`sqlite` 只在 `CC_ENABLE_SQLITE=ON` 时可用；ESP 通常用 `json` 或 `memory`。
-`data_dir`、`path` 可选，缺失时使用编译 profile 的默认运行期目录。POSIX CLI
-默认在 `build/app/posix/cli/runtime` 下生成数据，STM32MP135 board 默认在
-`build/app/posix/stm32mp135_board/runtime`。
+`storage` configures session history. Supported `type` values are `json`,
+`local_file`, `memory`, and `sqlite` when `CC_ENABLE_SQLITE=ON`. Missing paths
+fall back to profile defaults under the build directory.
 
-`agents`：多 agent 配置。当前代码字段名是 `defaults` 和 `list`：`defaults`
-描述默认 agent，`list` 声明具名 agent。`skills` 是 per-agent allowlist，
-skill catalog 只把允许的 skill 注入 prompt。
+`agents` defines default and named agent metadata. The SDK uses the workspace,
+agent directory, system prompt path, and skill allowlist when building context.
 
-`queue`：run queue 配置。`perSessionConcurrency=1` 表示同 session 串行；`lanes`
-控制 main/subagent/plugin/mcp 的并发上限。
+`queue` configures `cc_run_queue_t`: lane concurrency, per-session serialization,
+debounce, and pending queue limits.
 
-`tools`：内置工具过滤和执行策略。`enabled` 为空或缺失时表示注册所有已编入工具；
-`perTool` 记录并发与 timeout，供 tool executor pool 和 adapter 使用。
+`tools` filters tools that the application feature set registered. An empty or
+missing `enabled` list means all compiled and registered tools are visible.
+Aliases are resolved by the application's `cc_tool_descriptor_t` table.
 
-`plugins`：外部进程插件主配置入口。POSIX/Windows app 从 `plugins.entries` 加载。
-热重载会以 registry generation 方式替换：新 run 使用新快照，旧 run 继续持有旧快照。
+`plugins` is parsed and validated by the SDK, but process creation and pipe I/O
+belong to the application. The SDK supplies JSON-RPC envelope helpers and reload
+generation semantics.
 
-`skills`：AgentSkills 风格 `SKILL.md` 加载路径。桌面可以打开 watcher；ESP 默认只
-使用静态目录，避免引入文件监听。
+`skills` configures SKILL.md catalog loading. File watching is an application
+responsibility; the SDK only parses and snapshots skill content.
 
-`mcp`：MCP client 配置。core SDK 负责 `initialize`、`tools/list`、
-`tools/call`、session cache、TTL 和 tool bridge；POSIX/Windows app 只提供
-transport factory。`servers` 支持：
+`mcp` configures MCP client servers. The SDK owns JSON-RPC matching, runtime
+cache, TTL, tool bridge, and SSE parsing. The application provides stdio or HTTP
+transport factories when it enables MCP.
 
-- `stdio`：单管道串行 worker，适合本机 MCP server。
-- `http`：普通 JSON-RPC request/response。
-- `sse`：`text/event-stream` 响应，SDK SSE parser 会跨 chunk 合并 `data:`，
-  并挑出匹配当前 JSON-RPC id 的 response。
-- `streamable_http`：POST JSON-RPC request，`Accept: application/json, text/event-stream`；
-  响应为 JSON 时按普通 JSON 解析，响应为 SSE 时按 event stream 解析。若 server
-  返回 `Mcp-Session-Id`，transport 会缓存并在后续请求中带上；`sessionIdleTtlMs`
-  到期或 reload dispose 会 reset 对应 session。
+`memory` configures long-term memory storage. Supported backends are `json_file`,
+`sqlite` when compiled, `inmem`, and `noop`/`none`.
 
-`memory`：长期记忆后端。桌面可用 `json_file`/`sqlite`/`inmem`；`active`
-控制 run 后是否把当前输入/输出沉淀为可检索摘要。ESP 默认 `json_file` 或
-`inmem`，并关闭 active memory。
+`sandbox` is consumed by applications that expose high-risk tools. The SDK
+default policy factory can require approval for `shell_run`, but this SDK branch
+does not include a shell tool implementation.
 
-`sandbox`：只影响 shell 等高风险工具。ESP profile 应使用 `none`。
+`cli` is kept as a generic gateway/debug field for downstream applications. The
+SDK does not provide a command-line executable in this branch.
 
-`cli`：桌面 CLI 交互选项，不属于核心 SDK。
+## Validation Behavior
 
-## 错误行为
+`cc_config_load()` performs syntax parsing, default filling, and semantic
+validation. Fatal configuration errors return `CC_ERR_INVALID_ARGUMENT`; external
+capability startup failures should be reported through `cc_runtime_diagnostics_t`
+by the application feature loader.
 
-`config.json` 解析后会在 core SDK 中做统一语义校验。校验失败时启动或 reload
-返回 `CC_ERR_INVALID_ARGUMENT`，不会进入 app 层半加载状态。当前固定的错误包括：
+Current validation includes:
 
-- `queue.lanes` 并发数必须为正数，queue cap/debounce 必须非负。
-- `plugins.entries.*` 启用时必须有 `command`，`workers`/`maxInFlight` 必须为正数。
-- `mcp.servers.*.transport` 只能是 `stdio`、`http`、`sse`、`streamable_http`。
-- `stdio` MCP server 必须有 `command`；HTTP/SSE/streamable HTTP server 必须有 `url`。
-- timeout、TTL、watch debounce、active memory value cap 不能为负数。
-
-外部能力启动失败与配置错误分开处理：
-
-- JSON 语法错误、非法并发/timeout、重复 id、基础 runtime 创建失败会阻止启动或 reload。
-- 单个 plugin 进程、MCP transport、MCP initialize/listTools 启动失败会记录到
-  runtime diagnostics，但程序继续运行，失败 tool 不注册。
-- 后续调用未注册 tool 时返回标准工具错误 `Tool not found: <name>`，Agent 主循环继续。
+- queue lane counts must be positive and debounce/cap values non-negative;
+- enabled plugin entries must have a `command`, positive worker counts, and
+  positive in-flight limits;
+- MCP transports must be `stdio`, `http`, `sse`, or `streamable_http`;
+- stdio MCP entries require `command`; HTTP-style entries require `url`;
+- timeout, TTL, watch debounce, and active memory caps cannot be negative.

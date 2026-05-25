@@ -13,7 +13,7 @@
  *
  * 本模块在整体架构中的角色：
  * ─────────────────────────────
- * 位于 App 层（业务逻辑层），是 SDK 层唯一的多线程 job queue。它对上提供
+ * 位于核心 SDK 层，是 SDK 的多线程 job queue。它对上提供
  * submit/collect/run 三种提交模式，对内管理 worker 线程池、4 条 lane 的
  * 并发限制以及最多 128 个活跃 session 的状态追踪。所有平台（POSIX、Windows、
  * ESP32）复用同一套实现，不依赖平台特定 API。
@@ -21,7 +21,7 @@
  * 上游调用方：
  *   - cc_agent_manager.c —— 将每次 handle_message 提交到 run queue，
  *     通过 submit_with_token 让 task 感知 cancel token
- *   - 高层 app（CLI/ESP）—— 直接使用 submit + collect 或同步 run 接口
+ *   - 高层应用 —— 直接使用 submit + collect 或同步 run 接口
  *
  * 下游依赖模块：
  *   - cc_thread.c / cc_mutex / cc_cond —— 线程、互斥锁、条件变量原语
@@ -100,8 +100,7 @@
  *   为什么 worker_count = 各 lane 并发之和（上限 32）？
  *     每个 lane 的并发限制由 lane_in_flight 独立执行，但 worker 线程池
  *     大小等于所有 lane 并发之和，确保每条 lane 达到上限时都有足够的
- *     worker 可用。上限 32 避免配置错误在桌面创建过多线程，也是 ESP
- *     profile 的保守保护。
+ *     worker 可用。上限 32 避免配置错误创建过多线程，也保护受限设备 profile。
  *
  *   为什么 session 数组是固定大小 CC_RUN_QUEUE_MAX_ACTIVE_SESSIONS=128？
  *     session 数组是线性查找的静态槽池。128 足够覆盖同时活跃的 session
@@ -254,7 +253,7 @@ static size_t desired_worker_count(const cc_run_queue_config_t *config)
     int total = main_limit + subagent_limit + plugin_limit + mcp_limit;
     if (total < 1) total = 1;
     /*
-     * 上限避免配置错误在桌面创建过多线程，也让 ESP profile 即使误开较大并发时
+     * 上限避免配置错误创建过多线程，也让受限设备 profile 即使误开较大并发时
      * 仍有一个保守保护。lane 并发限制仍由 lane_in_flight 单独执行。
      */
     if (total > 32) total = 32;

@@ -41,6 +41,7 @@
  *   - 证书、代理、重定向等策略由底层 cc_http_client_t adapter 或 profile 决定。
  */
 
+#include "cc/adapters/cc_builtin_tools.h"
 #include "cc/ports/cc_tool.h"
 #include "cc/ports/cc_http_client.h"
 #include "cc/util/cc_json.h"

@@ -48,8 +48,9 @@
  *
  * 解析 config 中的 storage_type 字段，创建对应类型的存储后端。
  * 当前支持的存储类型：
- *   - "json"   : 基于 JSON 文件的存储（默认），每个会话保存为独立的 JSON 文件
- *   - "sqlite" : 基于 SQLite 数据库的存储（规划中）
+ *   - "json" / "local_file" : 基于 JSON 文件的存储（默认）
+ *   - "memory"              : 纯内存存储
+ *   - "sqlite"              : SQLite 数据库存储（需要 CC_STORAGE_SQLITE=1）
  *
  * 返回的 cc_session_store_t 使用 vtable 多态，调用方通过
  * store.vtable->create_session() 等虚函数操作存储。

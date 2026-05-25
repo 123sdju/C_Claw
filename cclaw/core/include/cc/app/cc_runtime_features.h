@@ -36,7 +36,7 @@ typedef struct cc_runtime_diagnostic {
 /**
  * cc_runtime_diagnostics_t — 启动/reload 期间的非致命能力诊断列表。
  *
- * 该结构不分配内存，方便 main、CLI 和 reload report 直接按值复制。它只用于
+ * 该结构不分配内存，方便 gateway 和 reload report 直接按值复制。它只用于
  * “外部 tool/plugin/MCP 无法启动但 runtime 可以继续服务”的场景；配置解析、
  * 内存分配或基础 runtime 创建失败仍然通过 cc_result_t 阻止启动。
  */
@@ -280,7 +280,7 @@ typedef struct cc_runtime_feature_set {
     /** 可选：创建 sandbox；没有 sandbox 的 profile 应确保工具自身安全。 */
     cc_runtime_sandbox_create_fn create_sandbox;
 
-    /** 可选：加载插件工具；通常由 CLI 应用层实现。 */
+    /** 可选：加载插件工具；通常由应用层实现。 */
     cc_runtime_plugin_load_fn load_plugins;
     /** 可选：释放 load_plugins 返回的 plugin_state。 */
     cc_runtime_plugin_destroy_fn destroy_plugins;

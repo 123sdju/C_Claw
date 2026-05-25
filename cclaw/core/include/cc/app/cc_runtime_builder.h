@@ -21,7 +21,7 @@
  * cc_runtime_builder — runtime 组合根，持有构建过程中创建且需要统一销毁的资源。
  *
  * 该类型对外不透明，目的是把启动阶段创建的 logger、event bus、store、
- * provider、tool registry 和 agent runtime 收拢到一个销毁入口，避免 CLI
+ * provider、tool registry 和 agent runtime 收拢到一个销毁入口，避免 gateway
  * 层直接理解所有释放顺序。
  */
 typedef struct cc_runtime_builder cc_runtime_builder_t;
@@ -69,7 +69,7 @@ cc_agent_runtime_t *cc_runtime_builder_runtime(cc_runtime_builder_t *builder);
 /**
  * cc_runtime_builder_agent_manager — 返回 builder 持有的多 Agent 编排器借用指针。
  *
- * 启用 CC_ENABLE_MULTI_AGENT + CC_ENABLE_RUN_QUEUE 时，CLI 和 app 层应优先通过
+ * 启用 CC_ENABLE_MULTI_AGENT + CC_ENABLE_RUN_QUEUE 时，gateway 和 app 层应优先通过
  * manager 处理用户消息，让同 session 串行、跨 lane 并发等策略统一生效。
  * 对于裁剪 profile，该函数可能返回 NULL，调用方可退回单 runtime 路径。
  *
@@ -90,7 +90,7 @@ const cc_runtime_diagnostics_t *cc_runtime_builder_diagnostics(cc_runtime_builde
  * cc_runtime_builder_reload — 重新加载可热替换的运行时资源。
  *
  * 当前接口固定热重载边界：只替换后续 run 可见的工具/skill/MCP 快照，不杀死
- * 已经开始的 run。app 层 watcher 和 `/reload` 命令都调用此入口。
+ * 已经开始的 run。应用 watcher 和 reload 命令都调用此入口。
  *
  * @param builder 借用的 builder。
  * @param config 新配置对象；调用方负责在 reload 返回后销毁。
@@ -111,7 +111,7 @@ cc_result_t cc_runtime_builder_reload_with_report(
  * cc_runtime_builder_request_shutdown — 请求 builder 拥有的后台资源停止。
  *
  * 这是给 watcher、plugin supervisor、MCP runtime cache 预留的统一关闭入口。
- * destroy 会隐式调用它；显式调用主要服务于 CLI 收到退出命令时的有序收尾。
+ * destroy 会隐式调用它；显式调用主要服务于 gateway 收到退出命令时的有序收尾。
  */
 void cc_runtime_builder_request_shutdown(cc_runtime_builder_t *builder);
 

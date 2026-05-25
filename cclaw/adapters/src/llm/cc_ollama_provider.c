@@ -93,6 +93,7 @@
  *     - api_key：      NULL（无需认证）
  */
 
+#include "cc/adapters/cc_llm_providers.h"
 #include "cc/adapters/cc_http_llm_provider.h"
 #include "cc/util/cc_json.h"
 #include "cc/util/cc_string_builder.h"

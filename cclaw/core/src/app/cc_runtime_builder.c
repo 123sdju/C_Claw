@@ -52,7 +52,7 @@ struct cc_runtime_builder {
     cc_tool_executor_pool_t *tool_pool;
     /** 可选 run queue；启用多 Agent 时由 manager 借用，builder 负责销毁。 */
     cc_run_queue_t *run_queue;
-    /** 可选多 Agent manager；CLI 从这里进入，避免绕过 session 串行策略。 */
+    /** 可选多 Agent manager；gateway 可从这里进入，避免绕过 session 串行策略。 */
     cc_agent_manager_t *agent_manager;
     /** 可选 skill catalog；由 builder 拥有，system prompt 已持有注入后的快照文本。 */
     cc_skill_catalog_t *skill_catalog;

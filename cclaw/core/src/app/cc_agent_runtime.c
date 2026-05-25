@@ -20,7 +20,7 @@
  * Acting）对话-工具调用流水线。它是 cc_agent_runtime.h 的唯一实现。
  *
  * 上游调用方：
- *   - POSIX CLI 或板级 gateway —— 通过 cc_agent_runtime_handle_message 或
+ *   - 应用 gateway —— 通过 cc_agent_runtime_handle_message 或
  *     cc_agent_runtime_handle_message_stream 发送用户输入
  *   - 测试代码 —— 注入 mock LLM/store/tool 来验证主循环行为
  *
@@ -191,7 +191,7 @@ static char *generate_id(void)
  * active_memory_after_run — run 成功结束后，把本轮输入/输出写成可检索摘要。
  *
  * 这是 active memory 的第一层实现：不在 core 里引入额外 LLM 摘要调用，也不
- * 假设桌面线程池存在，而是把当前 user input 与 assistant final text 组成一条
+ * 假设某个应用线程池存在，而是把当前 user input 与 assistant final text 组成一条
  * bounded key-value 记忆。这样 POSIX/Windows 可以开启自动沉淀，ESP profile
  * 通过 CC_ENABLE_ACTIVE_MEMORY=OFF 完全不编译这段路径。
  *
@@ -1024,7 +1024,7 @@ static void stream_loop_callback(const cc_stream_chunk_t *chunk, void *user_data
  *   - 逐字分割最终回复文本，通过事件总线发送 stream.text 增量
  *   - 最后发送 stream.finished 事件
  *
- *   这样 CLI Gateway 无需感知降级是否发生，始终从事件总线获取相同的事件序列。
+ *   这样 gateway 无需感知降级是否发生，始终从事件总线获取相同的事件序列。
  */
 cc_result_t cc_agent_runtime_handle_message_stream_with_options(
     cc_agent_runtime_t *runtime,
@@ -1294,7 +1294,7 @@ void cc_agent_runtime_destroy(cc_agent_runtime_t *runtime)
  * 线程安全性说明：
  * ──────────────────
  *   本函数通过 runtime->mutex 互斥锁保护对 thinking_mode 字段的读写。
- *   调用场景：可能在 CLI 交互线程（用户通过 /thinking 命令切换）与
+ *   调用场景：可能在交互线程（用户通过 gateway 命令切换）与
  *   Agent 主循环线程（读取 thinking_mode 构造 LLM 请求参数）之间并发
  *   访问。互斥锁保证：
  *     - 写入操作（set）与读取操作（get）不会产生数据竞争

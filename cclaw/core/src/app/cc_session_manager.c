@@ -24,7 +24,7 @@
  *
  * 上游调用方：
  *   - cc_agent_runtime.c 的 create_session 辅助接口 —— 对外暴露会话创建能力
- *   - CLI gateway —— 通过 runtime 创建/选择会话，实际消息追加由 runtime 主循环完成
+ *   - 应用 gateway —— 通过 runtime 创建/选择会话，实际消息追加由 runtime 主循环完成
  *   - 测试代码 —— 注入内存 store，验证会话创建、消息追加和列表能力
  *
  * 下游依赖模块：
@@ -283,7 +283,7 @@ cc_result_t cc_session_manager_append_user_message(
  *
  * 功能：
  *   从 storage 中获取所有已创建会话的列表。这是一个查询接口，
- *   为 CLI 交互或 Web UI 提供会话列表以供用户选择和切换。
+ *   为交互 gateway 或 Web UI 提供会话列表以供用户选择和切换。
  *
  * @param manager      会话管理器实例
  * @param out_sessions 输出参数，会话结构体数组指针（调用方负责释放每项）
@@ -293,7 +293,7 @@ cc_result_t cc_session_manager_append_user_message(
  *
  * 典型使用场景：
  *
- *   // CLI 交互：列出所有历史会话
+ *   // 交互 gateway：列出所有历史会话
  *   cc_session_t *sessions = NULL;
  *   size_t count = 0;
  *   cc_session_manager_list_sessions(mgr, &sessions, &count);

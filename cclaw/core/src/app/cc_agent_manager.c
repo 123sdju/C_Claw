@@ -14,14 +14,14 @@
  *
  * 本模块在整体架构中的角色：
  * ─────────────────────────────
- * 位于 App 层（业务逻辑层），是 CLI/app 面向 SDK 的主入口。它不创建 LLM、
+ * 位于核心 SDK 层，是 gateway/app 面向 SDK 的主入口。它不创建 LLM、
  * store、plugin 进程，也不读取文件 watcher。它只做三件事：(1) 维护
  * agent_id 到 cc_agent_runtime_t 的映射表；(2) 将每次 handle_message 包装
  * 为 message_task 提交到 run queue；(3) 通过 pending_run 链表追踪异步 run
  * 的响应指针，支持 submit+collect 分离的调用模式。
  *
  * 上游调用方：
- *   - CLI / app 层 —— 通过 cc_agent_manager_handle_message 发起交互 turn
+ *   - gateway / app 层 —— 通过 cc_agent_manager_handle_message 发起交互 turn
  *   - 高层编排逻辑 —— 通过 submit + collect 分离调用实现异步流水线
  *
  * 下游依赖模块：
@@ -105,7 +105,7 @@
 #include <string.h>
 
 /*
- * Agent manager 是 CLI/app 面向 SDK 的主入口。它不拥有 runtime 的内部依赖，
+ * Agent manager 是 gateway/app 面向 SDK 的主入口。它不拥有 runtime 的内部依赖，
  * 只保存 agent_id -> runtime 的映射，并把每次消息提交到 run queue。
  *
  * 生命周期：

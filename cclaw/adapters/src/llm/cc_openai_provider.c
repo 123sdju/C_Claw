@@ -80,6 +80,7 @@
  *     - 默认 model：   gpt-4o-mini
  */
 
+#include "cc/adapters/cc_llm_providers.h"
 #include "cc/adapters/cc_http_llm_provider.h"
 #include "cc/util/cc_json.h"
 #include "cc/util/cc_memory.h"

@@ -671,7 +671,7 @@ static int mcp_transport_known(const char *transport)
  * validate_runtime_sections — 对 config.json 的运行期配置做严格语义校验。
  *
  * 解析阶段只负责把 JSON 复制成 C 结构；这里集中检查“值是否能被 runtime 正确
- * 执行”。这样 POSIX/Windows/ESP app 都复用同一套错误行为，不会出现桌面能容忍
+ * 执行”。这样不同应用都复用同一套错误行为，不会出现一个入口能容忍
  * 拼错字段、设备却静默裁剪的差异。
  */
 static cc_result_t validate_runtime_sections(const cc_config_t *config)

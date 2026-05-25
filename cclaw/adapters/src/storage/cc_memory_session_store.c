@@ -487,7 +487,7 @@ static cc_result_t memory_list_sessions(
  *
  * reset session 的语义不是销毁会话对象，而是让下一轮对话从空上下文开始。
  * 因此这里清理 messages/tool_calls/tool_results 三组历史数组；sessions 数组
- * 不动，CLI 仍可继续复用同一个 session id。
+ * 不动，gateway 仍可继续复用同一个 session id。
  */
 static cc_result_t memory_clear_session(void *self, const char *session_id)
 {

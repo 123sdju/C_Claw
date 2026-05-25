@@ -12,12 +12,8 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers")
 
-set(CC_PROFILE "posix-cli" CACHE STRING "Build profile: posix-cli, core-minimal, stm32mp135-board")
-set_property(CACHE CC_PROFILE PROPERTY STRINGS posix-cli core-minimal stm32mp135-board)
-
-if(NOT DEFINED CC_PROFILE_APPLICATION_DIR)
-    set(CC_PROFILE_APPLICATION_DIR "")
-endif()
+set(CC_PROFILE "core-minimal" CACHE STRING "Build profile: core-minimal")
+set_property(CACHE CC_PROFILE PROPERTY STRINGS core-minimal)
 
 set(CC_PROFILE_FILE "${CMAKE_CURRENT_LIST_DIR}/profiles/${CC_PROFILE}.cmake")
 if(NOT EXISTS "${CC_PROFILE_FILE}")
@@ -76,7 +72,6 @@ set(CC_CACHED_TARGET_PLATFORM "${CC_TARGET_PLATFORM_RESOLVED}"
 option(CC_ENABLE_FILE_TOOLS "Enable file read/write tools" ${CC_PROFILE_ENABLE_FILE_TOOLS})
 option(CC_ENABLE_HTTP_TOOL "Enable http.request tool" ${CC_PROFILE_ENABLE_HTTP_TOOL})
 option(CC_ENABLE_MEMORY "Enable long-term memory subsystem" ${CC_PROFILE_ENABLE_MEMORY})
-option(CC_ENABLE_CLI "Enable CLI gateway executable" ${CC_PROFILE_ENABLE_CLI})
 option(CC_ENABLE_SHELL "Enable shell.run tool and local sandbox" ${CC_PROFILE_ENABLE_SHELL})
 option(CC_ENABLE_PLUGIN "Enable external process plugin tools" ${CC_PROFILE_ENABLE_PLUGIN})
 option(CC_ENABLE_MULTI_AGENT "Enable multi-agent manager core" ${CC_PROFILE_ENABLE_MULTI_AGENT})
@@ -87,7 +82,7 @@ option(CC_ENABLE_SKILL_WATCHER "Enable app-level skill file watcher support" ${C
 option(CC_ENABLE_PLUGIN_HOT_RELOAD "Enable plugin hot reload generation swapping" ${CC_PROFILE_ENABLE_PLUGIN_HOT_RELOAD})
 option(CC_ENABLE_PLUGIN_WORKERS "Enable plugin worker pools" ${CC_PROFILE_ENABLE_PLUGIN_WORKERS})
 option(CC_ENABLE_MCP "Enable MCP runtime abstractions and tool bridge" ${CC_PROFILE_ENABLE_MCP})
-option(CC_ENABLE_MCP_STDIO "Enable stdio MCP transport in desktop apps" ${CC_PROFILE_ENABLE_MCP_STDIO})
+option(CC_ENABLE_MCP_STDIO "Enable application-provided stdio MCP transport support" ${CC_PROFILE_ENABLE_MCP_STDIO})
 option(CC_ENABLE_MCP_HTTP "Enable HTTP/SSE MCP transport" ${CC_PROFILE_ENABLE_MCP_HTTP})
 option(CC_ENABLE_SUBAGENTS "Enable subagent services" ${CC_PROFILE_ENABLE_SUBAGENTS})
 option(CC_ENABLE_ACTIVE_MEMORY "Enable active memory hook for run context and summary writes" ${CC_PROFILE_ENABLE_ACTIVE_MEMORY})
@@ -96,10 +91,6 @@ option(CC_ENABLE_SQLITE "Enable SQLite storage backend" ${CC_PROFILE_ENABLE_SQLI
 option(CC_ENABLE_OPENAI "Enable OpenAI-compatible LLM adapter" ${CC_PROFILE_ENABLE_OPENAI})
 option(CC_ENABLE_OLLAMA "Enable Ollama LLM adapter" ${CC_PROFILE_ENABLE_OLLAMA})
 option(CC_ENABLE_ANTHROPIC "Enable Anthropic LLM adapter" ${CC_PROFILE_ENABLE_ANTHROPIC})
-if(NOT DEFINED CC_PROFILE_ENABLE_BOARD_TOOLS)
-    set(CC_PROFILE_ENABLE_BOARD_TOOLS OFF)
-endif()
-option(CC_ENABLE_BOARD_TOOLS "Enable STM32MP135 board tools" ${CC_PROFILE_ENABLE_BOARD_TOOLS})
 
 message(STATUS "c-claw profile: ${CC_PROFILE}")
 message(STATUS "c-claw target platform: ${CC_TARGET_PLATFORM_RESOLVED}")
@@ -193,9 +184,7 @@ target_compile_definitions(c_claw_project_options INTERFACE
     CC_LLM_OPENAI=$<BOOL:${CC_ENABLE_OPENAI}>
     CC_LLM_OLLAMA=$<BOOL:${CC_ENABLE_OLLAMA}>
     CC_LLM_ANTHROPIC=$<BOOL:${CC_ENABLE_ANTHROPIC}>
-    CC_ENABLE_BOARD_TOOLS=$<BOOL:${CC_ENABLE_BOARD_TOOLS}>
     CC_HAS_MEMORY=$<BOOL:${CC_ENABLE_MEMORY}>
-    CC_GATEWAY_CLI=$<BOOL:${CC_ENABLE_CLI}>
     CC_DEFAULT_CONFIG_PATH="${CC_DEFAULT_CONFIG_PATH_VALUE}"
     CC_DEFAULT_DATA_DIR="${CC_DEFAULT_DATA_DIR_VALUE}"
     CC_DEFAULT_WORKSPACE_PATH="${CC_DEFAULT_WORKSPACE_PATH_VALUE}"

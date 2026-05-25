@@ -24,6 +24,7 @@
  *   - 当前为最小化默认实现，生产环境建议扩展更多规则（如文件写入、网络访问等）
  */
 
+#include "cc/adapters/cc_default_policy_engine.h"
 #include "cc/ports/cc_policy_engine.h"
 #include <stdlib.h>
 #include <string.h>

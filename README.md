@@ -1,293 +1,120 @@
-# c-claw
+# C-Claw SDK
 
-纯 C 语言 AI Agent 运行时。项目采用 Ports & Adapters 架构，用
-`struct + vtable + void *self` 在 C 中实现接口、多态和依赖注入。
+C-Claw SDK is a pure C Agent runtime foundation. This branch keeps only the
+portable SDK, SDK tests, profiles, platform ports, adapters, and documentation.
+Product gateways and application-specific tools live in downstream projects.
 
-当前代码重点支持：
+The SDK uses Ports & Adapters with `struct + vtable + void *self` so an
+application can inject LLM providers, tools, storage, policy, platform services,
+and its own gateway without changing the core runtime.
 
-- ReAct 工具调用循环：用户消息 -> LLM -> 工具 -> 工具结果 -> LLM
-- LLM 后端：OpenAI 兼容 API、Ollama、Anthropic，底层通过统一 HTTP LLM provider + 协议策略接入
-- 工具系统：文件读写、Shell、HTTP 请求、长期记忆、外部插件工具
-- 存储后端：SQLite、JSON 文件、内存
-- 插件系统：JSON-RPC 2.0 over stdin/stdout，插件可用任意语言实现
-- 平台抽象：POSIX、Windows、ESP32 只提供端口适配
-- 应用/设备 profile：通过 CMake 选择 app/board、平台和功能，不再把桌面能力硬编码进核心
-- 上下文窗口管理：历史消息截断和可选 LLM 摘要压缩
-- 流式输出：CLI 支持 `/stream on|off`
-
-## 快速开始
-
-### 依赖
-
-桌面默认构建需要：
-
-- CMake >= 3.16
-- C99 编译器，例如 GCC 或 Clang
-- Threads
-- libcurl，用于 HTTP-backed LLM 适配器和 HTTP 工具
-- Python 3，仅用于示例插件测试
-
-SQLite 使用源码集成，默认 POSIX 构建会编入；也可以通过 CMake 关闭。
-
-### 构建
-
-```bash
-cmake --preset posix-cli
-cmake --build --preset posix-cli
-ctest --test-dir build/app/posix/cli --output-on-failure
-```
-
-### 运行
-
-```bash
-./build/app/posix/cli/bin/c-claw --help
-./build/app/posix/cli/bin/c-claw
-./build/app/posix/cli/bin/c-claw ask "列出当前工作区文件"
-```
-
-## 构建 Profile
-
-应用、设备、平台和功能由 CMake profile 决定。默认 `CC_PROFILE=posix-cli`
-构建 POSIX CLI 应用；STM32MP135 板级应用使用独立 profile。
-
-```bash
-# 默认桌面构建
-cmake --preset posix-cli
-
-# 最小核心构建
-cmake --preset core-minimal
-
-# STM32MP135 board app
-cmake --preset stm32mp135-board
-cmake --build --preset stm32mp135-board
-```
-
-日常 Linux 验证以 `posix-cli`、`core-minimal` 和 `stm32mp135-board` 为准。
-
-构建输出按层放在 `build/` 下，避免 SDK 测试、桌面应用和板级固件混在同一层：
-
-| 入口 | 构建目录 | 主要产物 |
-|------|----------|----------|
-| POSIX CLI | `build/app/posix/cli` | `bin/c-claw`、POSIX tests |
-| core-minimal | `build/sdk/core-minimal` | SDK 最小裁剪 tests |
-| STM32MP135 board | `build/app/posix/stm32mp135_board` | `bin/c-claw-board`、board app tests |
-
-常用开关：
-
-| CMake 选项 | 说明 |
-|------------|------|
-| `CC_PROFILE` | `posix-cli`、`core-minimal`、`stm32mp135-board` |
-| `CC_TARGET_PLATFORM` | `auto`、`posix`、`windows`、`esp32`、`freertos` |
-| `CC_ENABLE_CLI` | 构建 CLI gateway 和 `c-claw` 可执行文件 |
-| `CC_ENABLE_SHELL` | 编入 `shell_run` 工具和 local sandbox |
-| `CC_ENABLE_PLUGIN` | 编入外部进程插件系统 |
-| `CC_ENABLE_DOCKER_SANDBOX` | 编入 Docker sandbox 适配器 |
-| `CC_ENABLE_SQLITE` | 编入 SQLite 会话存储和 SQLite 记忆后端 |
-| `CC_ENABLE_OPENAI` | 编入 OpenAI 兼容 LLM 适配器 |
-| `CC_ENABLE_OLLAMA` | 编入 Ollama LLM 适配器 |
-| `CC_ENABLE_ANTHROPIC` | 编入 Anthropic LLM 适配器 |
-| `CC_ENABLE_FILE_TOOLS` | 编入文件读写工具 |
-| `CC_ENABLE_HTTP_TOOL` | 编入 `http.request` 工具 |
-| `CC_ENABLE_MEMORY` | 编入长期记忆工具和记忆存储 |
-
-## 配置
-
-运行时配置文件由编译 profile 指定，不再默认读取仓库根目录 `config.json`。
-POSIX CLI 默认路径是 `apps/posix/cli/config/config.json`；STM32MP135 board 默认路径是
-`apps/posix/stm32mp135_board/config/config.json`。
-缺失时使用编译 profile 对应的默认值：
-默认 provider 由编译 profile 选择：桌面默认优先 `openai`，也可以在配置中切换
-为 `ollama` 或 `anthropic`。禁用 SQLite 时默认走 JSON；禁用长期记忆时默认使用
-`noop`。
-
-```json
-{
-  "model": {
-    "provider": "qwen",
-    "model": "qwen-plus-2025-04-28",
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode",
-    "api_key": "",
-    "api_key_env": "DASHSCOPE_API_KEY",
-    "max_tokens": 4096,
-    "temperature": 0.7,
-    "thinking_mode": 0,
-    "stream_mode": 0
-  },
-  "storage": {
-    "type": "sqlite"
-  },
-  "agents": {
-    "defaults": {
-      "id": "default",
-      "workspace": "./workspace",
-      "agentDir": ".agents/default",
-      "systemPromptFile": "apps/posix/cli/config/soul.md",
-      "skills": ["core"]
-    },
-    "list": []
-  },
-  "queue": {
-    "lanes": {
-      "main": 4,
-      "subagent": 8,
-      "plugin": 4,
-      "mcp": 4
-    },
-    "perSessionConcurrency": 1,
-    "mode": "steer",
-    "debounceMs": 500,
-    "maxPendingPerSession": 20
-  },
-  "tools": {
-    "enabled": ["read", "write", "http", "shell", "memory"],
-    "defaultTimeoutMs": 30000,
-    "perTool": {
-      "shell_run": {
-        "concurrency": 1,
-        "timeoutMs": 30000
-      }
-    }
-  },
-  "plugins": {
-    "hotReload": true,
-    "reloadDebounceMs": 300,
-    "entries": {}
-  },
-  "skills": {
-    "load": {
-      "watch": true,
-      "watchDebounceMs": 250,
-      "extraDirs": [".agents/skills", "~/.cclaw/skills"]
-    }
-  },
-  "mcp": {
-    "enabled": false,
-    "sessionIdleTtlMs": 600000,
-    "servers": {}
-  },
-  "sandbox": {
-    "type": "local",
-    "timeout_ms": 30000,
-    "shell_requires_approval": true
-  },
-  "memory": {
-    "backend": "json_file",
-    "active": {
-      "enabled": true,
-      "writeSummary": true,
-      "maxValueChars": 1600,
-      "category": "active_summary"
-    }
-  },
-  "system": {
-    "max_steps": 10,
-    "context_window_tokens": 8192,
-    "context_compress_threshold": 80,
-    "context_keep_recent": 20,
-    "summary_max_tokens": 1024,
-    "summary_temperature": 0.3
-  },
-  "cli": {
-    "debug_mode": false
-  }
-}
-```
-
-`model.stream_mode` 表示默认使用 LLM 流式请求；`model.thinking_mode=1` 时会强制开启 stream。
-
-详见 [apps/posix/cli/docs/config.md](apps/posix/cli/docs/config.md)。
-
-## 插件系统
-
-插件以独立子进程运行，通过 JSON-RPC 2.0 over stdin/stdout 和主进程通信。
-插件依赖 `CC_ENABLE_PLUGIN=ON`，在无外部进程能力的设备 profile 中会被裁剪。
-
-插件配置归属具体应用，主入口统一在 `config.json.plugins.entries`；不支持外部
-进程的设备 profile 不应编入插件工具。
-
-`config.json` 插件段示例：
-
-```json
-{
-  "plugins": {
-    "hotReload": true,
-    "reloadDebounceMs": 300,
-    "entries": {
-      "weather": {
-        "enabled": true,
-        "command": "python3",
-        "args": ["apps/posix/cli/plugins/weather_tool.py"],
-        "tools": [
-          {
-            "name": "weather_query",
-            "description": "查询指定城市的天气信息",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "city": { "type": "string", "description": "城市名称" }
-              },
-              "required": ["city"]
-            }
-          }
-        ]
-      }
-    }
-  }
-}
-```
-
-协议约定：
-
-- stdin 每行一个 JSON-RPC 请求
-- stdout 每行一个 JSON-RPC 响应
-- 每次响应后 flush
-
-```json
-{"jsonrpc":"2.0","id":"1","method":"weather_query","params":{"city":"Beijing"}}
-```
-
-```json
-{"jsonrpc":"2.0","id":"1","result":{"city":"Beijing","temperature":22}}
-```
-
-## 项目结构
+## What Is Included
 
 ```text
-cclaw/         可移植基础 SDK：core、ports、adapters、platforms、profiles
-apps/          产品工程：posix/cli、posix/stm32mp135_board 等
-build/         统一构建输出：posix-cli、core-minimal、stm32mp135-board 等
-               app 构建放在 build/app/<platform>/<app>，
-               SDK 裁剪构建放在 build/sdk/<profile>
+cclaw/core/       Agent loop, runtime builder, sessions, tools, queue, MCP, skills
+cclaw/ports/      Public vtable interfaces for platform and service boundaries
+cclaw/adapters/   Built-in storage, memory, file/http tools, policy, LLM adapters
+cclaw/platforms/  POSIX, Windows, ESP32, and FreeRTOS port implementations
+cclaw/profiles/   SDK build profiles
+cclaw/tests/      SDK unit and behavior tests
+docs/             Configuration and SDK integration notes
 ```
 
-## 内置工具
+This branch intentionally does not build an executable. A downstream
+application links `c_claw_runtime`, provides a `cc_runtime_feature_set_t`, loads
+configuration, and calls the runtime from its own gateway.
 
-| 工具名 | 编译开关 | 功能 |
-|--------|----------|------|
-| `file_read` | `CC_ENABLE_FILE_TOOLS` | 读取 workspace 内文件 |
-| `file_write` | `CC_ENABLE_FILE_TOOLS` | 写入 workspace 内文件 |
-| `shell_run` | `CC_ENABLE_SHELL` | 通过 sandbox 执行 shell 命令 |
-| `memory` | `CC_ENABLE_MEMORY` | 长期记忆 CRUD |
-| `http.request` | `CC_ENABLE_HTTP_TOOL` | 执行 GET/POST/自定义 HTTP 请求 |
-| 插件工具 | `CC_ENABLE_PLUGIN` | 由 `config.json.plugins.entries` 注册 |
+## Requirements
 
-`tools.enabled` 可以在运行时进一步裁剪已编入的工具。支持的常用别名：
-`read` -> `file_read`，`write` -> `file_write`，`shell` -> `shell_run`，
-`http` -> `http.request`。
+- CMake >= 3.16 for direct `-S/-B` builds.
+- CMake >= 3.21 for the provided `CMakePresets.json`.
+- A C99 compiler.
+- Threads on POSIX/Windows builds.
+- libcurl only when HTTP-backed features are enabled, such as OpenAI/Ollama/
+  Anthropic providers, `http.request`, or HTTP MCP transport.
 
-工具按依赖分三层放置：通用 file/http/memory 工具在 `cclaw/adapters/src/tools/common`；
-桌面 shell/plugin 工具在对应 `apps/<platform>/cli/src/tools`；
-摄像头、音频、CAN、ADC 等板级工具在对应 `apps/posix/<board>/src/board`。
-内置工具由应用/板级 `cc_runtime_feature_set_t` descriptor 表统一声明和注册。
-新增内置能力时应添加对应层级的工厂和 app/board descriptor，而不是在平台端口层手工接线。
-`apps/posix/cli/src/main.c` 只负责加载配置、创建 runtime builder、启动当前 CLI gateway。
+SQLite and cJSON are vendored. JSON and in-memory storage remain available when
+SQLite is disabled.
 
-## 文档
+## Build And Test
 
-- [cclaw/docs/architecture.md](cclaw/docs/architecture.md)：SDK 架构、平台 profile、扩展点
-- [apps/posix/cli/docs/config.md](apps/posix/cli/docs/config.md)：POSIX CLI 配置和构建选项
-- [apps/posix/stm32mp135_board/docs/config.md](apps/posix/stm32mp135_board/docs/config.md)：STM32MP135 board app 配置和工具说明
-- [pure_c_claw_architecture_design.md](pure_c_claw_architecture_design.md)：纯 C 架构设计备忘
+Preset path:
+
+```bash
+cmake --preset core-minimal
+cmake --build --preset core-minimal
+ctest --preset core-minimal
+```
+
+Equivalent explicit path:
+
+```bash
+cmake -S . -B build/sdk/core-minimal -DCC_PROFILE=core-minimal -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build/sdk/core-minimal
+ctest --test-dir build/sdk/core-minimal --output-on-failure
+```
+
+The default SDK profile is `core-minimal`. It builds `c_claw_runtime` plus SDK
+tests with no gateway, process plugin manager, shell tool, or product app.
+
+## Using From An Application
+
+For source-subdirectory reuse, add the SDK and link the runtime:
+
+```cmake
+add_subdirectory(vendor/C_Claw/cclaw)
+
+add_executable(my_agent main.c my_features.c)
+target_link_libraries(my_agent PRIVATE c_claw_runtime)
+```
+
+The application owns:
+
+- configuration file location and API keys;
+- gateway/UI/transport entrypoint;
+- the `cc_runtime_feature_set_t` table passed to `cc_runtime_builder_create`;
+- application-specific tools, plugin process management, MCP transports, and
+  hardware integrations.
+
+The SDK provides public factories for common building blocks:
+
+- `cc/adapters/cc_llm_providers.h`
+- `cc/adapters/cc_builtin_tools.h`
+- `cc/adapters/cc_default_policy_engine.h`
+- `cc/ports/cc_storage_factory.h`
+- `cc/ports/cc_memory_tool_factory.h`
+
+See [docs/sdk-usage.md](docs/sdk-usage.md) for a minimal feature-set pattern.
+
+## Main Build Options
+
+| Option | Default in `core-minimal` | Notes |
+|--------|---------------------------|-------|
+| `CC_PROFILE` | `core-minimal` | SDK profile selection. |
+| `CC_TARGET_PLATFORM` | `auto` | Resolves to `posix`, `windows`, `esp32`, or `freertos`. |
+| `CC_ENABLE_FILE_TOOLS` | ON | Compiles file read/write tool factories. |
+| `CC_ENABLE_MEMORY` | ON | Compiles memory store and memory tool support. |
+| `CC_ENABLE_RUN_QUEUE` | ON | Enables session serialization and queue actions. |
+| `CC_ENABLE_TOOL_POOL` | ON | Enables lane concurrency and timeout coordination. |
+| `CC_ENABLE_SKILLS` | ON | Enables SKILL.md catalog parsing. |
+| `CC_ENABLE_SQLITE` | OFF | Enables SQLite session and memory backends. |
+| `CC_ENABLE_OPENAI` | OFF | Enables OpenAI-compatible HTTP provider factory. |
+| `CC_ENABLE_OLLAMA` | OFF | Enables Ollama HTTP provider factory. |
+| `CC_ENABLE_ANTHROPIC` | OFF | Enables Anthropic HTTP provider factory. |
+| `CC_ENABLE_HTTP_TOOL` | OFF | Enables `http.request` tool factory. |
+| `CC_ENABLE_MCP` | OFF | Enables SDK MCP runtime/tool bridge. |
+
+Command-line `-D` values override profile defaults.
+
+## Documentation
+
+- [docs/configuration.md](docs/configuration.md): SDK configuration model.
+- [docs/sdk-usage.md](docs/sdk-usage.md): downstream integration guide.
+- [cclaw/docs/architecture.md](cclaw/docs/architecture.md): SDK architecture.
+- [cclaw/docs/concurrency.md](cclaw/docs/concurrency.md): queue, cancel, pool, reload semantics.
+- [cclaw/docs/mcp.md](cclaw/docs/mcp.md): MCP runtime and transport boundary.
+- [cclaw/docs/plugins.md](cclaw/docs/plugins.md): plugin protocol boundary.
+- [cclaw/docs/skills.md](cclaw/docs/skills.md): SKILL.md catalog behavior.
 
 ## License
 

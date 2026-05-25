@@ -1,6 +1,6 @@
 # Plugin System
 
-插件系统把外部进程暴露为 C-Claw tool。当前边界是：协议语义在 SDK，进程和管道在桌面 app。
+插件系统把外部进程暴露为 C-Claw tool。当前边界是：协议语义在 SDK，进程和管道在应用层。
 
 ## SDK 与 App 边界
 
@@ -10,15 +10,15 @@ SDK 负责：
 - tool schema bridge：插件声明的 `name`、`description`、`parameters` 被注册为 `cc_tool_t`。
 - registry generation：runtime builder reload 成功后发布新工具快照，已经开始的 run 继续使用自己的快照。
 
-POSIX/Windows app 负责：
+应用层负责：
 
 - 启动外部进程、维护 stdin/stdout pipe、捕获 stderr。
 - `workers` 个子进程的 round-robin 分发。
 - `timeoutMs`、`restartOnCrash` 等平台行为。
-- config polling watcher 和 `/reload` CLI 命令。
+- config polling watcher 和 reload 命令。
 
-ESP profile 默认关闭 `CC_ENABLE_PLUGIN`、`CC_ENABLE_PLUGIN_WORKERS` 和
-`CC_ENABLE_PLUGIN_HOT_RELOAD`，不会编译进程型 plugin 代码。
+设备 profile 通常关闭 `CC_ENABLE_PLUGIN`、`CC_ENABLE_PLUGIN_WORKERS` 和
+`CC_ENABLE_PLUGIN_HOT_RELOAD`，避免把进程型 plugin 管理代码带入固件。
 
 ## 配置
 
@@ -33,12 +33,12 @@ ESP profile 默认关闭 `CC_ENABLE_PLUGIN`、`CC_ENABLE_PLUGIN_WORKERS` 和
       "weather": {
         "enabled": true,
         "command": "python3",
-        "args": ["apps/posix/cli/plugins/weather_tool.py"],
+        "args": ["./plugins/weather_tool.py"],
         "workers": 2,
         "timeoutMs": 30000,
         "maxInFlight": 2,
         "restartOnCrash": true,
-        "skills": ["apps/posix/cli/plugins/weather/skills"],
+        "skills": ["./plugins/weather/skills"],
         "tools": [
           {
             "name": "weather.query",
@@ -62,7 +62,7 @@ ESP profile 默认关闭 `CC_ENABLE_PLUGIN`、`CC_ENABLE_PLUGIN_WORKERS` 和
 
 外部进程启动失败属于非致命 tool 诊断：该插件的工具不会注册进本次 registry
 generation，但 runtime 会继续启动或完成 reload，其他 builtin/plugin/MCP tool
-仍可用。诊断会写入 `cc_runtime_diagnostics_t`，app 在启动后和 `/reload` 后打印摘要。
+仍可用。诊断会写入 `cc_runtime_diagnostics_t`，应用可在启动或 reload 后打印摘要。
 
 ## 并发模型
 
@@ -73,14 +73,14 @@ generation，但 runtime 会继续启动或完成 reload，其他 builtin/plugin
 timeout，因此 app 的 worker 数和 SDK 的 lane 上限应一起配置。
 
 工具调用的取消是协作式的。`cc_tool_context_t.cancel_token` 会传到 tool adapter；
-进程型 plugin 由 POSIX/Windows app 在 pipe 等待点检查 token。若请求已经写入
+进程型 plugin 由应用层 transport 在 pipe 等待点检查 token。若请求已经写入
 子进程但 run 被取消，worker 会被复位；默认 `restartOnCrash=true` 时立即启动
 干净 worker，避免下一次调用读到上一次请求的迟到响应。`ctx.timeout_ms` 同样会
 映射到 pipe read timeout。
 
 ## Reload 行为
 
-`/reload` 和 watcher 都调用 `cc_runtime_builder_reload()`：
+reload 命令和 watcher 都调用 `cc_runtime_builder_reload()`：
 
 - 新 config 先完成解析和语义校验。
 - builder 构建新的 registry、tool pool、skill catalog 和 MCP/plugin 状态。
