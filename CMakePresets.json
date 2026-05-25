@@ -27,13 +27,12 @@
       }
     },
     {
-      "name": "windows-cli",
-      "displayName": "Windows CLI",
-      "description": "For a Windows host or a Linux host with an installed Windows cross toolchain and libcurl; not part of the default Linux validation path.",
+      "name": "stm32mp135-board",
+      "displayName": "STM32MP135 Board",
       "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/app/windows/cli",
+      "binaryDir": "${sourceDir}/build/app/posix/stm32mp135_board",
       "cacheVariables": {
-        "CC_PROFILE": "windows-cli",
+        "CC_PROFILE": "stm32mp135-board",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     }
@@ -48,8 +47,8 @@
       "configurePreset": "core-minimal"
     },
     {
-      "name": "windows-cli",
-      "configurePreset": "windows-cli"
+      "name": "stm32mp135-board",
+      "configurePreset": "stm32mp135-board"
     }
   ],
   "testPresets": [
@@ -63,6 +62,13 @@
     {
       "name": "core-minimal",
       "configurePreset": "core-minimal",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "stm32mp135-board",
+      "configurePreset": "stm32mp135-board",
       "output": {
         "outputOnFailure": true
       }

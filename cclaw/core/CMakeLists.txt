@@ -9,6 +9,7 @@ set(C_CLAW_CORE_SOURCES
     src/core/cc_message.c
     src/core/cc_session.c
     src/core/cc_tool_call.c
+    src/core/cc_media.c
     src/core/cc_tool_registry.c
     src/core/cc_event_bus.c
     src/core/cc_memory_entry.c

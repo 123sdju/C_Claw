@@ -28,9 +28,16 @@ int main(void)
     char *enabled[] = { "read" };
     cc_config_t config;
     memset(&config, 0, sizeof(config));
+#if CC_LLM_OPENAI
+    config.provider = "qwen";
+    config.model = "qwen-plus-2025-04-28";
+    config.base_url = "https://dashscope.aliyuncs.com/compatible-mode";
+    config.api_key = "test-key";
+#else
     config.provider = "ollama";
     config.model = "fake";
     config.base_url = "http://localhost:11434";
+#endif
     config.storage_type = "memory";
     config.workspace_path = "/tmp/c_claw_builder_workspace";
     config.sandbox_type = "none";

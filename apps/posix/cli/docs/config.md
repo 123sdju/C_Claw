@@ -60,5 +60,5 @@ ctest --preset posix-cli
 
 该 preset 的 build 根是 `build/app/posix/cli`，可执行文件输出到
 `build/app/posix/cli/bin/c-claw`，运行期默认数据在
-`build/app/posix/cli/runtime`。这样 app 产物、SDK 最小构建和 ESP32 QEMU
+`build/app/posix/cli/runtime`。这样 app 产物、SDK 最小构建和板级应用
 产物不会混在同一个平铺目录中。

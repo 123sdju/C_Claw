@@ -153,6 +153,7 @@ typedef struct cc_config_mcp {
 typedef struct cc_config {
     char *provider;              /**< LLM 后端类型：
                                   *   "openai" = OpenAI 兼容 API
+                                  *   "qwen" = DashScope/Qwen OpenAI 兼容 API
                                   *   "anthropic" = Anthropic Messages API
                                   *   "ollama" = 本地 Ollama 服务
                                   *   默认值：按编译 profile 选择首个可用 provider */
@@ -164,6 +165,7 @@ typedef struct cc_config {
                                   *   Anthropic: "https://api.anthropic.com"
                                   *   默认值：按 provider 选择 */
     char *api_key;               /**< API 密钥（远程 provider 需要，Ollama 可为 NULL）。
+                                  *   也可由 config.json 的 model.api_key_env 指向环境变量。
                                   *   默认值：NULL */
     char *storage_type;          /**< 存储后端类型："json" 或 "sqlite"。
                                   *   默认值："json" */

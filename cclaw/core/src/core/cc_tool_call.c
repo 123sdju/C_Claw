@@ -287,7 +287,25 @@ void cc_tool_result_destroy(cc_tool_result_t *result)
     free(result->content);
     free(result->error);
     free(result->metadata_json);
+    free(result->artifacts_json);
     free(result);
+}
+
+cc_result_t cc_tool_result_set_artifacts_json(
+    cc_tool_result_t *result,
+    const char *artifacts_json
+)
+{
+    if (!result) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null tool result");
+    }
+    char *copy = artifacts_json ? strdup(artifacts_json) : NULL;
+    if (artifacts_json && !copy) {
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to copy artifacts");
+    }
+    free(result->artifacts_json);
+    result->artifacts_json = copy;
+    return cc_result_ok();
 }
 
 /*

@@ -16,7 +16,7 @@
 /**
  * cc_app_default_features — 返回当前应用/profile 编译进来的能力表。
  *
- * 这个函数由具体应用层实现，例如 POSIX CLI、Windows CLI 或 ESP32 QEMU。
+ * 这个函数由具体应用层实现，例如 POSIX CLI 或 STM32MP135 board。
  * 核心 runtime_builder 只依赖这张表来发现可用 provider、tool、store、
  * sandbox 和插件加载器，从而避免核心层直接引用平台实现。
  *

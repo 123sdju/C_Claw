@@ -51,6 +51,7 @@ set(C_CLAW_ADAPTER_TESTS
     test_memory_store_concurrent
     test_tool_executor_policy_approval
     test_message_envelope_serialization
+    test_multimodal_content_parts
 )
 
 foreach(test_name IN LISTS C_CLAW_ADAPTER_TESTS)

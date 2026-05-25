@@ -268,6 +268,7 @@ void cc_message_cleanup(cc_message_t *message)
     free(message->id);
     free(message->session_id);
     free(message->content);
+    free(message->content_parts_json);
     free(message->tool_calls_json);
     free(message->reasoning_content);
     free(message->tool_call_id);
@@ -290,6 +291,7 @@ cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst)
     dst->session_id = cc_strdup(src->session_id);
     dst->role = src->role;
     dst->content = cc_strdup(src->content);
+    dst->content_parts_json = cc_strdup(src->content_parts_json);
     dst->tool_calls_json = cc_strdup(src->tool_calls_json);
     dst->reasoning_content = cc_strdup(src->reasoning_content);
     dst->tool_call_id = cc_strdup(src->tool_call_id);
@@ -297,6 +299,7 @@ cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst)
     if ((src->id && !dst->id) ||
         (src->session_id && !dst->session_id) ||
         (src->content && !dst->content) ||
+        (src->content_parts_json && !dst->content_parts_json) ||
         (src->tool_calls_json && !dst->tool_calls_json) ||
         (src->reasoning_content && !dst->reasoning_content) ||
         (src->tool_call_id && !dst->tool_call_id) ||
@@ -323,6 +326,24 @@ cc_result_t cc_message_set_tool_calls_json(cc_message_t *message, const char *to
     }
     free(message->tool_calls_json);
     message->tool_calls_json = copy;
+    return cc_result_ok();
+}
+
+/**
+ * cc_message_set_content_parts_json — 保存多模态 content parts 原始 JSON。
+ *
+ * 该字段与 content 并存：content 仍是可读文本回退，content_parts_json 用于
+ * provider 生成原生多模态请求。失败时保留旧值，避免半更新进入 store。
+ */
+cc_result_t cc_message_set_content_parts_json(cc_message_t *message, const char *content_parts_json)
+{
+    if (!message) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null message");
+    char *copy = cc_strdup(content_parts_json);
+    if (content_parts_json && !copy) {
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to copy content parts");
+    }
+    free(message->content_parts_json);
+    message->content_parts_json = copy;
     return cc_result_ok();
 }
 

@@ -20,9 +20,8 @@
  * Acting）对话-工具调用流水线。它是 cc_agent_runtime.h 的唯一实现。
  *
  * 上游调用方：
- *   - POSIX/Windows CLI gateway —— 通过 cc_agent_runtime_handle_message 或
+ *   - POSIX CLI 或板级 gateway —— 通过 cc_agent_runtime_handle_message 或
  *     cc_agent_runtime_handle_message_stream 发送用户输入
- *   - ESP32 QEMU 示例入口 —— 在设备 profile 中复用同一个 runtime 编排逻辑
  *   - 测试代码 —— 注入 mock LLM/store/tool 来验证主循环行为
  *
  * 下游依赖模块：
@@ -120,6 +119,7 @@
 #include "cc_agent_runtime_internal.h"
 #include "cc/app/cc_context_builder.h"
 #include "cc/app/cc_tool_executor.h"
+#include "cc/core/cc_media.h"
 #include "cc/util/cc_string_builder.h"
 #include "cc/util/cc_json.h"
 #include "cc/ports/cc_event_bus.h"
@@ -470,6 +470,67 @@ cc_result_t cc_agent_runtime_store_assistant_text(
     return rc;
 }
 
+static cc_result_t cc_agent_runtime_append_artifact_observation(
+    cc_agent_runtime_t *runtime,
+    const char *session_id,
+    const cc_tool_result_t *tool_result
+)
+{
+    if (!runtime || !session_id || !tool_result ||
+        !tool_result->artifacts_json || !tool_result->artifacts_json[0]) {
+        return cc_result_ok();
+    }
+    if (!runtime->store.vtable || !runtime->store.vtable->append_message) {
+        return cc_result_ok();
+    }
+
+    char *summary = NULL;
+    cc_result_t rc = cc_media_artifacts_summarize(tool_result->artifacts_json, &summary);
+    if (rc.code != CC_OK) return rc;
+
+    cc_string_builder_t sb;
+    rc = cc_string_builder_init(&sb);
+    if (rc.code == CC_OK) {
+        rc = cc_string_builder_append(&sb, "Tool produced multimodal artifacts.\n");
+    }
+    if (rc.code == CC_OK && summary && summary[0]) {
+        rc = cc_string_builder_append(&sb, summary);
+    }
+    free(summary);
+    if (rc.code != CC_OK) {
+        cc_string_builder_deinit(&sb);
+        return rc;
+    }
+
+    char *content = cc_string_builder_take(&sb);
+    if (!content) {
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to build artifact observation");
+    }
+
+    char *parts_json = NULL;
+    rc = cc_content_parts_build_text_image_audio(
+        content, tool_result->artifacts_json, &parts_json);
+    if (rc.code != CC_OK) {
+        free(content);
+        return rc;
+    }
+
+    cc_message_t *msg = NULL;
+    char *id = generate_id();
+    rc = cc_message_create(id, session_id, CC_ROLE_USER, content, NULL, &msg);
+    free(id);
+    free(content);
+    if (rc.code == CC_OK) {
+        rc = cc_message_set_content_parts_json(msg, parts_json);
+    }
+    free(parts_json);
+    if (rc.code == CC_OK) {
+        rc = runtime->store.vtable->append_message(runtime->store.self, msg);
+    }
+    cc_message_destroy(msg);
+    return rc;
+}
+
 /**
  * cc_agent_runtime_execute_tool_step — 参与工具注册、工具调用或工具结果写回流程。
  *
@@ -527,6 +588,7 @@ cc_result_t cc_agent_runtime_execute_tool_step(
         free(tool_result.content);
         free(tool_result.error);
         free(tool_result.metadata_json);
+        free(tool_result.artifacts_json);
         return rc;
     }
 
@@ -548,9 +610,14 @@ cc_result_t cc_agent_runtime_execute_tool_step(
         runtime->store.vtable->append_message(runtime->store.self, tool_msg);
     }
     cc_message_destroy(tool_msg);
+    if (rc.code == CC_OK) {
+        rc = cc_agent_runtime_append_artifact_observation(
+            runtime, session_id, &tool_result);
+    }
     free(tool_result.content);
     free(tool_result.error);
     free(tool_result.metadata_json);
+    free(tool_result.artifacts_json);
     return rc.code == CC_OK ? cc_result_ok() : rc;
 }
 
@@ -732,6 +799,16 @@ static void execute_pending_tool(stream_loop_ctx_t *ctx)
         return;
     }
 
+    if (ctx->runtime->store.vtable && ctx->runtime->store.vtable->append_tool_call) {
+        ctx->runtime->store.vtable->append_tool_call(
+            ctx->runtime->store.self, ctx->session_id, &call);
+    }
+    if (ctx->runtime->store.vtable && ctx->runtime->store.vtable->append_tool_result) {
+        ctx->runtime->store.vtable->append_tool_result(
+            ctx->runtime->store.self, ctx->session_id,
+            ctx->cur_tool_id ? ctx->cur_tool_id : "", &tres);
+    }
+
     char *tool_result_content = NULL;
     if (tres.ok) {
         cc_json_value_t *res_json = cc_json_create_object();
@@ -761,6 +838,7 @@ static void execute_pending_tool(stream_loop_ctx_t *ctx)
         ctx->runtime->store.vtable->append_message(ctx->runtime->store.self, tool_msg);
     }
     cc_message_destroy(tool_msg);
+    cc_agent_runtime_append_artifact_observation(ctx->runtime, ctx->session_id, &tres);
 
     /* 发布 stream.tool.end 事件 */
     cc_event_bus_t *bus = ctx->runtime->event_bus;
@@ -791,6 +869,7 @@ static void execute_pending_tool(stream_loop_ctx_t *ctx)
     free(tres.content);
     free(tres.error);
     free(tres.metadata_json);
+    free(tres.artifacts_json);
 
     /* 清除挂起工具状态 */
     free(ctx->cur_tool_name);

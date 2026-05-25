@@ -11,6 +11,7 @@
 #include "cc/ports/cc_platform.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int double_eq(double a, double b)
@@ -18,6 +19,24 @@ static int double_eq(double a, double b)
     double d = a - b;
     if (d < 0.0) d = -d;
     return d < 0.000001;
+}
+
+static void set_test_env(const char *key, const char *value)
+{
+#if defined(_WIN32)
+    _putenv_s(key, value);
+#else
+    setenv(key, value, 1);
+#endif
+}
+
+static void unset_test_env(const char *key)
+{
+#if defined(_WIN32)
+    _putenv_s(key, "");
+#else
+    unsetenv(key);
+#endif
 }
 
 /**
@@ -121,6 +140,29 @@ int main(void)
     cc_result_free(&rc);
 
     if (config.thinking_mode != 1 || config.stream_mode != 1) {
+        cc_config_destroy(&config);
+        return 1;
+    }
+    cc_config_destroy(&config);
+
+    set_test_env("CCLAW_TEST_API_KEY", "env-secret");
+    f = fopen(path, "wb");
+    if (!f) return 1;
+    fputs("{\"model\":{\"api_key\":\"file-secret\",\"api_key_env\":\"CCLAW_TEST_API_KEY\"}}", f);
+    fclose(f);
+
+    memset(&config, 0, sizeof(config));
+    rc = cc_config_load(path, &config);
+    remove(path);
+    unset_test_env("CCLAW_TEST_API_KEY");
+    if (rc.code != CC_OK) {
+        cc_result_free(&rc);
+        cc_config_destroy(&config);
+        return 1;
+    }
+    cc_result_free(&rc);
+
+    if (!config.api_key || strcmp(config.api_key, "env-secret") != 0) {
         cc_config_destroy(&config);
         return 1;
     }

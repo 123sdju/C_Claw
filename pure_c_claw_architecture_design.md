@@ -35,8 +35,7 @@ cclaw/
 
 apps/
   posix/cli/   POSIX CLI 入口、桌面 shell/plugin/sandbox 工具和配置
-  windows/cli/ Windows CLI 入口、桌面 shell/plugin/sandbox 工具和配置
-  esp32/       ESP32 board app、硬件工具和 ESP-IDF 工程
+  posix/stm32mp135_board/ STM32MP135 board 入口、桌面插件能力和板级工具
 ```
 
 ## 3. 分层规则
@@ -115,9 +114,8 @@ user input
 
 ```bash
 cmake --preset posix-cli
-cmake --preset windows-cli   # Windows 主机或已配置 Windows 交叉工具链
-idf.py set-target esp32
-./scripts/esp32_s3_qemu.sh build
+cmake --preset core-minimal
+cmake --preset stm32mp135-board
 ```
 
 关键开关：

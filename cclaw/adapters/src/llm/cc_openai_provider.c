@@ -152,6 +152,158 @@ static const char *openai_name(void *self)
     return "openai";
 }
 
+static cc_json_value_t *json_clone_value(const cc_json_value_t *value)
+{
+    char *json = cc_json_stringify_unformatted(value);
+    if (!json) return NULL;
+    cc_json_value_t *copy = NULL;
+    cc_json_parse(json, &copy);
+    free(json);
+    return copy;
+}
+
+static const char *part_mime_or_default(const cc_json_value_t *part, const char *fallback)
+{
+    const char *mime = cc_json_string_value(cc_json_object_get(part, "mime"));
+    return (mime && *mime) ? mime : fallback;
+}
+
+static const char *audio_format_from_mime(const char *mime)
+{
+    if (!mime) return "wav";
+    if (strstr(mime, "mp3") || strstr(mime, "mpeg")) return "mp3";
+    if (strstr(mime, "wav")) return "wav";
+    return "wav";
+}
+
+static char *describe_unsupported_part(const char *provider, const cc_json_value_t *part)
+{
+    const char *type = cc_json_string_value(cc_json_object_get(part, "type"));
+    const char *id = cc_json_string_value(cc_json_object_get(part, "id"));
+    const char *mime = cc_json_string_value(cc_json_object_get(part, "mime"));
+    const char *path = cc_json_string_value(cc_json_object_get(part, "path"));
+    double bytes = cc_json_number_value(cc_json_object_get(part, "bytes"));
+    double width = cc_json_number_value(cc_json_object_get(part, "width"));
+    double height = cc_json_number_value(cc_json_object_get(part, "height"));
+    double duration_ms = cc_json_number_value(cc_json_object_get(part, "duration_ms"));
+
+    cc_string_builder_t sb;
+    if (cc_string_builder_init(&sb).code != CC_OK) return strdup("[multimodal artifact]");
+    cc_string_builder_appendf(&sb, "[%s multimodal fallback: type=%s",
+        provider ? provider : "provider", type ? type : "file");
+    if (id && *id) cc_string_builder_appendf(&sb, " id=%s", id);
+    if (mime && *mime) cc_string_builder_appendf(&sb, " mime=%s", mime);
+    if (path && *path) cc_string_builder_appendf(&sb, " path=%s", path);
+    if (bytes > 0) cc_string_builder_appendf(&sb, " bytes=%.0f", bytes);
+    if (width > 0 && height > 0) cc_string_builder_appendf(&sb, " size=%.0fx%.0f", width, height);
+    if (duration_ms > 0) cc_string_builder_appendf(&sb, " duration_ms=%.0f", duration_ms);
+    cc_string_builder_append(&sb, " multimodal_fallback=true]");
+    return cc_string_builder_take(&sb);
+}
+
+static void openai_append_text_part(cc_json_value_t *arr, const char *text)
+{
+    cc_json_value_t *part = cc_json_create_object();
+    cc_json_object_set(part, "type", cc_json_create_string("text"));
+    cc_json_object_set(part, "text", cc_json_create_string(text ? text : ""));
+    cc_json_array_append(arr, part);
+}
+
+static cc_json_value_t *openai_transform_content_parts(const cc_json_value_t *parts)
+{
+    cc_json_value_t *out = cc_json_create_array();
+    int count = cc_json_array_size(parts);
+    for (int i = 0; i < count; ++i) {
+        cc_json_value_t *part = cc_json_array_get(parts, i);
+        const char *type = cc_json_string_value(cc_json_object_get(part, "type"));
+        if (!type) continue;
+
+        if (strcmp(type, "text") == 0) {
+            openai_append_text_part(out,
+                cc_json_string_value(cc_json_object_get(part, "text")));
+        } else if (strcmp(type, "image") == 0) {
+            const char *data = cc_json_string_value(cc_json_object_get(part, "data_base64"));
+            if (data && *data) {
+                const char *mime = part_mime_or_default(part, "image/png");
+                cc_string_builder_t url;
+                cc_string_builder_init(&url);
+                cc_string_builder_appendf(&url, "data:%s;base64,%s", mime, data);
+                char *data_url = cc_string_builder_take(&url);
+                cc_json_value_t *image_part = cc_json_create_object();
+                cc_json_object_set(image_part, "type", cc_json_create_string("image_url"));
+                cc_json_value_t *image_url = cc_json_create_object();
+                cc_json_object_set(image_url, "url", cc_json_create_string(data_url ? data_url : ""));
+                cc_json_object_set(image_part, "image_url", image_url);
+                cc_json_array_append(out, image_part);
+                free(data_url);
+            } else {
+                char *fallback = describe_unsupported_part("openai", part);
+                openai_append_text_part(out, fallback);
+                free(fallback);
+            }
+        } else if (strcmp(type, "audio") == 0) {
+            const char *data = cc_json_string_value(cc_json_object_get(part, "data_base64"));
+            if (data && *data) {
+                const char *mime = part_mime_or_default(part, "audio/wav");
+                cc_json_value_t *audio_part = cc_json_create_object();
+                cc_json_object_set(audio_part, "type", cc_json_create_string("input_audio"));
+                cc_json_value_t *input_audio = cc_json_create_object();
+                cc_json_object_set(input_audio, "data", cc_json_create_string(data));
+                cc_json_object_set(input_audio, "format",
+                    cc_json_create_string(audio_format_from_mime(mime)));
+                cc_json_object_set(audio_part, "input_audio", input_audio);
+                cc_json_array_append(out, audio_part);
+            } else {
+                char *fallback = describe_unsupported_part("openai", part);
+                openai_append_text_part(out, fallback);
+                free(fallback);
+            }
+        } else {
+            char *fallback = describe_unsupported_part("openai", part);
+            openai_append_text_part(out, fallback);
+            free(fallback);
+        }
+    }
+    return out;
+}
+
+static cc_json_value_t *openai_transform_message(const cc_json_value_t *msg)
+{
+    cc_json_value_t *out = cc_json_create_object();
+    const char *role = cc_json_string_value(cc_json_object_get(msg, "role"));
+    cc_json_object_set(out, "role", cc_json_create_string(role ? role : "user"));
+
+    cc_json_value_t *content = cc_json_object_get(msg, "content");
+    if (content && cc_json_is_array(content)) {
+        cc_json_object_set(out, "content", openai_transform_content_parts(content));
+    } else if (content) {
+        cc_json_value_t *copy = json_clone_value(content);
+        if (copy) cc_json_object_set(out, "content", copy);
+    }
+
+    const char *tool_call_id = cc_json_string_value(cc_json_object_get(msg, "tool_call_id"));
+    if (tool_call_id) cc_json_object_set(out, "tool_call_id", cc_json_create_string(tool_call_id));
+    const char *reasoning = cc_json_string_value(cc_json_object_get(msg, "reasoning_content"));
+    if (reasoning) cc_json_object_set(out, "reasoning_content", cc_json_create_string(reasoning));
+    cc_json_value_t *tool_calls = cc_json_object_get(msg, "tool_calls");
+    if (tool_calls) {
+        cc_json_value_t *copy = json_clone_value(tool_calls);
+        if (copy) cc_json_object_set(out, "tool_calls", copy);
+    }
+    return out;
+}
+
+static cc_json_value_t *openai_transform_messages(cc_json_value_t *messages)
+{
+    if (!messages || !cc_json_is_array(messages)) return cc_json_create_array();
+    cc_json_value_t *out = cc_json_create_array();
+    int count = cc_json_array_size(messages);
+    for (int i = 0; i < count; ++i) {
+        cc_json_array_append(out, openai_transform_message(cc_json_array_get(messages, i)));
+    }
+    return out;
+}
+
 /**
  * openai_build_request — 把统一 chat request 转换为该 provider 的 HTTP URL、header 和 JSON body。
  *
@@ -207,7 +359,9 @@ static cc_result_t openai_build_request(
     cc_json_value_t *messages = NULL;
     rc = cc_json_parse(request->messages_json, &messages);
     if (rc.code == CC_OK && messages) {
-        cc_json_object_set(body, "messages", messages);
+        cc_json_value_t *converted = openai_transform_messages(messages);
+        cc_json_destroy(messages);
+        cc_json_object_set(body, "messages", converted);
     } else {
         cc_result_free(&rc);
         cc_json_object_set(body, "messages", cc_json_create_array());

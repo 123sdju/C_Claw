@@ -154,6 +154,7 @@ static const char *init_sql =
     "  session_id TEXT NOT NULL,"
     "  role TEXT NOT NULL,"
     "  content TEXT,"
+    "  content_parts_json TEXT,"
     "  tool_calls_json TEXT,"
     "  reasoning_content TEXT,"
     "  tool_call_id TEXT,"
@@ -177,12 +178,39 @@ static const char *init_sql =
     "  content TEXT,"
     "  error TEXT,"
     "  metadata_json TEXT,"
+    "  artifacts_json TEXT,"
     "  created_at TEXT,"
     "  FOREIGN KEY(tool_call_id) REFERENCES tool_calls(id)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);"
     "CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, created_at);"
     "CREATE INDEX IF NOT EXISTS idx_tool_results_tool_call ON tool_results(tool_call_id);";
+
+static cc_result_t sqlite_exec_compatible_alter(sqlite3 *db, const char *sql)
+{
+    char *errmsg = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &errmsg);
+    if (rc == SQLITE_OK) {
+        return cc_result_ok();
+    }
+    if (errmsg && strstr(errmsg, "duplicate column name")) {
+        sqlite3_free(errmsg);
+        return cc_result_ok();
+    }
+    cc_result_t result = cc_result_error(CC_ERR_STORAGE,
+        errmsg ? errmsg : sqlite3_errmsg(db));
+    sqlite3_free(errmsg);
+    return result;
+}
+
+static cc_result_t sqlite_run_compat_migrations(sqlite3 *db)
+{
+    cc_result_t rc = sqlite_exec_compatible_alter(
+        db, "ALTER TABLE messages ADD COLUMN content_parts_json TEXT");
+    if (rc.code != CC_OK) return rc;
+    return sqlite_exec_compatible_alter(
+        db, "ALTER TABLE tool_results ADD COLUMN artifacts_json TEXT");
+}
 
 /**
  * @brief vtable 函数：创建新会话
@@ -266,8 +294,8 @@ static cc_result_t sqlite_append_message(
 
     cc_mutex_lock(store->mutex);
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "INSERT INTO messages (id, session_id, role, content, tool_calls_json, reasoning_content, tool_call_id, created_at) "
-                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+    const char *sql = "INSERT INTO messages (id, session_id, role, content, content_parts_json, tool_calls_json, reasoning_content, tool_call_id, created_at) "
+                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
     int rc = sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         cc_result_t result = cc_result_error(CC_ERR_STORAGE, sqlite3_errmsg(store->db));
@@ -280,10 +308,11 @@ static cc_result_t sqlite_append_message(
     sqlite3_bind_text(stmt, 2, message->session_id ? message->session_id : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, role_str, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, message->content ? message->content : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, message->tool_calls_json ? message->tool_calls_json : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 6, message->reasoning_content ? message->reasoning_content : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 7, message->tool_call_id ? message->tool_call_id : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 8, now, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, message->content_parts_json ? message->content_parts_json : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, message->tool_calls_json ? message->tool_calls_json : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 7, message->reasoning_content ? message->reasoning_content : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 8, message->tool_call_id ? message->tool_call_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 9, now, -1, SQLITE_STATIC);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -345,7 +374,7 @@ static cc_result_t sqlite_load_messages(
 
     cc_mutex_lock(store->mutex);
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "SELECT id, session_id, role, content, tool_calls_json, reasoning_content, tool_call_id, created_at "
+    const char *sql = "SELECT id, session_id, role, content, content_parts_json, tool_calls_json, reasoning_content, tool_call_id, created_at "
                       "FROM messages WHERE session_id = ?1 "
                       "ORDER BY created_at ASC LIMIT ?2";
     int rc = sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL);
@@ -390,13 +419,15 @@ static cc_result_t sqlite_load_messages(
         const char *sid = (const char *)sqlite3_column_text(stmt, 1);
         const char *role_str = (const char *)sqlite3_column_text(stmt, 2);
         const char *content = (const char *)sqlite3_column_text(stmt, 3);
-        const char *tcj = (const char *)sqlite3_column_text(stmt, 4);
-        const char *reasoning = (const char *)sqlite3_column_text(stmt, 5);
-        const char *tci = (const char *)sqlite3_column_text(stmt, 6);
+        const char *cpj = (const char *)sqlite3_column_text(stmt, 4);
+        const char *tcj = (const char *)sqlite3_column_text(stmt, 5);
+        const char *reasoning = (const char *)sqlite3_column_text(stmt, 6);
+        const char *tci = (const char *)sqlite3_column_text(stmt, 7);
 
         msg->id = id ? strdup(id) : NULL;
         msg->session_id = sid ? strdup(sid) : NULL;
         msg->content = content ? strdup(content) : NULL;
+        msg->content_parts_json = (cpj && cpj[0]) ? strdup(cpj) : NULL;
         msg->tool_calls_json = (tcj && tcj[0]) ? strdup(tcj) : NULL;
         msg->reasoning_content = (reasoning && reasoning[0]) ? strdup(reasoning) : NULL;
         msg->tool_call_id = (tci && tci[0]) ? strdup(tci) : NULL;
@@ -506,8 +537,8 @@ static cc_result_t sqlite_append_tool_result(
 
     cc_mutex_lock(store->mutex);
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "INSERT INTO tool_results (id, tool_call_id, ok, content, error, metadata_json, created_at) "
-                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+    const char *sql = "INSERT INTO tool_results (id, tool_call_id, ok, content, error, metadata_json, artifacts_json, created_at) "
+                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
     int rc = sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         cc_result_t result = cc_result_error(CC_ERR_STORAGE, sqlite3_errmsg(store->db));
@@ -522,7 +553,8 @@ static cc_result_t sqlite_append_tool_result(
     sqlite3_bind_text(stmt, 4, result->content ? result->content : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 5, result->error ? result->error : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 6, result->metadata_json ? result->metadata_json : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 7, now, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 7, result->artifacts_json ? result->artifacts_json : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 8, now, -1, SQLITE_STATIC);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -792,6 +824,14 @@ cc_result_t cc_sqlite_session_store_create(const char *db_path, cc_session_store
         cc_mutex_destroy(self->mutex);
         free(self);
         return result;
+    }
+
+    cc_result_t mig_rc = sqlite_run_compat_migrations(self->db);
+    if (mig_rc.code != CC_OK) {
+        sqlite3_close(self->db);
+        cc_mutex_destroy(self->mutex);
+        free(self);
+        return mig_rc;
     }
 
     out_store->self = self;

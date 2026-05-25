@@ -413,8 +413,10 @@ static void destroy_mcp(void *state)
 static const cc_llm_provider_descriptor_t llm_providers[] = {
 #if CC_LLM_OPENAI
     {"openai", CC_LLM_OPENAI, create_openai},
+    {"qwen", CC_LLM_OPENAI, create_openai},
 #else
     {"openai", 0, NULL},
+    {"qwen", 0, NULL},
 #endif
 #if CC_LLM_OLLAMA
     {"ollama", CC_LLM_OLLAMA, create_ollama},

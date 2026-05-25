@@ -75,6 +75,7 @@ typedef struct {
     char *content;
     char *error;
     char *metadata_json;
+    char *artifacts_json;
 } cc_memory_tool_result_record_t;
 
 /**
@@ -142,6 +143,7 @@ static void free_tool_result_record(cc_memory_tool_result_record_t *record)
     free(record->content);
     free(record->error);
     free(record->metadata_json);
+    free(record->artifacts_json);
     memset(record, 0, sizeof(*record));
 }
 
@@ -426,9 +428,11 @@ static cc_result_t memory_append_tool_result(
     record.content = dup_required_string(result && result->content ? result->content : "");
     record.error = dup_required_string(result && result->error ? result->error : "");
     record.metadata_json = dup_required_string(result && result->metadata_json ? result->metadata_json : "");
+    record.artifacts_json = dup_required_string(result && result->artifacts_json ? result->artifacts_json : "");
 
     if (!record.id || !record.session_id || !record.tool_call_id ||
-        !record.content || !record.error || !record.metadata_json) {
+        !record.content || !record.error || !record.metadata_json ||
+        !record.artifacts_json) {
         free_tool_result_record(&record);
         cc_mutex_unlock(store->mutex);
         return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to copy tool result record");

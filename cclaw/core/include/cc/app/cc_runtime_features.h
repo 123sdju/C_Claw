@@ -230,7 +230,7 @@ typedef void (*cc_runtime_mcp_destroy_fn)(void *state);
  * 描述符数组通常是应用层的静态常量表，runtime_builder 只借用其中的字符串和函数指针。
  */
 typedef struct cc_llm_provider_descriptor {
-    /** 配置文件中的 provider 名称，例如 "openai"、"anthropic"、"ollama"。 */
+    /** 配置文件中的 provider 名称，例如 "qwen"、"openai"、"anthropic"、"ollama"。 */
     const char *name;
     /** 编译期开关结果；0 表示该 provider 在当前 profile 中不可用。 */
     int compiled;
@@ -258,7 +258,7 @@ typedef struct cc_tool_descriptor {
  * cc_runtime_feature_set — 应用 profile 的能力描述表，runtime_builder 通过它创建 LLM、store、sandbox 和 tools。
  *
  * 这是应用层和核心 runtime_builder 之间的组合边界：核心层不直接知道
- * POSIX/Windows/ESP32 编译了哪些 provider、tool 或插件能力，只读取这张表。
+ * 具体 app/profile 编译了哪些 provider、tool 或插件能力，只读取这张表。
  */
 typedef struct cc_runtime_feature_set {
     /** 静态 LLM provider 描述符数组；长度由 llm_provider_count 给出。 */

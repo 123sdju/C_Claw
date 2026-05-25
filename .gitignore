@@ -1,0 +1,5 @@
+/build/
+
+# Local runtime configuration may contain provider API keys.
+/apps/posix/cli/config/config.json
+/apps/posix/stm32mp135_board/config/config.json

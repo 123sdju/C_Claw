@@ -347,6 +347,17 @@ static void add_message_to_json_array(
             }
         }
     }
+    else if (msg->content_parts_json && msg->content_parts_json[0]) {
+        cc_json_value_t *parts = NULL;
+        cc_result_t pr = cc_json_parse(msg->content_parts_json, &parts);
+        if (pr.code == CC_OK && parts) {
+            cc_json_object_set(jm, "content", parts);
+        } else {
+            if (parts) cc_json_destroy(parts);
+            cc_json_object_set(jm, "content",
+                cc_json_create_string(msg->content ? msg->content : ""));
+        }
+    }
     /*
      * 分支 2: Assistant 的 reasoning_content 消息
      * 需要输出: {"role":"assistant","content":"实际文本","reasoning_content":"..."}

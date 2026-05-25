@@ -155,7 +155,7 @@ flowchart TD
 - 上下文过长时由 `cc_context_builder` 做 token 截断和可选摘要压缩。
 - 多 agent 入口走 `cc_agent_manager_t` 和 `cc_run_queue_t`。队列是 core SDK
   的真实 job queue：SDK 负责 `submit/collect/interrupt`、同 session 串行、
-  lane 并发和 cancel token 传播；POSIX/Windows CLI 只调用这些接口，不再各自
+  lane 并发和 cancel token 传播；具体 app 只调用这些接口，不再各自
   实现调度语义。
 - `cc_cancel_token_t` 是协作式取消边界。core 只暴露“是否已取消”的线程安全查询，
   工具、plugin worker、MCP transport 在自己的安全点释放平台资源。tool pool
@@ -181,7 +181,7 @@ CMake 提供目标平台和功能开关：
 ```bash
 cmake --preset posix-cli
 cmake --preset core-minimal
-./scripts/esp32_s3_qemu.sh qemu
+cmake --preset stm32mp135-board
 ```
 
 `CC_PROFILE` 负责选择 app/board、目标平台、默认路径和能力集合。
@@ -191,10 +191,8 @@ cmake --preset core-minimal
 | Profile | 构建目录 | 产物入口 |
 |---------|----------|----------|
 | `posix-cli` | `build/app/posix/cli` | `bin/c-claw` |
-| `windows-cli` | `build/app/windows/cli` | `bin/c-claw.exe` 或 `bin/c-claw` |
 | `core-minimal` | `build/sdk/core-minimal` | 仅 SDK/测试目标 |
-| ESP32-S3 QEMU | `build/app/esp32/esp32_s3_qemu` | ESP-IDF firmware 和 QEMU 镜像 |
-| STM32H743I-EVAL Renode | `build/app/stm32/stm32h743i_eval_renode` | Cortex-M7 FreeRTOS ELF 和 Renode UART log |
+| `stm32mp135-board` | `build/app/posix/stm32mp135_board` | `bin/c-claw-board` |
 
 源码目录只表达层次：`cclaw/` 是 SDK，`apps/` 是产品或板级组合；build
 目录用同样的层次镜像这些入口。
@@ -206,7 +204,7 @@ cmake --preset core-minimal
 | POSIX | `100` | Linux、macOS、BSD 等桌面/服务器环境 |
 | Windows | `200` | Win32 / MSVC / MinGW |
 | ESP32 | `300` | FreeRTOS / ESP-IDF 设备 profile |
-| FreeRTOS | `400` | 裸机/RTOS 板级 profile，例如 STM32H743 Renode bring-up |
+| FreeRTOS | `400` | 裸机/RTOS 板级 profile |
 
 功能开关会生成同名编译宏：
 
@@ -283,10 +281,10 @@ HTTP client。
 | 长期记忆 | `CC_HAS_MEMORY` | `memory` |
 | HTTP 请求 | `CC_TOOL_HTTP_REQUEST` | `http.request` |
 | 插件工具 | `CC_TOOL_PLUGIN` | 由 `config.json.plugins.entries` 决定 |
-| Hardware IO | app feature set | 例如 ESP32-S3 QEMU 的 `gpio` |
+| Hardware IO | app feature set | 例如 STM32MP135 board 的 camera/audio/CAN/ADC |
 
 工具实现按依赖边界分层：通用工具在 `cclaw/adapters/src/tools/common`，桌面应用工具在
-`apps/<platform>/cli/src/tools`，硬件工具在 `apps/<mcu>/<board>/main/tools`。
+`apps/<platform>/cli/src/tools`，硬件工具在 `apps/posix/<board>/src/board`。
 `cclaw/platforms/*` 只提供 port 适配，不拥有 agent tool。
 
 工具执行前统一进入 core SDK 的 `cc_tool_executor_pool_t`。pool 只负责 lane
@@ -443,8 +441,7 @@ CLI gateway 用这些事件渲染流式输出。
 - 禁用 SQLite 时默认 storage 是 `json`。
 - 禁用 memory 时默认 memory backend 是 `noop`。
 - POSIX CLI 默认数据和工作区在 `build/app/posix/cli/runtime/...`。
-- Windows CLI 默认数据和工作区在 `build/app/windows/cli/runtime/...`。
-- ESP32 QEMU 默认数据和工作区在 `/sdcard/cclaw/...`。
+- STM32MP135 board 默认数据和工作区在 `build/app/posix/stm32mp135_board/runtime/...`。
 
 详见 [../../apps/posix/cli/docs/config.md](../../apps/posix/cli/docs/config.md)。
 
@@ -472,10 +469,10 @@ CLI gateway 用这些事件渲染流式输出。
 3. 在根 CMake 中添加 `CC_TARGET_PLATFORM` 映射和 platform 子目录。
 4. 新增 app/board feature set，注册该设备实际编入的 LLM、工具、存储和 gateway 能力。
 5. 新增 `cclaw/profiles/<device-or-app>.cmake` 关闭设备不支持的功能。
-6. 新增 gateway 或复用已有 gateway，具体固件工程放在 `apps/<mcu>/<board>`。
+6. 新增 gateway 或复用已有 gateway，具体 app 工程放在 `apps/<platform>/<app>`。
 
 ## 14. 当前限制
 
 - POSIX/Windows HTTP client 使用平台私有 curl 实现；ESP32 使用 ESP-IDF HTTP client。
-- ESP32 QEMU board 已提供 smoke test 和 UART chat；真实硬件需要单独的 SDMMC/SDSPI board mount。
+- STM32MP135 board 首版运行在 Linux/POSIX 用户态，硬件访问依赖目标板暴露的 V4L2、ALSA、SocketCAN 和 IIO 节点。
 - 插件系统依赖外部进程和管道，不适用于无进程模型设备。

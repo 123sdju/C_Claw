@@ -16,11 +16,32 @@ if(CC_NEEDS_HTTP_CLIENT)
     if(CURL_FOUND)
         set(CC_PLATFORM_CURL_LIBRARIES CURL::libcurl)
     else()
-        find_library(CC_PLATFORM_CURL_LIBRARY NAMES curl libcurl libcurl.so.4)
-        find_path(CC_PLATFORM_CURL_INCLUDE_DIR NAMES curl/curl.h
-            PATHS "${CMAKE_CURRENT_LIST_DIR}/vendor/curl/include")
+        if(CMAKE_CROSSCOMPILING)
+            find_library(CC_PLATFORM_CURL_LIBRARY NAMES curl libcurl libcurl.so.4
+                HINTS "/home/sdju123/linux_study/tool_lib/curl/install/lib"
+                NO_CMAKE_FIND_ROOT_PATH)
+            find_path(CC_PLATFORM_CURL_INCLUDE_DIR NAMES curl/curl.h
+                HINTS "/home/sdju123/linux_study/tool_lib/curl/install/include"
+                      "/home/sdju123/linux_study/tool_lib/curl/include"
+                NO_CMAKE_FIND_ROOT_PATH)
+        else()
+            find_library(CC_PLATFORM_CURL_LIBRARY NAMES curl libcurl libcurl.so.4)
+            find_path(CC_PLATFORM_CURL_INCLUDE_DIR NAMES curl/curl.h
+                PATHS "${CMAKE_CURRENT_LIST_DIR}/vendor/curl/include")
+        endif()
         if(CC_PLATFORM_CURL_LIBRARY AND CC_PLATFORM_CURL_INCLUDE_DIR)
             set(CC_PLATFORM_CURL_LIBRARIES "${CC_PLATFORM_CURL_LIBRARY}")
+            if(CMAKE_CROSSCOMPILING)
+                foreach(CC_PLATFORM_CURL_DEP
+                    "/home/sdju123/linux_study/tool_lib/openssl/libssl.so"
+                    "/home/sdju123/linux_study/tool_lib/openssl/libcrypto.so"
+                    "/home/sdju123/linux_study/tool_lib/zlib-lib/lib/libz.so"
+                )
+                    if(EXISTS "${CC_PLATFORM_CURL_DEP}")
+                        list(APPEND CC_PLATFORM_CURL_LIBRARIES "${CC_PLATFORM_CURL_DEP}")
+                    endif()
+                endforeach()
+            endif()
         endif()
     endif()
 

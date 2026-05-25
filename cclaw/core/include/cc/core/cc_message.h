@@ -68,6 +68,8 @@ typedef struct cc_message {
                             *   - user/assistant: 自然语言文本
                             *   - tool: 工具执行的输出结果
                             *   - system: 系统提示词 */
+    char *content_parts_json; /**< 多模态消息内容数组 JSON。非 NULL 时优先用于构建
+                               *   provider-neutral content parts，content 保留为文本摘要。 */
     char *tool_calls_json; /**< 结构化 assistant tool_calls 数组 JSON。
                             *   仅 CC_ROLE_ASSISTANT 需要调用工具时使用。
                             *   tool_calls 独立保存，避免和自然语言 content 混在一起。 */
@@ -131,6 +133,15 @@ cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst);
  * @return CC_OK 表示更新成功；失败返回参数或内存错误。
  */
 cc_result_t cc_message_set_tool_calls_json(cc_message_t *message, const char *tool_calls_json);
+
+/**
+ * cc_message_set_content_parts_json — 替换消息中的多模态 content parts JSON 副本。
+ *
+ * @param message 要更新的消息；函数释放旧 content_parts_json。
+ * @param content_parts_json 借用的新 JSON 文本；函数会深拷贝。
+ * @return CC_OK 表示更新成功；失败返回参数或内存错误。
+ */
+cc_result_t cc_message_set_content_parts_json(cc_message_t *message, const char *content_parts_json);
 
 /**
  * cc_message_set_reasoning_content — 替换消息中的 reasoning_content 副本。

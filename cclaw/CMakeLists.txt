@@ -12,8 +12,8 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers")
 
-set(CC_PROFILE "posix-cli" CACHE STRING "Build profile: posix-cli, windows-cli, core-minimal, esp32-s3-qemu, stm32h743-renode")
-set_property(CACHE CC_PROFILE PROPERTY STRINGS posix-cli windows-cli core-minimal esp32-s3-qemu stm32h743-renode)
+set(CC_PROFILE "posix-cli" CACHE STRING "Build profile: posix-cli, core-minimal, stm32mp135-board")
+set_property(CACHE CC_PROFILE PROPERTY STRINGS posix-cli core-minimal stm32mp135-board)
 
 if(NOT DEFINED CC_PROFILE_APPLICATION_DIR)
     set(CC_PROFILE_APPLICATION_DIR "")
@@ -96,6 +96,10 @@ option(CC_ENABLE_SQLITE "Enable SQLite storage backend" ${CC_PROFILE_ENABLE_SQLI
 option(CC_ENABLE_OPENAI "Enable OpenAI-compatible LLM adapter" ${CC_PROFILE_ENABLE_OPENAI})
 option(CC_ENABLE_OLLAMA "Enable Ollama LLM adapter" ${CC_PROFILE_ENABLE_OLLAMA})
 option(CC_ENABLE_ANTHROPIC "Enable Anthropic LLM adapter" ${CC_PROFILE_ENABLE_ANTHROPIC})
+if(NOT DEFINED CC_PROFILE_ENABLE_BOARD_TOOLS)
+    set(CC_PROFILE_ENABLE_BOARD_TOOLS OFF)
+endif()
+option(CC_ENABLE_BOARD_TOOLS "Enable STM32MP135 board tools" ${CC_PROFILE_ENABLE_BOARD_TOOLS})
 
 message(STATUS "c-claw profile: ${CC_PROFILE}")
 message(STATUS "c-claw target platform: ${CC_TARGET_PLATFORM_RESOLVED}")
@@ -113,7 +117,7 @@ if(CC_ENABLE_HTTP_TOOL OR CC_ENABLE_OPENAI OR CC_ENABLE_OLLAMA OR CC_ENABLE_ANTH
 endif()
 
 if(CC_TARGET_PLATFORM_RESOLVED STREQUAL "windows" AND CC_ENABLE_DOCKER_SANDBOX)
-    message(STATUS "Docker sandbox is disabled for the Windows CLI profile")
+    message(STATUS "Docker sandbox is disabled for Windows targets")
     set(CC_ENABLE_DOCKER_SANDBOX OFF CACHE BOOL "Enable Docker sandbox adapter" FORCE)
 endif()
 
@@ -189,6 +193,7 @@ target_compile_definitions(c_claw_project_options INTERFACE
     CC_LLM_OPENAI=$<BOOL:${CC_ENABLE_OPENAI}>
     CC_LLM_OLLAMA=$<BOOL:${CC_ENABLE_OLLAMA}>
     CC_LLM_ANTHROPIC=$<BOOL:${CC_ENABLE_ANTHROPIC}>
+    CC_ENABLE_BOARD_TOOLS=$<BOOL:${CC_ENABLE_BOARD_TOOLS}>
     CC_HAS_MEMORY=$<BOOL:${CC_ENABLE_MEMORY}>
     CC_GATEWAY_CLI=$<BOOL:${CC_ENABLE_CLI}>
     CC_DEFAULT_CONFIG_PATH="${CC_DEFAULT_CONFIG_PATH_VALUE}"
@@ -236,6 +241,9 @@ target_link_libraries(c_claw_runtime PUBLIC
 
 if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32" AND NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "freertos")
     target_link_libraries(c_claw_runtime PUBLIC Threads::Threads)
+    if(CMAKE_DL_LIBS)
+        target_link_libraries(c_claw_runtime PUBLIC ${CMAKE_DL_LIBS})
+    endif()
 endif()
 
 if(CC_PLATFORM_PUBLIC_LIBRARIES)

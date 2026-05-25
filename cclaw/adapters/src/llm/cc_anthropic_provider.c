@@ -181,6 +181,113 @@ static cc_json_value_t *anthropic_text_message(const char *role, const char *con
     return message;
 }
 
+static cc_json_value_t *anthropic_block_message(const char *role, cc_json_value_t *content)
+{
+    cc_json_value_t *message = cc_json_create_object();
+    cc_json_object_set(message, "role", cc_json_create_string(role));
+    cc_json_object_set(message, "content", content ? content : cc_json_create_array());
+    return message;
+}
+
+static char *anthropic_describe_part(const cc_json_value_t *part)
+{
+    const char *type = cc_json_string_value(cc_json_object_get(part, "type"));
+    const char *id = cc_json_string_value(cc_json_object_get(part, "id"));
+    const char *mime = cc_json_string_value(cc_json_object_get(part, "mime"));
+    const char *path = cc_json_string_value(cc_json_object_get(part, "path"));
+    double bytes = cc_json_number_value(cc_json_object_get(part, "bytes"));
+    double width = cc_json_number_value(cc_json_object_get(part, "width"));
+    double height = cc_json_number_value(cc_json_object_get(part, "height"));
+    double duration_ms = cc_json_number_value(cc_json_object_get(part, "duration_ms"));
+
+    cc_string_builder_t sb;
+    if (cc_string_builder_init(&sb).code != CC_OK) return strdup("[multimodal artifact]");
+    cc_string_builder_appendf(&sb, "[anthropic multimodal fallback: type=%s",
+        type ? type : "file");
+    if (id && *id) cc_string_builder_appendf(&sb, " id=%s", id);
+    if (mime && *mime) cc_string_builder_appendf(&sb, " mime=%s", mime);
+    if (path && *path) cc_string_builder_appendf(&sb, " path=%s", path);
+    if (bytes > 0) cc_string_builder_appendf(&sb, " bytes=%.0f", bytes);
+    if (width > 0 && height > 0) cc_string_builder_appendf(&sb, " size=%.0fx%.0f", width, height);
+    if (duration_ms > 0) cc_string_builder_appendf(&sb, " duration_ms=%.0f", duration_ms);
+    cc_string_builder_append(&sb, " multimodal_fallback=true]");
+    return cc_string_builder_take(&sb);
+}
+
+static void anthropic_append_text_block(cc_json_value_t *blocks, const char *text)
+{
+    if (!text || !*text) return;
+    cc_json_value_t *block = cc_json_create_object();
+    cc_json_object_set(block, "type", cc_json_create_string("text"));
+    cc_json_object_set(block, "text", cc_json_create_string(text));
+    cc_json_array_append(blocks, block);
+}
+
+static cc_json_value_t *anthropic_content_blocks_from_parts(const cc_json_value_t *parts)
+{
+    cc_json_value_t *blocks = cc_json_create_array();
+    int count = cc_json_array_size(parts);
+    for (int i = 0; i < count; ++i) {
+        cc_json_value_t *part = cc_json_array_get(parts, i);
+        const char *type = cc_json_string_value(cc_json_object_get(part, "type"));
+        if (type && strcmp(type, "text") == 0) {
+            anthropic_append_text_block(blocks,
+                cc_json_string_value(cc_json_object_get(part, "text")));
+        } else if (type && strcmp(type, "image") == 0) {
+            const char *data = cc_json_string_value(cc_json_object_get(part, "data_base64"));
+            const char *mime = cc_json_string_value(cc_json_object_get(part, "mime"));
+            if (data && *data) {
+                cc_json_value_t *block = cc_json_create_object();
+                cc_json_object_set(block, "type", cc_json_create_string("image"));
+                cc_json_value_t *source = cc_json_create_object();
+                cc_json_object_set(source, "type", cc_json_create_string("base64"));
+                cc_json_object_set(source, "media_type",
+                    cc_json_create_string((mime && *mime) ? mime : "image/png"));
+                cc_json_object_set(source, "data", cc_json_create_string(data));
+                cc_json_object_set(block, "source", source);
+                cc_json_array_append(blocks, block);
+            } else {
+                char *fallback = anthropic_describe_part(part);
+                anthropic_append_text_block(blocks, fallback);
+                free(fallback);
+            }
+        } else {
+            char *fallback = anthropic_describe_part(part);
+            anthropic_append_text_block(blocks, fallback);
+            free(fallback);
+        }
+    }
+    if (cc_json_array_size(blocks) == 0) {
+        anthropic_append_text_block(blocks, "");
+    }
+    return blocks;
+}
+
+static char *anthropic_text_from_parts(const cc_json_value_t *parts)
+{
+    cc_string_builder_t sb;
+    if (cc_string_builder_init(&sb).code != CC_OK) return strdup("");
+    int count = cc_json_array_size(parts);
+    for (int i = 0; i < count; ++i) {
+        cc_json_value_t *part = cc_json_array_get(parts, i);
+        const char *type = cc_json_string_value(cc_json_object_get(part, "type"));
+        char *owned = NULL;
+        const char *text = NULL;
+        if (type && strcmp(type, "text") == 0) {
+            text = cc_json_string_value(cc_json_object_get(part, "text"));
+        } else {
+            owned = anthropic_describe_part(part);
+            text = owned;
+        }
+        if (text && *text) {
+            if (sb.length > 0) cc_string_builder_append(&sb, "\n");
+            cc_string_builder_append(&sb, text);
+        }
+        free(owned);
+    }
+    return cc_string_builder_take(&sb);
+}
+
 /**
  * append_anthropic_messages — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
  *
@@ -208,23 +315,41 @@ static void append_anthropic_messages(
     for (int i = 0; i < count; i++) {
         cc_json_value_t *msg = cc_json_array_get(src, i);
         const char *role = cc_json_string_value(cc_json_object_get(msg, "role"));
-        const char *content = cc_json_string_value(cc_json_object_get(msg, "content"));
+        cc_json_value_t *content_value = cc_json_object_get(msg, "content");
+        const char *content = cc_json_string_value(content_value);
         if (!role) continue;
 
         if (strcmp(role, "system") == 0) {
+            char *parts_text = NULL;
+            if (content_value && cc_json_is_array(content_value)) {
+                parts_text = anthropic_text_from_parts(content_value);
+                content = parts_text;
+            }
             if (content && *content) {
                 if (system.length > 0) cc_string_builder_append(&system, "\n");
                 cc_string_builder_append(&system, content);
             }
+            free(parts_text);
             continue;
         }
 
         if (strcmp(role, "assistant") == 0) {
-            cc_json_array_append(messages, anthropic_text_message("assistant", content ? content : ""));
+            if (content_value && cc_json_is_array(content_value)) {
+                char *text = anthropic_text_from_parts(content_value);
+                cc_json_array_append(messages, anthropic_text_message("assistant", text ? text : ""));
+                free(text);
+            } else {
+                cc_json_array_append(messages, anthropic_text_message("assistant", content ? content : ""));
+            }
         } else if (strcmp(role, "tool") == 0) {
             cc_string_builder_t tool_result;
             cc_string_builder_init(&tool_result);
             const char *tool_id = cc_json_string_value(cc_json_object_get(msg, "tool_call_id"));
+            char *parts_text = NULL;
+            if (content_value && cc_json_is_array(content_value)) {
+                parts_text = anthropic_text_from_parts(content_value);
+                content = parts_text;
+            }
             cc_string_builder_appendf(&tool_result, "Tool result%s%s: %s",
                 tool_id ? " " : "",
                 tool_id ? tool_id : "",
@@ -232,8 +357,14 @@ static void append_anthropic_messages(
             char *text = cc_string_builder_take(&tool_result);
             cc_json_array_append(messages, anthropic_text_message("user", text ? text : ""));
             free(text);
+            free(parts_text);
         } else {
-            cc_json_array_append(messages, anthropic_text_message("user", content ? content : ""));
+            if (content_value && cc_json_is_array(content_value)) {
+                cc_json_array_append(messages, anthropic_block_message("user",
+                    anthropic_content_blocks_from_parts(content_value)));
+            } else {
+                cc_json_array_append(messages, anthropic_text_message("user", content ? content : ""));
+            }
         }
     }
 

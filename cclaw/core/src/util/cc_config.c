@@ -37,10 +37,11 @@
  * JSON 配置结构（完整示例）：
  *   {
  *     "model": {
- *       "provider":       "ollama"     // LLM 提供商标识（ollama/openai/anthropic）
+ *       "provider":       "qwen"       // LLM 提供商标识（qwen/openai/ollama/anthropic）
  *       "model":          "qwen2.5-coder:7b" // 模型名称
  *       "base_url":       "http://localhost:11434" // API 端点地址
  *       "api_key":        "sk-xxxx"    // API 密钥（可选，本地模型不需要）
+ *       "api_key_env":    "OPENAI_API_KEY" // 可选，从环境变量读取 API 密钥
  *       "max_tokens":     4096         // 主对话单次回复最大 token 数
  *       "temperature":    0.7          // 主对话生成温度
  *       "thinking_mode":  0            // 是否启用思考模式（TRAE 扩展）
@@ -892,6 +893,8 @@ cc_result_t cc_config_load_default(cc_config_t *out_config)
  *                  默认值: 随 provider 变化
  *   - api_key:     JSON "model.api_key" 字符串 → out_config->api_key
  *                  默认值: NULL（本地模型无需密钥；远程模型需要配置）
+ *   - api_key_env: JSON "model.api_key_env" 字符串 → getenv 后覆盖 out_config->api_key
+ *                  默认值: 不读取环境变量
  *   - max_tokens:  JSON "model.max_tokens" 整数 → out_config->max_tokens
  *                  默认值: 4096（主对话单次回复上限）
  *   - temperature: JSON "model.temperature" 数值 → out_config->temperature
@@ -954,6 +957,11 @@ cc_result_t cc_config_load(const char *path, cc_config_t *out_config)
         if (s && !replace_string(&out_config->base_url, s)) goto oom;
         s = json_string_field(model, "api_key");
         if (s && !replace_string(&out_config->api_key, s)) goto oom;
+        s = json_string_field(model, "api_key_env");
+        if (s && *s) {
+            const char *env_value = getenv(s);
+            if (env_value && *env_value && !replace_string(&out_config->api_key, env_value)) goto oom;
+        }
         cc_json_value_t *tm = cc_json_object_get(model, "thinking_mode");
         out_config->thinking_mode = tm ? cc_json_int_value(tm) : 0;
         cc_json_value_t *mt = cc_json_object_get(model, "max_tokens");

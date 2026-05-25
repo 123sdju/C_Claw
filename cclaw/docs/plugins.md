@@ -62,8 +62,7 @@ ESP profile 默认关闭 `CC_ENABLE_PLUGIN`、`CC_ENABLE_PLUGIN_WORKERS` 和
 
 外部进程启动失败属于非致命 tool 诊断：该插件的工具不会注册进本次 registry
 generation，但 runtime 会继续启动或完成 reload，其他 builtin/plugin/MCP tool
-仍可用。诊断会写入 `cc_runtime_diagnostics_t`，POSIX/Windows CLI 在启动后和
-`/reload` 后打印摘要。
+仍可用。诊断会写入 `cc_runtime_diagnostics_t`，app 在启动后和 `/reload` 后打印摘要。
 
 ## 并发模型
 

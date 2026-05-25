@@ -145,7 +145,8 @@ ESP profile 默认关闭 plugin、hot reload、stdio MCP、watcher、shell、SQL
 `storage`：会话存储。`type` 支持 `sqlite`、`json`、`memory` 等 profile 可用后端。
 `sqlite` 只在 `CC_ENABLE_SQLITE=ON` 时可用；ESP 通常用 `json` 或 `memory`。
 `data_dir`、`path` 可选，缺失时使用编译 profile 的默认运行期目录。POSIX CLI
-默认在 `build/app/posix/cli/runtime` 下生成数据，ESP32 QEMU 默认在 `/sdcard/cclaw`。
+默认在 `build/app/posix/cli/runtime` 下生成数据，STM32MP135 board 默认在
+`build/app/posix/stm32mp135_board/runtime`。
 
 `agents`：多 agent 配置。当前代码字段名是 `defaults` 和 `list`：`defaults`
 描述默认 agent，`list` 声明具名 agent。`skills` 是 per-agent allowlist，

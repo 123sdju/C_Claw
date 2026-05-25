@@ -66,6 +66,7 @@ typedef struct cc_tool_result {
     char *error;         /**< 失败时的错误描述，成功时为 NULL */
     char *metadata_json; /**< 附加的元数据（JSON 格式），可包含执行时间、
                           *   资源使用量等统计信息。可为 NULL */
+    char *artifacts_json; /**< 工具产生的多模态媒体产物数组 JSON。可为 NULL。 */
 } cc_tool_result_t;
 
 /**
@@ -140,6 +141,18 @@ cc_result_t cc_tool_result_create(
  * @param result  要销毁的工具结果对象指针
  */
 void cc_tool_result_destroy(cc_tool_result_t *result);
+
+/**
+ * cc_tool_result_set_artifacts_json — 替换工具结果中的媒体产物 JSON 副本。
+ *
+ * @param result 要更新的工具结果。
+ * @param artifacts_json 借用的新 JSON 文本；函数会深拷贝。
+ * @return CC_OK 表示更新成功；失败返回参数或内存错误。
+ */
+cc_result_t cc_tool_result_set_artifacts_json(
+    cc_tool_result_t *result,
+    const char *artifacts_json
+);
 
 /**
  * cc_llm_response_init — 初始化栈上的 LLM 响应结构体

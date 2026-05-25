@@ -254,6 +254,10 @@ static cc_result_t json_file_append_message(
     cc_json_object_set(msg, "session_id", cc_json_create_string(message->session_id ? message->session_id : ""));
     cc_json_object_set(msg, "role", cc_json_create_string(cc_message_role_string(message->role)));
     cc_json_object_set(msg, "content", cc_json_create_string(message->content ? message->content : ""));
+    if (message->content_parts_json) {
+        cc_json_object_set(msg, "content_parts_json",
+            cc_json_create_string(message->content_parts_json));
+    }
     if (message->tool_calls_json) {
         cc_json_object_set(msg, "tool_calls_json",
             cc_json_create_string(message->tool_calls_json));
@@ -352,6 +356,10 @@ static cc_result_t json_file_load_messages(
 
         v = cc_json_object_get(msg, "content");
         m->content = strdup(cc_json_string_value(v) ? cc_json_string_value(v) : "");
+
+        v = cc_json_object_get(msg, "content_parts_json");
+        const char *cpj = cc_json_string_value(v);
+        m->content_parts_json = cpj ? strdup(cpj) : NULL;
 
         v = cc_json_object_get(msg, "tool_calls_json");
         const char *tcj = cc_json_string_value(v);
@@ -480,6 +488,7 @@ static cc_result_t json_file_append_tool_result(
     cc_json_object_set(tr, "content", cc_json_create_string(result && result->content ? result->content : ""));
     cc_json_object_set(tr, "error", cc_json_create_string(result && result->error ? result->error : ""));
     cc_json_object_set(tr, "metadata_json", cc_json_create_string(result && result->metadata_json ? result->metadata_json : ""));
+    cc_json_object_set(tr, "artifacts_json", cc_json_create_string(result && result->artifacts_json ? result->artifacts_json : ""));
 
     cc_json_array_append(tool_results, tr);
 
@@ -566,6 +575,7 @@ static cc_json_value_t *json_clone_message_record(cc_json_value_t *src)
     json_copy_string_field(dst, src, "session_id");
     json_copy_string_field(dst, src, "role");
     json_copy_string_field(dst, src, "content");
+    json_copy_string_field(dst, src, "content_parts_json");
     json_copy_string_field(dst, src, "tool_calls_json");
     json_copy_string_field(dst, src, "reasoning_content");
     json_copy_string_field(dst, src, "tool_call_id");
@@ -596,6 +606,7 @@ static cc_json_value_t *json_clone_tool_result_record(cc_json_value_t *src)
     json_copy_string_field(dst, src, "content");
     json_copy_string_field(dst, src, "error");
     json_copy_string_field(dst, src, "metadata_json");
+    json_copy_string_field(dst, src, "artifacts_json");
     return dst;
 }
 
