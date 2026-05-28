@@ -1,40 +1,6 @@
-/**
- * 学习导读：cclaw/platforms/posix/src/cc_posix_path.c
- *
- * 所属层次：平台层。
- * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_posix_path.c — POSIX 平台路径操作工具
- *
- * 在整体架构中的角色和层次：
- *   本模块位于 Platform 层的 POSIX 平台实现子层。
- *   Platform 层是整个系统的最底层，负责封装操作系统差异。
- *   本文件是 cc_path.h 接口在 POSIX（Linux/macOS/BSD/Unix）平台的
- *   具体实现，上层各模块通过统一接口调用，不感知底层操作系统。
- *   本模块向上层提供无状态的路径处理工具函数，不维护任何内部状态。
- *
- * 功能范围：
- *   路径拼接（自动处理分隔符）、路径规范化（解析符号链接和相对路径）、
- *   安全检查（路径穿越攻击防护）、目录名提取、路径存在性检查。
- *
- * 设计决策：
- *   - 无状态设计：所有函数为纯函数，不依赖全局状态，天然线程安全
- *   - 调用者管理内存：所有返回的堆字符串由调用者负责 free()，
- *     遵循 C 语言的经典资源管理契约
- *   - realpath 降级策略：当 realpath() 失败时返回原始路径副本，
- *     避免因文件尚不存在而导致整个操作失败（例如在创建新文件前检查路径合法性）
- *   - 路径穿越防护通过前缀匹配实现：将双方规范化为绝对路径后严格比较，
- *     边界条件检查确保 "/var/app" 不会误匹配 "/var/app_evil"
- *
- * 平台依赖（POSIX 特有，不可移植到 Windows）：
- *   - realpath() — 路径规范化（POSIX.1-2001）
- *   - access(F_OK) — 文件存在性检查（POSIX.1-2001）
- *   - PATH_MAX — 最大路径长度常量（定义于 <limits.h>，Linux 通常为 4096）
- */
+
+
 
 #include "cc/ports/cc_path.h"
 #include <stdlib.h>
@@ -42,27 +8,67 @@
 #include <unistd.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <stdio.h>
 
 /*
- * cc_path_join — 拼接两个路径片段
+ * 对不存在的路径做词法归一化。
  *
- * 将 base 和 child 拼接为一个完整路径，自动处理分隔符 "/"。
- * 如果 base 已以 "/" 结尾，则不会重复添加分隔符。
+ * realpath 要求目标存在，但写文件工具需要在目标文件尚不存在时检查 parent/workspace 边界。
+ * 这里把相对路径转成基于 cwd 的绝对路径，再手工处理 `.` 和 `..`，不解析符号链接。
+ */
+static char *normalize_absolute_path(const char *path)
+{
+    char input[PATH_MAX];
+    if (!path) return NULL;
+    if (path[0] == '/') {
+        snprintf(input, sizeof(input), "%s", path);
+    } else {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd))) return strdup(path);
+        size_t cwd_len = strlen(cwd);
+        size_t path_len = strlen(path);
+        if (cwd_len + 1 + path_len >= sizeof(input)) return NULL;
+        memcpy(input, cwd, cwd_len);
+        input[cwd_len] = '/';
+        memcpy(input + cwd_len + 1, path, path_len + 1);
+    }
+
+    char *parts[PATH_MAX / 2];
+    size_t count = 0;
+    char work[PATH_MAX];
+    snprintf(work, sizeof(work), "%s", input);
+
+    char *save = NULL;
+    char *token = strtok_r(work, "/", &save);
+    while (token) {
+        if (strcmp(token, ".") == 0 || token[0] == '\0') {
+        } else if (strcmp(token, "..") == 0) {
+            if (count > 0) count--;
+        } else if (count < sizeof(parts) / sizeof(parts[0])) {
+            parts[count++] = token;
+        }
+        token = strtok_r(NULL, "/", &save);
+    }
+
+    char out[PATH_MAX];
+    size_t pos = 0;
+    out[pos++] = '/';
+    for (size_t i = 0; i < count; i++) {
+        size_t len = strlen(parts[i]);
+        if (pos + len + 2 >= sizeof(out)) return NULL;
+        if (i > 0) out[pos++] = '/';
+        memcpy(out + pos, parts[i], len);
+        pos += len;
+    }
+    out[pos] = '\0';
+    return strdup(out);
+}
+
+/*
+ * 拼接 base 和 child。
  *
- * 参数：
- *   base  — 基础路径（可为 NULL）
- *   child — 子路径（可为 NULL）
- *
- * 返回值：
- *   成功返回动态分配的拼接路径字符串（调用者负责 free）
- *   - base 和 child 均为 NULL 时返回 NULL
- *   - base 为 NULL 时返回 child 的副本
- *   - child 为 NULL 时返回 base 的副本
- *
- * 示例：
- *   cc_path_join("/home/user", "docs")    → "/home/user/docs"
- *   cc_path_join("/home/user/", "docs")   → "/home/user/docs"
- *   cc_path_join("/home/user", NULL)      → "/home/user"
+ * 返回字符串由调用方 free；函数只做字符串拼接，不做 canonical 或安全检查，安全边界由
+ * cc_path_is_within 负责。
  */
 char *cc_path_join(const char *base, const char *child)
 {
@@ -84,23 +90,10 @@ char *cc_path_join(const char *base, const char *child)
 }
 
 /*
- * cc_path_canonical — 获取路径的规范化（绝对）形式
+ * 获取 canonical path。
  *
- * 使用 POSIX realpath() 将路径解析为不含符号链接、".." 和 "."
- * 的绝对路径。如果 realpath() 失败（例如文件不存在），则返回
- * 原始路径的副本作为降级方案。
- *
- * 参数：
- *   path — 待规范化的路径（可为 NULL）
- *
- * 返回值：
- *   成功返回规范化的绝对路径（调用者负责 free）
- *   path 为 NULL 时返回 NULL
- *
- * 平台注意事项：
- *   - realpath() 要求路径实际存在才能解析成功
- *   - PATH_MAX 限制了路径的最大长度（Linux 通常为 4096）
- *   - 对于不存在的路径，降级返回原始路径的副本
+ * 目标存在时使用 realpath 解析符号链接；目标不存在时退回词法归一化，保证写入前也能做
+ * workspace prefix 检查。
  */
 char *cc_path_canonical(const char *path)
 {
@@ -111,32 +104,14 @@ char *cc_path_canonical(const char *path)
         return strdup(resolved);
     }
 
-    return strdup(path);
+    return normalize_absolute_path(path);
 }
 
 /*
- * cc_path_is_within — 检查路径是否在指定目录范围内（路径穿越防护）
+ * 判断 path 是否位于 base_dir 内。
  *
- * 将 base_dir 和 path 都规范化为绝对路径后，检查 path 是否
- * 以 base_dir 为前缀。这是一种防御路径穿越攻击的安全措施。
- *
- * 参数：
- *   base_dir — 基准目录
- *   path     — 待检查的路径
- *
- * 返回值：
- *   1 — path 在 base_dir 范围内
- *   0 — path 不在范围内，或参数为 NULL，或规范化失败
- *
- * 安全检查逻辑：
- *   - 路径前缀匹配：path 必须以 base_dir 开头
- *   - 边界检查：base_dir 之后必须是 '/' 或 '\0'，防止
- *     例如 "/var/app" 匹配 "/var/app_evil" 的情况
- *
- * 示例：
- *   cc_path_is_within("/var/app", "/var/app/data/file.txt")  → 1
- *   cc_path_is_within("/var/app", "/var/app_evil/file.txt")  → 0
- *   cc_path_is_within("/var/app", "/etc/passwd")             → 0
+ * 两边先 canonical，再做 prefix + 路径分隔符检查，避免 `/tmp/ws2` 被误判为 `/tmp/ws`
+ * 内部路径。返回 1 表示允许，0 表示越界或解析失败。
  */
 int cc_path_is_within(const char *base_dir, const char *path)
 {
@@ -161,20 +136,9 @@ int cc_path_is_within(const char *base_dir, const char *path)
 }
 
 /*
- * cc_path_dirname — 提取路径的目录部分
+ * 返回路径的父目录。
  *
- * 返回路径中最后一个 '/' 之前的部分。行为类似于 POSIX dirname，
- * 但不修改原始字符串。
- *
- * 参数：
- *   path — 文件路径（可为 NULL）
- *
- * 返回值：
- *   成功返回目录部分（调用者负责 free）
- *   - "/foo/bar.txt" → "/foo"
- *   - "/foo"         → "/"
- *   - "foo"          → "."
- *   - path 为 NULL   → NULL
+ * 返回字符串由调用方 free；根目录返回 `/`，没有斜杠的相对文件返回 `.`。
  */
 char *cc_path_dirname(const char *path)
 {
@@ -197,18 +161,7 @@ char *cc_path_dirname(const char *path)
     return strdup(".");
 }
 
-/*
- * cc_path_exists — 检查路径是否存在
- *
- * 使用 POSIX access(F_OK) 检查给定路径是否可访问。
- *
- * 参数：
- *   path — 要检查的路径（可为 NULL）
- *
- * 返回值：
- *   1 — 路径存在
- *   0 — 路径不存在，或 path 为 NULL
- */
+/* 判断路径是否存在；POSIX 实现使用 access(F_OK)。 */
 int cc_path_exists(const char *path)
 {
     if (!path) return 0;

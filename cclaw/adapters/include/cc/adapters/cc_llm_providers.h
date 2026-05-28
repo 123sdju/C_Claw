@@ -1,16 +1,15 @@
-/*
- * Public factories for the built-in HTTP-backed LLM providers.
- *
- * Applications wire these factories into cc_runtime_feature_set_t. The SDK
- * owns the transport and protocol adapters; applications still decide which
- * provider names are accepted by configuration.
- */
+
 #ifndef CC_LLM_PROVIDERS_H
 #define CC_LLM_PROVIDERS_H
 
 #include "cc/core/cc_result.h"
 #include "cc/ports/cc_llm_provider.h"
 
+/*
+ * 创建 OpenAI-compatible provider。
+ *
+ * base_url/api_key/model 在创建时复制；out_provider 成功后通过 vtable destroy 释放。
+ */
 cc_result_t cc_openai_provider_create(
     const char *base_url,
     const char *api_key,
@@ -18,12 +17,14 @@ cc_result_t cc_openai_provider_create(
     cc_llm_provider_t *out_provider
 );
 
+/* 创建 Ollama provider；通常不需要 api_key，base_url/model 在创建时复制。 */
 cc_result_t cc_ollama_provider_create(
     const char *base_url,
     const char *model,
     cc_llm_provider_t *out_provider
 );
 
+/* 创建 Anthropic provider；api_key/model 在创建时复制，错误语义映射到 cc_result_t。 */
 cc_result_t cc_anthropic_provider_create(
     const char *base_url,
     const char *api_key,

@@ -1,105 +1,20 @@
-/**
- * 学习导读：cclaw/adapters/src/llm/cc_http_llm_provider.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_http_llm_provider.c — HTTP LLM provider 传输层模块
- *
- * 本模块在整体架构中的角色：
- * ─────────────────────────────
- * 位于适配器层，是 LLM provider 两层策略中的**传输层**。负责 HTTP 生命周期管理
- * （base_url/api_key/model 字符串所有权、HTTP 请求/响应收发），而 API 协议差异
- * （build_request/parse_response/parse_stream_chunk）则委托给 cc_llm_protocol_t
- * vtable 的具体实现（OpenAI/Ollama/Anthropic）。
- *
- * 两层策略（cc_llm_provider_t = cc_http_llm_provider + cc_llm_protocol_t）：
- * ─────────────────────────────────────────────────────────────────────────
- *
- *   第一层 — cc_http_llm_provider（本模块）：
- *     掌管 HTTP 通用逻辑：拥有并释放 base_url、api_key、model 字符串，
- *     组装 HTTP POST 请求、设置超时、处理 HTTP 状态码错误转换。
- *     流式场景下提供 SSE/NDJSON 两种流格式的通用分帧解析（按 \n\n 或 \n 拆分事件），
- *     然后将每条 JSON 事件分派给协议层的 parse_stream_event。
- *     不感知任何具体 API 的 JSON 格式差异。
- *
- *   第二层 — cc_llm_protocol_t vtable（OpenAI/Ollama/Anthropic 实现）：
- *     只实现三种协议策略回调：build_request（构造 API 特有的 URL/header/body）、
- *     parse_response（解析完整 JSON 响应）、parse_stream_event（解析流式 JSON 增量）。
- *     不感知 HTTP 传输细节（连接、超时、取消令牌）。
- *
- * 上游调用方：
- *   - cc_llm_provider_t 的客户端（runtime/agent 层）通过 chat/chat_stream 接口调用
- *
- * 下游依赖模块：
- *   - cc_http_client.c — 底层 HTTP POST 执行（cc_http_client_perform）
- *   - cc_llm_protocol_t vtable 实现 — build_request / parse_response / parse_stream_event
- *   - cc_string_builder.c — URL 拼接、SSE data 字段拼接
- *   - cc_json.c — 无直接依赖，由协议实现自行处理 JSON
- *
- * ─── 非流式调用流程 ─────────────────────────────────────────────────────
- *
- *   1. http_llm_chat() 被调用
- *   2. 委托 protocol.vtable->build_request() 构造厂商 HTTP 请求
- *   3. http_post_json_with_headers() 发送 POST，检查 2xx 状态码
- *   4. 委托 protocol.vtable->parse_response() 解析响应 JSON
- *   5. cc_llm_http_request_cleanup() 释放 HTTP 请求资源
- *
- * ─── 流式调用流程 ───────────────────────────────────────────────────────
- *
- *   1. http_llm_chat_stream() 被调用
- *   2. 委托 protocol.vtable->build_request(stream=1) 构造流式 HTTP 请求
- *   3. http_post_json_stream_with_headers() 以 stream_body_callback 回调
- *      方式接收网络数据块
- *   4. stream_body_callback() 将数据追加到缓冲区，根据 stream_kind 选择
- *      SSE（\n\n 分帧）或 NDJSON（\n 分行）解析
- *   5. dispatch_stream_event() 将每条 JSON 事件交给 protocol.vtable->parse_stream_event
- *   6. 协议层的 on_chunk 回调最终通知到上层
- *   7. 流结束时 emit_finished_once() 确保只发一次 FINISHED 事件
- *
- * ─── 流格式支持 ─────────────────────────────────────────────────────────
- *
- *   SSE（Server-Sent Events）：
- *     - 双换行（\n\n 或 \r\n\r\n）分隔事件
- *     - 每个事件内 "data:" 前缀的行拼接为 JSON payload
- *     - 遇到 "data: [DONE]" 表示流结束
- *     - 用于 OpenAI 和 Anthropic
- *
- *   NDJSON（Newline Delimited JSON）：
- *     - 每行一个完整的 JSON 事件
- *     - 用于 Ollama
- *
- *   process_sse_buffer / process_ndjson_buffer 会将已完整接收的事件消费掉，
- *   未收齐的尾部片段保留在缓冲区中等待后续数据到达。
- *
- * ─── 设计决策 ─────────────────────────────────────────────────────────
- *
- *   为什么非流式超时 120s，流式超时 300s？
- *     流式响应可能持续输出数分钟（如长推理场景），需要更长的超时容忍。
- *     非流式响应体大小可控，120s 足够覆盖正常请求。
- *
- *   为什么 max_response_bytes 对流式设为 0？
- *     流式响应体大小不可预知（取决于生成长度），因此不设上限。
- *
- *   为什么 http_llm_destroy 同时释放 protocol.self？
- *     cc_http_llm_provider_create 接管 protocol.self 的所有权，
- *     destroy 时统一释放，避免调用方重复管理两个对象生命周期。
- */
+
+
 
 #include "cc/adapters/cc_http_llm_provider.h"
 #include "cc/util/cc_memory.h"
+#include "cc/util/cc_redaction.h"
 #include "cc/util/cc_string_builder.h"
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
-/**
- * cc_http_llm_provider — HTTP LLM provider 私有状态。
+/*
+ * 通用 HTTP LLM provider 私有状态。
  *
- * 拥有 base_url/api_key/model 字符串以及 protocol.self；destroy 时统一释放。
+ * provider 只保存 base_url/api_key/model 和协议 vtable；OpenAI/Anthropic/Ollama 的差异
+ * 放在 cc_llm_protocol_t 中。这样 HTTP 传输、错误分类和 stream framing 可以复用。
  */
 typedef struct cc_http_llm_provider {
     char *base_url;
@@ -108,10 +23,105 @@ typedef struct cc_http_llm_provider {
     cc_llm_protocol_t protocol;
 } cc_http_llm_provider_t;
 
-/**
- * cc_llm_http_request_cleanup — 释放协议 build_request 填入的 URL、API key、body 和 header 数组。
+/* 将 HTTP 状态码映射成 SDK 稳定错误码，供上层 retry/backoff 策略判断。 */
+static cc_error_code_t classify_http_status(long status_code)
+{
+    if (status_code == 429) return CC_ERR_RATE_LIMIT;
+    if (status_code >= 500 && status_code <= 599) return CC_ERR_NETWORK;
+    if (status_code >= 400 && status_code <= 499) return CC_ERR_MODEL;
+    return CC_ERR_MODEL;
+}
+
+/* ASCII 大小写不敏感比较，用于 HTTP header 名称匹配。 */
+static int ascii_case_equal(const char *a, const char *b)
+{
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        unsigned char ca = (unsigned char)*a;
+        unsigned char cb = (unsigned char)*b;
+        if (tolower(ca) != tolower(cb)) return 0;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+/*
+ * 查找响应头。
  *
- * @param request 借用的对象；函数不释放该对象本身。
+ * 返回值是 response 内部借用指针，调用方不能释放；主要用于读取 Retry-After。
+ */
+static const char *response_header_value(
+    const cc_http_response_t *response,
+    const char *name
+)
+{
+    if (!response || !name) return NULL;
+    for (size_t i = 0; i < response->header_count; i++) {
+        if (ascii_case_equal(response->headers[i].name, name)) {
+            return response->headers[i].value;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * 解析 Retry-After 秒数格式。
+ *
+ * 这里只支持数字秒，不解析 HTTP-date；返回毫秒，解析失败返回 0。上限限制为 24 小时，
+ * 避免 provider 返回异常大值影响应用策略。
+ */
+static int parse_retry_after_ms(const char *value)
+{
+    if (!value || !*value) return 0;
+    int seconds = 0;
+    while (*value && isspace((unsigned char)*value)) value++;
+    while (*value && isdigit((unsigned char)*value)) {
+        seconds = seconds * 10 + (*value - '0');
+        if (seconds > 86400) return 86400000;
+        value++;
+    }
+    while (*value && isspace((unsigned char)*value)) value++;
+    return *value == '\0' ? seconds * 1000 : 0;
+}
+
+/*
+ * 把非 2xx HTTP 响应转换成结构化 cc_result_t。
+ *
+ * detail 中包含 http_status、retry_after_ms、recoverable 和脱敏后的 body。SDK 不自动重试，
+ * 但把恢复语义暴露给下游应用决定 backoff。
+ */
+static cc_result_t http_response_status_error(
+    const char *label,
+    const cc_http_response_t *response
+)
+{
+    cc_error_code_t code = classify_http_status(response ? response->status_code : 0);
+    cc_error_detail_t detail;
+    memset(&detail, 0, sizeof(detail));
+    detail.size = sizeof(detail);
+    detail.http_status = response ? response->status_code : 0;
+    detail.retry_after_ms = parse_retry_after_ms(response_header_value(response, "Retry-After"));
+    detail.recoverable = (detail.http_status == 429 || detail.http_status >= 500) ? 1 : 0;
+    detail.error_code = (char *)cc_error_code_name(code);
+    detail.raw_redacted_body = cc_redact_secrets(response && response->body ? response->body : "");
+    const char *safe_body = detail.raw_redacted_body ? detail.raw_redacted_body : "empty response body";
+    cc_result_t rc = cc_result_errf(code,
+        "%s HTTP %ld: %s",
+        label ? label : "LLM",
+        detail.http_status,
+        safe_body && *safe_body ? safe_body : "empty response body");
+    cc_result_t with_detail = cc_result_with_detail(rc.code, rc.message, &detail);
+    cc_result_free(&rc);
+    free(detail.raw_redacted_body);
+    return with_detail;
+}
+
+/*
+ * 释放协议层构造出的 HTTP 请求。
+ *
+ * url/api_key/body_json/headers 都由 cc_llm_http_request_t 拥有；provider 在发送完成后调用
+ * 本函数，避免协议实现和 HTTP 传输层的所有权混淆。
  */
 void cc_llm_http_request_cleanup(cc_llm_http_request_t *request)
 {
@@ -127,14 +137,11 @@ void cc_llm_http_request_cleanup(cc_llm_http_request_t *request)
     memset(request, 0, sizeof(*request));
 }
 
-/**
- * http_post_json_with_headers — 处理 HTTP 请求/响应细节，并把传输错误转换为统一结果。
+/*
+ * 发送同步 JSON POST。
  *
- * @param url 借用的只读字符串；函数不会释放该指针。
- * @param header_count 按值传入，用于控制本次操作。
- * @param body_json 借用的只读字符串；函数不会释放该指针。
- * @param out_response 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 函数只负责 HTTP 传输和状态码处理；响应 body 的协议解析由 protocol vtable 完成。
+ * out_response 成功后由调用方 free。
  */
 static cc_result_t http_post_json_with_headers(
     const char *url,
@@ -142,6 +149,7 @@ static cc_result_t http_post_json_with_headers(
     size_t header_count,
     const char *body_json,
     cc_cancel_token_t *cancel_token,
+    int timeout_ms,
     char **out_response
 )
 {
@@ -152,7 +160,7 @@ static cc_result_t http_post_json_with_headers(
     http_request.headers = headers;
     http_request.header_count = header_count;
     http_request.body = body_json;
-    http_request.timeout_ms = 120000;
+    http_request.timeout_ms = timeout_ms > 0 ? timeout_ms : 120000;
     http_request.cancel_token = cancel_token;
 
     cc_http_response_t response;
@@ -161,10 +169,7 @@ static cc_result_t http_post_json_with_headers(
     if (rc.code != CC_OK) return rc;
 
     if (response.status_code < 200 || response.status_code >= 300) {
-        cc_result_t err = cc_result_errf(CC_ERR_MODEL,
-            "LLM HTTP %ld: %s",
-            response.status_code,
-            response.body ? response.body : "empty response body");
+        cc_result_t err = http_response_status_error("LLM", &response);
         cc_http_response_free(&response);
         return err;
     }
@@ -175,12 +180,11 @@ static cc_result_t http_post_json_with_headers(
     return cc_result_ok();
 }
 
-/**
- * cc_http_llm_stream_ctx — HTTP LLM 流式解析上下文，保存协议、回调和未解析尾部缓冲。
+/*
+ * HTTP 流式解析上下文。
  *
- * 该结构只拥有 buffer；protocol、on_chunk 和 user_data 都来自调用方，生命周期必须覆盖
- * 当前 HTTP 请求。buffer 用来跨 on_body chunk 保存未完成的 SSE/NDJSON 片段，finished
- * 防止上游已经发出完成信号后继续把尾部网络数据当作模型增量。
+ * buffer 保存还未组成完整 SSE/NDJSON 事件的尾部数据；on_chunk 是 runtime 传入的回调，
+ * 不由 provider 拥有。finished 防止重复发送 FINISHED chunk。
  */
 typedef struct cc_http_llm_stream_ctx {
     cc_llm_protocol_t protocol;
@@ -194,13 +198,10 @@ typedef struct cc_http_llm_stream_ctx {
     int finished;
 } cc_http_llm_stream_ctx_t;
 
-/**
- * stream_ctx_append — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+/*
+ * 向流式缓冲追加 HTTP body 数据。
  *
- * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param data 借用的只读字符串；函数不会释放该指针。
- * @param len 按值传入，用于控制本次操作。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * HTTP client 可能按任意大小回调 body，provider 必须自己缓存半个 SSE/NDJSON 事件。
  */
 static cc_result_t stream_ctx_append(
     cc_http_llm_stream_ctx_t *ctx,
@@ -223,12 +224,7 @@ static cc_result_t stream_ctx_append(
     return cc_result_ok();
 }
 
-/**
- * emit_finished_once — 确保流式回调只收到一次 finished 事件，避免重复结束通知。
- *
- * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
- */
+/* 只发送一次 FINISHED chunk，避免 provider [DONE] 和 HTTP 结束重复通知 runtime。 */
 static cc_result_t emit_finished_once(cc_http_llm_stream_ctx_t *ctx)
 {
     if (ctx->finished) return cc_result_ok();
@@ -238,12 +234,11 @@ static cc_result_t emit_finished_once(cc_http_llm_stream_ctx_t *ctx)
     return cc_result_ok();
 }
 
-/**
- * dispatch_stream_event — 解析 provider 的一段流式事件，并通过统一 chunk 回调交给 runtime。
+/*
+ * 分发单个协议事件。
  *
- * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param event_json 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * SSE/NDJSON framing 层只拆出 event_json；真正把 provider JSON 翻译成 text/tool/error
+ * chunk 的工作交给 protocol->parse_stream_event。
  */
 static cc_result_t dispatch_stream_event(
     cc_http_llm_stream_ctx_t *ctx,
@@ -270,12 +265,11 @@ static cc_result_t dispatch_stream_event(
     return cc_result_ok();
 }
 
-/**
- * process_sse_event — 处理一条完整 SSE 事件，把 data 字段交给协议解析器并识别 [DONE] 结束标记。
+/*
+ * 处理一个完整 SSE event。
  *
- * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @param event_text 可写缓冲区或字符串指针；函数可能就地修改内容但不释放缓冲区本身。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * SSE event 可能包含多行 data:，这里把多行 data 用换行拼成协议 JSON，再交给分发函数。
+ * 其它字段如 event/id 当前忽略。
  */
 static cc_result_t process_sse_event(
     cc_http_llm_stream_ctx_t *ctx,
@@ -311,11 +305,11 @@ static cc_result_t process_sse_event(
     return rc;
 }
 
-/**
- * process_sse_buffer — 从累积的 SSE 缓冲区中拆出完整事件，保留未收齐的尾部片段。
+/*
+ * 从缓冲中尽可能拆出完整 SSE event。
  *
- * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 支持 \n\n 和 \r\n\r\n 两种分隔符；未完成的尾部数据会 memmove 到缓冲开头，等待下一次
+ * HTTP body 回调补齐。
  */
 static cc_result_t process_sse_buffer(cc_http_llm_stream_ctx_t *ctx)
 {
@@ -348,11 +342,11 @@ static cc_result_t process_sse_buffer(cc_http_llm_stream_ctx_t *ctx)
     return cc_result_ok();
 }
 
-/**
- * process_ndjson_buffer — 从 NDJSON 流式缓冲区中逐行取出 JSON 事件并分发给协议解析器。
+/*
+ * 从缓冲中拆出 NDJSON 行。
  *
- * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 每一行都是一个 provider stream event；未读完的最后半行留在缓冲中，HTTP 结束时由
+ * flush_stream_tail 处理。
  */
 static cc_result_t process_ndjson_buffer(cc_http_llm_stream_ctx_t *ctx)
 {
@@ -380,13 +374,11 @@ static cc_result_t process_ndjson_buffer(cc_http_llm_stream_ctx_t *ctx)
     return cc_result_ok();
 }
 
-/**
- * stream_body_callback — 维护流式输出缓冲和事件分发状态。
+/*
+ * HTTP client body 回调。
  *
- * @param data 借用的只读字符串；函数不会释放该指针。
- * @param len 按值传入，用于控制本次操作。
- * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 该函数运行在 HTTP 传输层回调上下文中，只做追加缓冲和 framing 解析，最终通过
+ * runtime 提供的 on_chunk 把实时 chunk 交回上层。
  */
 static cc_result_t stream_body_callback(const char *data, size_t len, void *user_data)
 {
@@ -406,11 +398,11 @@ static cc_result_t stream_body_callback(const char *data, size_t len, void *user
     return cc_result_error(CC_ERR_PLATFORM, "Unsupported LLM stream framing");
 }
 
-/**
- * flush_stream_tail — 维护流式输出缓冲和事件分发状态。
+/*
+ * HTTP 结束后处理流式尾部。
  *
- * @param ctx 调用上下文；只在本次函数执行期间借用。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * NDJSON 允许最后一行没有换行符，因此需要在响应完成后尝试分发剩余 buffer；SSE 则只在
+ * 完整 event 分隔符后处理。
  */
 static cc_result_t flush_stream_tail(cc_http_llm_stream_ctx_t *ctx)
 {
@@ -424,18 +416,17 @@ static cc_result_t flush_stream_tail(cc_http_llm_stream_ctx_t *ctx)
     return cc_result_ok();
 }
 
-/**
- * http_post_json_stream_with_headers — 处理 HTTP 请求/响应细节，并把传输错误转换为统一结果。
+/*
+ * 发送流式 JSON POST。
  *
- * @param protocol 按值传入，用于控制本次操作。
- * @param on_chunk 按值传入，用于控制本次操作。
- * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * HTTP body 不整体缓存在内存，而是通过 on_body 增量解析 SSE/NDJSON。非 2xx 响应仍映射
+ * 成结构化错误；成功结束时保证发送 FINISHED chunk。
  */
 static cc_result_t http_post_json_stream_with_headers(
     const cc_llm_http_request_t *http_req,
     cc_llm_protocol_t protocol,
     cc_cancel_token_t *cancel_token,
+    int timeout_ms,
     cc_llm_stream_callback_fn on_chunk,
     void *user_data
 )
@@ -454,7 +445,7 @@ static cc_result_t http_post_json_stream_with_headers(
     http_request.headers = http_req->headers;
     http_request.header_count = http_req->header_count;
     http_request.body = http_req->body_json;
-    http_request.timeout_ms = 300000;
+    http_request.timeout_ms = timeout_ms > 0 ? timeout_ms : 300000;
     http_request.max_response_bytes = 0;
     http_request.on_body = stream_body_callback;
     http_request.user_data = &ctx;
@@ -468,10 +459,7 @@ static cc_result_t http_post_json_stream_with_headers(
     }
 
     if (rc.code == CC_OK && (response.status_code < 200 || response.status_code >= 300)) {
-        rc = cc_result_errf(CC_ERR_MODEL,
-            "LLM stream HTTP %ld: %s",
-            response.status_code,
-            response.body ? response.body : "empty response body");
+        rc = http_response_status_error("LLM stream", &response);
     }
 
     if (rc.code == CC_OK) {
@@ -483,13 +471,11 @@ static cc_result_t http_post_json_stream_with_headers(
     return rc;
 }
 
-/**
- * http_llm_chat — 执行一次非流式 LLM HTTP 调用，发送请求并解析完整 JSON 响应。
+/*
+ * 同步 chat vtable 实现。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param request 借用的对象；函数不释放该对象本身。
- * @param out_response 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 协议层先构造 HTTP 请求，通用 provider 发送 POST，最后协议层解析响应 JSON 到
+ * cc_llm_response_t。JSON 解析失败统一映射为稳定提示，避免泄漏 provider 原始细节。
  */
 static cc_result_t http_llm_chat(
     void *self,
@@ -520,6 +506,7 @@ static cc_result_t http_llm_chat(
         http_req.header_count,
         http_req.body_json,
         request->cancel_token,
+        request->timeout_ms,
         &response_json
     );
     cc_llm_http_request_cleanup(&http_req);
@@ -530,18 +517,19 @@ static cc_result_t http_llm_chat(
         response_json,
         out_response
     );
+    if (rc.code == CC_ERR_JSON) {
+        cc_result_free(&rc);
+        rc = cc_result_error(CC_ERR_JSON, "Provider returned invalid response JSON");
+    }
     free(response_json);
     return rc;
 }
 
-/**
- * http_llm_chat_stream — 维护流式输出缓冲和事件分发状态。
+/*
+ * 流式 chat vtable 实现。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param request 借用的对象；函数不释放该对象本身。
- * @param on_chunk 按值传入，用于控制本次操作。
- * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 只有协议声明 stream_kind 且实现 parse_stream_event 才允许流式；否则 fail-fast，避免
+ * runtime 以为有实时输出但 provider 静默退回同步模式。
  */
 static cc_result_t http_llm_chat_stream(
     void *self,
@@ -574,17 +562,14 @@ static cc_result_t http_llm_chat_stream(
         &http_req,
         provider->protocol,
         request->cancel_token,
+        request->timeout_ms,
         on_chunk,
         user_data);
     cc_llm_http_request_cleanup(&http_req);
     return rc;
 }
 
-/**
- * http_llm_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
- *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- */
+/* 销毁 HTTP LLM provider，并级联销毁协议私有对象。 */
 static void http_llm_destroy(void *self)
 {
     cc_http_llm_provider_t *provider = (cc_http_llm_provider_t *)self;
@@ -598,21 +583,61 @@ static void http_llm_destroy(void *self)
     free(provider);
 }
 
+/*
+ * 返回 provider 能力矩阵。
+ *
+ * 通用 HTTP provider 默认支持文本、工具、reasoning 和 streaming；多模态能力按协议名称
+ * 做保守标记。runtime create 阶段会用该矩阵校验配置，避免静默降级。
+ */
+static cc_result_t http_llm_capabilities(
+    void *self,
+    cc_llm_provider_capabilities_t *out_capabilities
+)
+{
+    if (!out_capabilities) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null provider capabilities");
+    }
+    memset(out_capabilities, 0, sizeof(*out_capabilities));
+    out_capabilities->text_input = 1;
+    out_capabilities->text_output = 1;
+    out_capabilities->tool_calling = 1;
+    out_capabilities->reasoning = 1;
+    out_capabilities->streaming = 1;
+    out_capabilities->max_artifacts = 8;
+    out_capabilities->max_artifact_bytes = 10u * 1024u * 1024u;
+
+    cc_http_llm_provider_t *provider = (cc_http_llm_provider_t *)self;
+    const char *name = provider && provider->protocol.vtable && provider->protocol.vtable->name ?
+        provider->protocol.vtable->name(provider->protocol.self) : "";
+    if (strcmp(name, "openai") == 0) {
+        out_capabilities->image_input = 1;
+        out_capabilities->audio_input = 1;
+        out_capabilities->image_output = 1;
+        out_capabilities->audio_output = 1;
+        out_capabilities->file_input = 1;
+        out_capabilities->file_output = 1;
+    } else if (strcmp(name, "anthropic") == 0) {
+        out_capabilities->image_input = 1;
+        out_capabilities->file_input = 1;
+    } else if (strcmp(name, "ollama") == 0) {
+        out_capabilities->image_input = 1;
+    }
+    return cc_result_ok();
+}
+
+/* HTTP LLM provider vtable，绑定同步 chat、流式 chat、destroy 和 capability 查询。 */
 static cc_llm_provider_vtable_t http_llm_vtable = {
     http_llm_chat,
     http_llm_chat_stream,
-    http_llm_destroy
+    http_llm_destroy,
+    http_llm_capabilities
 };
 
-/**
- * cc_http_llm_provider_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
+/*
+ * 创建通用 HTTP LLM provider。
  *
- * @param base_url 借用的只读字符串；函数不会释放该指针。
- * @param api_key 借用的只读字符串；函数不会释放该指针。
- * @param model 借用的只读字符串；函数不会释放该指针。
- * @param protocol 按值传入，用于控制本次操作。
- * @param out_provider 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 成功后 out_provider 持有 self/vtable；base_url/api_key/model 被深拷贝，protocol self 的
+ * 所有权转移给 provider，destroy 时会调用 protocol.vtable->destroy。
  */
 cc_result_t cc_http_llm_provider_create(
     const char *base_url,

@@ -1,107 +1,106 @@
-/**
- * 学习导读：cclaw/ports/include/cc/ports/cc_llm_provider.h
- *
- * 所属层次：端口层。
- * 阅读重点：这里定义可替换接口，阅读时重点看 struct + vtable + void *self 如何表达多态和依赖注入。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_llm_provider.h — LLM 提供商抽象端口（Port）
- *
- * @file    cc/ports/cc_llm_provider.h
- * @brief   定义大语言模型后端的抽象接口，实现多种 LLM 服务的统一调用。
- *
- * 本模块是端口-适配器架构中的核心端口。不同的 LLM 后端（Ollama、OpenAI、
- * DeepSeek 等）通过实现相同的 vtable 提供统一的 chat 接口，
- * 上层 Agent Runtime 不感知底层差异。
- *
- * ─── 接口契约 ─────────────────────────────────────────────────────────
- *
- *   - 每个 LLM Provider 实现必须填充 vtable 的 chat 和 destroy 方法
- *   - chat 方法接收 cc_llm_chat_request_t（含消息历史和工具列表），
- *     返回 cc_llm_response_t（含文本回复或工具调用请求）
- *   - 所有字段通过内部拷贝管理，调用方保有参数所有权
- *
- * ─── 依赖 ─────────────────────────────────────────────────────────────
- *
- *   依赖 cc/core/cc_result.h 和 cc/core/cc_tool_call.h。
- */
+
+
 
 #ifndef CC_LLM_PROVIDER_H
 #define CC_LLM_PROVIDER_H
 
+#include "cc/core/cc_message.h"
 #include "cc/core/cc_result.h"
 #include "cc/core/cc_tool_call.h"
 #include "cc/core/cc_stream_chunk.h"
+#include <stddef.h>
 
+/* cancel token 前置声明，避免 provider port 依赖 app 层完整定义。 */
 typedef struct cc_cancel_token cc_cancel_token_t;
 
-/**
- * cc_llm_chat_request_t — LLM 聊天请求
+/*
+ * LLM provider 能力矩阵。
  *
- * 封装一次 LLM 调用的所有输入参数，包括消息历史、可用工具、
- * 模型选择、生成参数等。结构体中的所有字符串为请求期间有效，
- * 由调用方管理生命周期。
+ * runtime create/reload 阶段用它校验配置，避免请求 stream/tool/multimodal 时 provider
+ * 静默降级。mime_types 数组和字符串由 provider 拥有，只在能力查询结果生命周期内借用；
+ * size 字段用于未来扩展结构。
+ */
+typedef struct cc_llm_provider_capabilities {
+    size_t size;
+    int text_input;
+    int text_output;
+    int image_input;
+    int audio_input;
+    int video_input;
+    int file_input;
+    int image_output;
+    int audio_output;
+    int video_output;
+    int file_output;
+    int tool_calling;
+    int reasoning;
+    int streaming;
+    size_t max_artifacts;
+    size_t max_artifact_bytes;
+    const char **mime_types;
+    size_t mime_type_count;
+} cc_llm_provider_capabilities_t;
+
+/*
+ * 一次 chat 请求。
+ *
+ * messages/media_limits/cancel_token 为借用指针；tools_json/model 目前是调用方提供的
+ * 字符串，provider 不能保存超过调用生命周期。stream=1 时 runtime 应先确认 provider
+ * 支持 streaming；timeout_ms 和 cancel_token 共同表达资源限制和取消传播。
  */
 typedef struct cc_llm_chat_request {
-    char *messages_json;    /**< 消息历史，JSON 数组格式。
-                             *   每条消息含 role 和 content。符合 OpenAI Chat API 规范。
-                             *   如: [{"role":"user","content":"Hello"}] */
-    char *tools_json;       /**< 可用工具的 JSON Schema 数组。
-                             *   由 cc_tool_registry_build_schema_json() 生成。
-                             *   可为 NULL（无工具可用时）。 */
-    char *model;            /**< 模型名称（如 "qwen2.5-coder:7b"、"gpt-4o"） */
-    int stream;             /**< 是否启用流式输出：1 = SSE 流式, 0 = 一次性返回。
-                             *   chat_stream 已实现：设为 1 通过 SSE 流式回调接收增量 chunk，
- *   设为 0 通过 chat() 同步一次性返回完整回复。 */
-    int max_tokens;         /**< 最大生成 token 数。0 表示使用模型默认值 */
-    double temperature;     /**< 生成温度（0.0 ~ 2.0）。越高越随机，越低越确定。
-                             *   默认 0.7。设为 0 表示贪婪解码（最确定）。 */
-    int thinking_mode;      /**< 是否启用思维链模式：1 = LLM 输出 CoT 推理内容,
-                             *   0 = 仅输出最终回答。需要模型支持。 */
-    cc_cancel_token_t *cancel_token; /**< 借用的取消令牌；LLM adapter 应在网络等待或流式回调之间检查。 */
+    size_t size;
+    const cc_message_t *messages;
+    size_t message_count;
+    char *tools_json;
+
+    char *model;
+    int stream;
+
+    int max_tokens;
+    double temperature;
+
+    int thinking_mode;
+
+    const cc_media_limits_t *media_limits;
+    cc_cancel_token_t *cancel_token;
+    int timeout_ms;
 } cc_llm_chat_request_t;
 
-/* ── 前向声明 ───────────────────────────────────────────────────────── */
 
+/* provider vtable 前置声明。 */
 typedef struct cc_llm_provider_vtable cc_llm_provider_vtable_t;
-/**
- * cc_llm_provider_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
- */
+
+/* provider 接口对象前置声明。 */
 typedef struct cc_llm_provider cc_llm_provider_t;
 
-/**
- * cc_llm_provider_t — LLM 提供商实例（多态句柄）
+/*
+ * LLM provider 接口对象。
  *
- * 值语义结构体，通过 self + vtable 实现多态。
- * 可直接按值传递，浅拷贝后两个实例指向同一个底层后端。
+ * self 指向 OpenAI/Ollama/Anthropic 等具体 adapter，vtable 提供同步、流式、销毁和能力
+ * 查询函数。runtime 只依赖该 port，因此 SDK 核心不绑定任何 HTTP 客户端或云厂商。
  */
 struct cc_llm_provider {
-    void *self;                           /**< 指向具体后端实现的私有数据 */
-    const cc_llm_provider_vtable_t *vtable; /**< 虚函数表 */
+    void *self;
+    const cc_llm_provider_vtable_t *vtable;
 };
 
-/**
- * cc_llm_provider_vtable_t — LLM 提供商虚函数表
+
+/*
+ * LLM provider vtable。
  *
- * 定义 LLM 后端的抽象接口。不同后端的差异（HTTP API 格式、
- * 认证方式等）被封装在 chat 方法的实现内部。
+ * provider adapter 负责把 cc_llm_chat_request_t 转换成供应商协议，并把错误映射到
+ * cc_result_t/cc_error_detail_t。SDK 不在这里做自动 retry/backoff，只暴露可恢复语义。
  */
 struct cc_llm_provider_vtable {
-    /**
-     * chat — 发送聊天请求并获取 LLM 回复（同步、非流式）
+
+
+    /*
+     * 同步 chat 请求。
      *
-     * 将请求发送到 LLM 后端并等待完整回复。根据回复内容的不同：
-     *   - 如果 LLM 返回文本：response.has_text=1, response.text 有内容
-     *   - 如果 LLM 返回工具调用：response.has_tool_call=1, response.tool_call 有内容
-     *   - 如果 LLM 认为完成：response.finished=1
-     *
-     * @param self          后端私有数据
-     * @param request       请求参数（消息历史、工具、模型等）
-     * @param out_response  输出：LLM 回复（调用者负责 cc_llm_response_free）
-     * @return              CC_OK 表示成功
+     * out_response 由调用方初始化，provider 填充后由调用方 cc_llm_response_free()。
+     * 429/5xx/timeout/cancel/JSON 错误应映射为稳定 cc_result_t。
      */
     cc_result_t (*chat)(
         void *self,
@@ -109,27 +108,13 @@ struct cc_llm_provider_vtable {
         cc_llm_response_t *out_response
     );
 
-    /**
-     * chat_stream — 发送聊天请求并以 SSE 流式方式获取 LLM 回复
+
+
+    /*
+     * 流式 chat 请求。
      *
-     * 通过 on_chunk 回调逐步返回 LLM 的响应增量。每个 chunk 可能是：
-     *   - CC_STREAM_CHUNK_TEXT: 回复文本片段
-     *   - CC_STREAM_CHUNK_THINKING: 思维链/推理过程片段
-     *   - CC_STREAM_CHUNK_TOOL_START: 工具调用开始
-     *   - CC_STREAM_CHUNK_TOOL_DELTA: 工具调用参数增量
-     *   - CC_STREAM_CHUNK_TOOL_END: 工具调用参数收集完毕
-     *   - CC_STREAM_CHUNK_FINISHED: 流结束
-     *
-     * 语义约定：
-     *   - on_chunk 被调用的线程上下文由具体实现决定（可能是网络线程）
-     *   - 每次 on_chunk 调用之间不保证时序（但实现上 SSE 保证顺序）
-     *   - FINISHED 之后不再调用 on_chunk
-     *
-     * @param self      后端私有数据
-     * @param request   请求参数（stream 字段会被实现强制设为 1）
-     * @param on_chunk  每收到一个 chunk 时调用的回调
-     * @param user_data 透传给 on_chunk 的上下文数据
-     * @return          CC_OK 表示流已正常结束，非零表示连接失败
+     * on_chunk 在 provider 解析到增量时调用；chunk 生命周期只覆盖回调期间。provider
+     * 不应在不支持 streaming 时静默退化，应返回 CC_ERR_UNSUPPORTED。
      */
     cc_result_t (*chat_stream)(
         void *self,
@@ -138,14 +123,23 @@ struct cc_llm_provider_vtable {
         void *user_data
     );
 
-    /**
-     * destroy — 销毁 LLM 后端实例
-     *
-     * 释放后端的网络连接、HTTP 客户端等资源。
-     *
-     * @param self  后端私有数据
-     */
+
+
+    /* 销毁 provider adapter self。 */
     void (*destroy)(void *self);
+
+
+
+    /*
+     * 查询 provider 能力。
+     *
+     * out_capabilities 由调用方提供，provider 填充 size 和能力字段；runtime 用结果做
+     * fail-fast 配置校验。
+     */
+    cc_result_t (*capabilities)(
+        void *self,
+        cc_llm_provider_capabilities_t *out_capabilities
+    );
 };
 
 #endif

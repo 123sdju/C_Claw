@@ -1,51 +1,24 @@
-/**
- * 学习导读：cclaw/tests/platform/posix/test_process_capture.c
- *
- * 所属层次：测试层。
- * 阅读重点：这里用小型 Given/When/Then 场景固定行为，阅读时重点看每个断言防止哪类回归。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/*
- * test_process_capture.c
- *
- * 测试目标：验证进程输出捕获功能对大批量输出（80KB）的完整性和正确性。
- *
- * 测试方法：
- * - 通过 sh -c 执行 shell 脚本，循环 5000 次，
- *   每次打印固定字符串 "0123456789abcdef"（16 字节），
- *   总输出量 = 5000 × 16 = 80000 字节（约 80KB）。
- * - 使用 cc_process_run 同步运行子进程，配置：
- *   a) capture_stdout = 1：捕获标准输出
- *   b) capture_stderr = 1：捕获标准错误
- *   c) timeout_ms = 2000：2 秒超时保护
- *
- * 边界条件与验证点：
- * - 大输出量：80KB 输出可能超过默认缓冲区大小（如 4KB/64KB），
- *   验证捕获逻辑是否支持多轮读取和动态扩容。
- * - 超时保护：确认 2 秒超时足以让 shell 循环完成 5000 次迭代，
- *   不会误触发 timed_out。
- * - 精确字节计数：验证 stdout 长度精确等于 80000，
- *   无截断、无多余换行/空格。
- * - 退出码检查：子进程正常结束，exit_code 必须为 0。
- *
- * 通过标准：exit_code == 0，timed_out == false，stdout_len == 80000。
- */
+
+
 
 #include "cc/ports/cc_process.h"
 
 #include <stdio.h>
 #include <string.h>
 
-/**
- * main — 执行本文件的 Given/When/Then 回归测试，失败时返回非零退出码。
+
+/*
+ * 验证 POSIX process port 在大量 stdout 输出时能完整捕获数据。
  *
- * @return 0 表示断言全部通过，非 0 表示行为回归。
+ * 子进程会输出 5000 * 16 = 80000 字节，这能覆盖 pipe 非阻塞读取、
+ * wait/poll 循环和结果缓冲扩容路径。嵌入式 Linux 面试中可以把这个测试
+ * 讲成“避免子进程 stdout/stderr pipe 写满导致死锁”的回归用例。
  */
 int main(void)
 {
-    /* 构造 shell 命令：循环 5000 次打印 16 字节固定字符串 */
+
+    /* 使用 shell 构造稳定的大输出，避免依赖额外测试程序或外部文件。 */
     char *args[] = {
         "sh",
         "-c",
@@ -53,16 +26,27 @@ int main(void)
         NULL
     };
 
-    /* 配置进程运行选项 */
+
+    /*
+     * 同时开启 stdout/stderr 捕获和 timeout。
+     *
+     * timeout 不是本测试的目标，但它能覆盖 process_run 在等待循环中持续检查
+     * deadline 的路径，确保大量输出不会绕过超时控制。
+     */
     cc_process_options_t options;
     memset(&options, 0, sizeof(options));
     options.command = "sh";
     options.args = args;
-    options.timeout_ms = 2000;     /* 2 秒超时保护，防止进程卡死 */
-    options.capture_stdout = 1;    /* 捕获标准输出到内存 */
-    options.capture_stderr = 1;    /* 捕获标准错误到内存 */
+    options.timeout_ms = 2000;
+    options.capture_stdout = 1;
+    options.capture_stderr = 1;
 
-    /* 同步运行子进程并捕获输出 */
+
+    /*
+     * cc_process_run 返回结构化 cc_result_t，进程自身的 exit_code/timed_out
+     * 放在 cc_process_result_t 中；这一区分能让调用方判断“端口调用失败”
+     * 和“子进程正常运行但退出码非零”。
+     */
     cc_process_result_t result;
     cc_result_t rc = cc_process_run(&options, &result);
     if (rc.code != CC_OK) {
@@ -71,7 +55,8 @@ int main(void)
         return 1;
     }
 
-    /* 验证输出完整性：5000 次 × 16 字节 = 80000 字节 */
+
+    /* 核心断言：进程成功退出、未超时，并且 stdout 字节数完全一致。 */
     size_t stdout_len = result.stdout_text ? strlen(result.stdout_text) : 0;
     int ok = result.exit_code == 0 && !result.timed_out && stdout_len == 80000;
 

@@ -1,41 +1,6 @@
-/**
- * 学习导读：cclaw/platforms/posix/src/cc_curl_http_client.c
- *
- * 所属层次：平台层。
- * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_curl_http_client.c — 基于 libcurl 的 HTTP 客户端实现
- *
- * 在整体架构中的角色和层次：
- *   本模块位于 Platform 层的 POSIX 平台实现子层。
- *   Platform 层是整个系统的最底层，负责封装操作系统差异。
- *   本文件是 cc_http_client.h 端口接口在 POSIX（Linux/macOS/BSD）平台的具体实现，
- *   基于 libcurl（CURLOPT_WRITEFUNCTION / CURLOPT_HEADERFUNCTION / CURLOPT_XFERINFOFUNCTION）
- *   提供完整的 HTTP/HTTPS 客户端能力。向上层（如 LLM provider、MCP transport 模块）
- *   提供统一的 cc_http_client_perform() / cc_http_response_free() 接口。
- *
- * libcurl 回调驱动架构：
- *   本模块通过 libcurl 的三个回调深度集成取消令牌和流式处理：
- *     - cc_curl_write_body：累积响应体（非流式）或传递给 on_body 回调（流式/SSE）
- *     - cc_curl_write_header：逐行解析 HTTP 响应头，存入响应结构体
- *     - cc_curl_progress：curl 传输进度回调，用于轮询 cancel_token 实现中途取消
- *   callback_error 字段保存回调层面产生的 cc_result_t，让取消、解析失败
- *   和大小限制问题能从 CURLE_WRITE_ERROR 还原为准确的错误码，而非笼统的网络错误。
- *
- * 支持的 HTTP 方法：
- *   - GET / POST（原生支持）
- *   - 其他方法通过 CURLOPT_CUSTOMREQUEST 兜底
- *
- * 设计决策：
- *   - 响应体始终 '\0' 结尾：方便上层将 HTTP body 作为 C 字符串解析 JSON
- *   - callback_error 优先：回调错误（取消/解析失败）优先级高于 curl 返回码
- *   - 空 body 兜底为 strdup("")：保证 out_response->body 非 NULL，简化上层 NULL 检查
- *   - 非流式模式下流式 body 仍累积响应体：为 SSE/流式 JSON 提供完整内容留存
- */
+
+
 
 #include "cc/ports/cc_http_client.h"
 #include "cc/ports/cc_platform.h"
@@ -49,12 +14,11 @@
 #include <curl/curl.h>
 #endif
 
-/**
- * cc_curl_write_ctx — libcurl body/header 回调共享上下文。
+/*
+ * curl 写回调上下文。
  *
- * 非流式调用把 body 累积到 response->body；流式调用把每个 chunk 交给 on_body，
- * 用于 LLM streaming、MCP SSE 和 streamable HTTP。callback_error 保存回调返回的
- * cc_result_t，让 CURLE_WRITE_ERROR 可以还原成取消、解析失败或大小限制。
+ * response 用于累计 body/header；on_body 非空时支持流式消费；callback_error 保存回调中
+ * 发生的 SDK 错误，curl 回调只能用 size_t 表示停止，真正错误需要通过该字段带出。
  */
 typedef struct cc_curl_write_ctx {
     cc_http_response_t *response;
@@ -62,20 +26,16 @@ typedef struct cc_curl_write_ctx {
     void *user_data;
     size_t max_response_bytes;
     cc_cancel_token_t *cancel_token;
-    /*
-     * libcurl reports callback aborts as CURLE_WRITE_ERROR. Keeping the
-     * original cc_result_t here lets callers distinguish user cancellation,
-     * parser failure, and buffer limits from a real network failure.
-     */
+
+
     cc_result_t callback_error;
 } cc_curl_write_ctx_t;
 
-/**
- * response_append — 累积非流式响应体。
+/*
+ * 将 body 数据追加到 response。
  *
- * 只在 request.on_body 为 NULL 时使用。函数维护 response->body 的 '\0' 结尾，
- * 方便上层把 HTTP body 当 C 字符串解析 JSON；超过 max_response_bytes 或 OOM
- * 返回 0，由 libcurl 回调路径转换成 cc_result_t。
+ * max_response_bytes > 0 时执行最大响应限制；返回 0 会让 curl 中止传输，外层再把原因
+ * 映射成 cc_result_t。
  */
 static int response_append(
     cc_http_response_t *response,
@@ -99,6 +59,7 @@ static int response_append(
     return 1;
 }
 
+/* 复制并去掉 header name/value 两端空白和 CRLF。 */
 static char *copy_trimmed_header_piece(const char *data, size_t len)
 {
     while (len > 0 && (*data == ' ' || *data == '\t' || *data == '\r' || *data == '\n')) {
@@ -118,6 +79,12 @@ static char *copy_trimmed_header_piece(const char *data, size_t len)
     return copy;
 }
 
+/*
+ * 解析并保存一行 HTTP 响应头。
+ *
+ * curl 会把状态行也交给 header callback；没有冒号的行直接忽略。返回 header 字符串由
+ * cc_http_response_free 释放。
+ */
 static cc_result_t response_header_append(
     cc_http_response_t *response,
     const char *line,
@@ -156,12 +123,12 @@ static cc_result_t response_header_append(
 }
 
 #if CC_HAS_CURL
-/**
- * cc_curl_write_body — 执行文件系统操作，并把平台错误转换为统一结果。
+
+/*
+ * curl body 回调。
  *
- * @param size 按值传入，用于控制本次操作。
- * @param nmemb 按值传入，用于控制本次操作。
- * @return 返回字节数、元素数或下标；不会转移任何指针所有权。
+ * 支持三种模式：取消 token 触发中止、on_body 流式消费、或把 body 缓存到 response。
+ * provider stream 路径会使用 on_body 避免把完整响应一次性放进内存。
  */
 static size_t cc_curl_write_body(void *contents, size_t size, size_t nmemb, void *userp)
 {
@@ -198,6 +165,11 @@ static size_t cc_curl_write_body(void *contents, size_t size, size_t nmemb, void
     return real_size;
 }
 
+/*
+ * curl header 回调。
+ *
+ * 保存响应头，供 HTTP provider 读取 Retry-After 等结构化错误信息。
+ */
 static size_t cc_curl_write_header(void *contents, size_t size, size_t nmemb, void *userp)
 {
     size_t real_size = size * nmemb;
@@ -217,6 +189,12 @@ static size_t cc_curl_write_header(void *contents, size_t size, size_t nmemb, vo
     return real_size;
 }
 
+/*
+ * curl 进度回调。
+ *
+ * 即使服务器暂时没有 body 数据，也能周期性检查 cancel token，使长请求可以被 runtime
+ * 及时取消。
+ */
 static int cc_curl_progress(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
                             curl_off_t ultotal, curl_off_t ulnow)
 {
@@ -234,13 +212,10 @@ static int cc_curl_progress(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
     return 0;
 }
 
-/**
- * append_header — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+/*
+ * 把 SDK header 转成 curl_slist 行。
  *
- * @param headers 输出参数；调用方传入有效指针，成功后接收结果。
- * @param name 借用的只读字符串；函数不会释放该指针。
- * @param value 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * curl_slist_append 会复制行内容，因此 builder 生成的临时字符串可立即释放。
  */
 static cc_result_t append_header(struct curl_slist **headers, const char *name, const char *value)
 {
@@ -266,12 +241,11 @@ static cc_result_t append_header(struct curl_slist **headers, const char *name, 
 }
 #endif
 
-/**
- * cc_http_client_perform — 执行一次平台 HTTP 请求，填充状态码和响应体或触发流式回调。
+/*
+ * 执行 HTTP 请求。
  *
- * @param request 借用的对象；函数不释放该对象本身。
- * @param out_response 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * POSIX profile 使用 libcurl；没有 curl 时返回 CC_ERR_PLATFORM。函数支持普通缓冲响应和
+ * 流式 body 回调，timeout/cancel/max_response_bytes 都在这一层落地。
  */
 cc_result_t cc_http_client_perform(
     const cc_http_request_t *request,
@@ -364,10 +338,10 @@ cc_result_t cc_http_client_perform(
 #endif
 }
 
-/**
- * cc_http_response_free — 释放结果结构体内部由平台层分配的缓冲区，并把大小/指针复位。
+/*
+ * 释放 HTTP 响应。
  *
- * @param response 借用的对象；函数不释放该对象本身。
+ * headers/body 都由 HTTP client 分配，provider/tool 处理完响应后必须调用本函数。
  */
 void cc_http_response_free(cc_http_response_t *response)
 {

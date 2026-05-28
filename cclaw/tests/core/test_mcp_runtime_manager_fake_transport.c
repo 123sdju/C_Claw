@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 
+/* fake MCP transport 状态，记录 initialize/list/call/reset 调用次数。 */
 typedef struct fake_transport {
     int initialize_count;
     int list_count;
@@ -15,6 +16,7 @@ typedef struct fake_transport {
     int reset_count;
 } fake_transport_t;
 
+/* 构造带 result 的 JSON-RPC 响应，result 所有权转移给 root。 */
 static char *response_with_result(double id, cc_json_value_t *result)
 {
     cc_json_value_t *root = cc_json_create_object();
@@ -26,6 +28,7 @@ static char *response_with_result(double id, cc_json_value_t *result)
     return json;
 }
 
+/* 构造 tools/list 响应中的单个 echo 工具描述。 */
 static cc_json_value_t *tool_list_result(void)
 {
     cc_json_value_t *result = cc_json_create_object();
@@ -41,6 +44,12 @@ static cc_json_value_t *tool_list_result(void)
     return result;
 }
 
+/*
+ * fake transport 的 send_json。
+ *
+ * 根据 method 返回 initialize、tools/list 或 tools/call 响应，用于测试 manager 不依赖真实
+ * 子进程/MCP server。
+ */
 static cc_result_t fake_send_json(
     void *self,
     const char *request_json,
@@ -87,6 +96,7 @@ static cc_result_t fake_send_json(
     return cc_result_ok();
 }
 
+/* fake reset：记录 TTL 过期后 runtime manager 是否重置 transport。 */
 static cc_result_t fake_reset(void *self)
 {
     fake_transport_t *transport = (fake_transport_t *)self;
@@ -94,17 +104,20 @@ static cc_result_t fake_reset(void *self)
     return cc_result_ok();
 }
 
+/* fake transport 非串行，允许 manager 按普通并发语义处理。 */
 static int fake_is_serial(void *self)
 {
     (void)self;
     return 0;
 }
 
+/* 销毁 fake transport 私有状态。 */
 static void fake_destroy(void *self)
 {
     free(self);
 }
 
+/* fake MCP transport vtable。 */
 static const cc_mcp_transport_vtable_t fake_vtable = {
     fake_send_json,
     fake_reset,
@@ -112,14 +125,16 @@ static const cc_mcp_transport_vtable_t fake_vtable = {
     fake_destroy
 };
 
+/* 等到 wall clock 秒变化，确保 1ms TTL 相关逻辑能稳定触发。 */
 static void wait_for_wall_clock_tick(void)
 {
     time_t start = time(NULL);
     while (time(NULL) == start) {
-        /* 短暂忙等只用于测试：MCP runtime 当前 TTL 时钟精度是秒。 */
+
     }
 }
 
+/* 成功 factory：创建 fake transport，并把指针回传给测试断言。 */
 static cc_result_t fake_factory(
     const cc_config_mcp_server_t *server_config,
     cc_mcp_transport_t *out_transport,
@@ -136,6 +151,7 @@ static cc_result_t fake_factory(
     return cc_result_ok();
 }
 
+/* 失败 factory：用于验证 MCP 加载失败会写 diagnostics 而不是整体崩溃。 */
 static cc_result_t failing_factory(
     const cc_config_mcp_server_t *server_config,
     cc_mcp_transport_t *out_transport,
@@ -148,6 +164,12 @@ static cc_result_t failing_factory(
     return cc_result_error(CC_ERR_PLATFORM, "factory boom");
 }
 
+/*
+ * 验证 MCP runtime manager。
+ *
+ * 覆盖 initialize/tools-list 注册、tool call、cancel 前置拦截、TTL 后 reset/reinitialize，以及
+ * factory 失败写入 diagnostics 的降级语义。
+ */
 int main(void)
 {
     cc_config_t config;
@@ -179,12 +201,10 @@ int main(void)
         memset(&ctx, 0, sizeof(ctx));
         ok = tool.vtable->call(tool.self, "{\"text\":\"hello\"}", &ctx, &result).code == CC_OK &&
             result.ok &&
-            result.content &&
-            strstr(result.content, "fake-ok") != NULL &&
+            result.text &&
+            strstr(result.text, "fake-ok") != NULL &&
             transport->call_count == 1;
-        free(result.content);
-        free(result.error);
-        free(result.metadata_json);
+        cc_tool_result_cleanup(&result);
     }
 
     if (ok) {
@@ -204,9 +224,7 @@ int main(void)
                 strstr(result.error, "cancel") != NULL &&
                 transport->call_count == calls_before_cancel;
         }
-        free(result.content);
-        free(result.error);
-        free(result.metadata_json);
+        cc_tool_result_cleanup(&result);
         cc_cancel_source_destroy(source);
     }
 
@@ -221,9 +239,7 @@ int main(void)
             transport->reset_count == 1 &&
             transport->initialize_count == 2 &&
             transport->call_count == 2;
-        free(result.content);
-        free(result.error);
-        free(result.metadata_json);
+        cc_tool_result_cleanup(&result);
     }
 
     if (ok) {

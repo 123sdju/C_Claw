@@ -1,48 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/storage/cc_json_file_memory_store.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/*
- * cc_json_file_memory_store.c — JSON 文件记忆存储适配器
- *
- * 模块说明：
- *   基于单个 JSON 文件实现 cc_memory_store_vtable 接口的持久化记忆存储。
- *   所有记忆条目以 JSON 数组形式存储在文件中，每次写操作都会全量序列化回写。
- *
- * 设计模式：Adapter（适配器）模式
- *   将 JSON 文件 I/O 适配为 cc_memory_store vtable 接口，
- *   上层 memory 工具无需关心底层是 JSON 文件、SQLite 还是内存存储。
- *
- * 实现接口：
- *   - cc_memory_store_vtable_t（7 个虚拟方法：set / get / search / list /
- *     delete_entry / delete_by_category / destroy）
- *
- * 数据格式：
- *   JSON 文件中存储一个 JSON 数组，每个元素包含以下字段：
- *     - key：记忆键名（string）
- *     - value：记忆值（string）
- *     - category：分类标签（string，可选）
- *     - session_id：所属会话 ID（string，可选）
- *     - created_at：创建时间戳（number，Unix epoch）
- *     - updated_at：更新时间戳（number，Unix epoch）
- *
- * 读写策略：
- *   - 启动时：load_from_file() 一次性从 JSON 文件加载全部数据到内存数组
- *   - 每次写操作：save_to_file() 全量序列化回写 JSON 文件
- *   - 适用数据量较小（< 万条级别）的场景
- *
- * 线程安全性：
- *   - 读/写操作均通过 cc_mutex_t（mutex）加锁保护
- *
- * 安全注意：
- *   - JSON 解析由 cc_json 库处理，不受用户输入影响
- *   - 文件路径在创建时固定，后续不受外部输入影响
- */
+
+
 
 #include "cc/ports/cc_memory_store.h"
 #include "cc/util/cc_json.h"
@@ -52,14 +10,10 @@
 #include <string.h>
 
 /*
- * cc_json_memory_store_t — JSON 文件记忆存储的内部数据结构
+ * JSON 文件 memory store 私有状态。
  *
- * 字段说明：
- *   file_path — JSON 持久化文件的完整路径
- *   entries   — 内存中的记忆条目动态数组
- *   count     — 当前记忆条目数量
- *   cap       — entries 数组的当前容量（自动扩容）
- *   mutex     — 互斥锁，保护并发访问的线程安全
+ * 启动时把文件加载到 entries 数组，后续 set/delete 会把整个数组重新写回文件。mutex
+ * 保护内存数组和文件写入临界区；该实现简单可读，适合学习和小规模持久化。
  */
 typedef struct {
     char *file_path;
@@ -70,18 +24,10 @@ typedef struct {
 } cc_json_memory_store_t;
 
 /*
- * save_to_file — 将内存中的记忆数据全量序列化回写到 JSON 文件
+ * 将当前内存 entries 保存到 JSON 文件。
  *
- * 功能：
- *   1. 创建 JSON 数组，遍历内存中所有 entries
- *   2. 将每个 entry 转换为 JSON 对象（key/value/category/session_id/时间戳）
- *   3. 序列化为 JSON 字符串，以覆盖模式写入文件
- *
- * 性能注意：
- *   - 全量回写策略适用于小数据量场景（< 万条），大量数据时应考虑增量更新
- *   - 写操作在 mutex 保护下进行（由调用方持有锁）
- *
- * @param s 存储实例指针
+ * 这是 best-effort helper：写文件失败不会把错误返回给上层，因为旧接口签名是 void。
+ * 更严格的生产实现应把 I/O 错误向上返回，或采用临时文件 + rename 的原子写入策略。
  */
 static void save_to_file(cc_json_memory_store_t *s)
 {
@@ -108,20 +54,10 @@ static void save_to_file(cc_json_memory_store_t *s)
 }
 
 /*
- * load_from_file — 从 JSON 文件加载记忆数据到内存数组
+ * 从 JSON 文件加载 entries。
  *
- * 功能：
- *   1. 打开 JSON 文件，读取全部内容到字符串缓冲区
- *   2. 解析 JSON 顶层数组，遍历每个元素
- *   3. 将每个 JSON 对象转换为 cc_memory_entry_t，填充 entries 数组
- *   4. 创建时间戳缺失或为 0 时自动设为当前时间，保证新写回的数据完整
- *
- * 容错机制：
- *   - 文件不存在时直接返回（fopen 失败 → return），不报错
- *   - JSON 解析失败时释放临时缓冲区，返回空状态
- *   - 初始容量至少为 64，若数据多于 64 则分配 len+16 容量
- *
- * @param s 存储实例指针
+ * 文件不存在或解析失败时保持空 store；每条记录会深拷贝 key/value/category/session_id。
+ * 这个函数只在创建阶段调用，因此没有单独加锁。
  */
 static void load_from_file(cc_json_memory_store_t *s)
 {
@@ -180,21 +116,10 @@ static void load_from_file(cc_json_memory_store_t *s)
 }
 
 /*
- * json_set — vtable 方法：设置/更新一条记忆
+ * 写入或更新一条长期记忆。
  *
- * 功能：
- *   - 若 key 已存在，更新其 value/category/updated_at（实现覆盖写语义）
- *   - 若 key 不存在，在数组末尾追加新条目
- *   - 数组满时翻倍扩容（2x 策略）
- *
- * 流程：加锁 → 遍历查找 → 更新或新建 → save_to_file → 解锁
- *
- * @param self      存储实例指针
- * @param key       记忆键名
- * @param value     记忆值（不可为 NULL）
- * @param category  分类标签（可为 NULL）
- * @param session_id 所属会话 ID（可为 NULL）
- * @return cc_result_t
+ * key 已存在则更新 value/category/updated_at 并保存文件；key 不存在则追加新 entry。
+ * session_id 在首次创建时记录，用于后续按会话过滤或调试。
  */
 static cc_result_t json_set(void *self, const char *key, const char *value,
                              const char *category, const char *session_id)
@@ -235,17 +160,10 @@ static cc_result_t json_set(void *self, const char *key, const char *value,
 }
 
 /*
- * json_get — vtable 方法：按 key 精确查找一条记忆
+ * 按 key 读取一条长期记忆。
  *
- * 功能：遍历 entries 数组，按 key 做字符串精确匹配（strcmp）。
- *       找到后深拷贝所有字段到 out_entry（调用者负责释放）。
- *
- * 流程：加锁 → 遍历匹配 → 深拷贝 → 解锁
- *
- * @param self      存储实例指针
- * @param key       要查找的记忆键名
- * @param out_entry 输出参数，找到时填充完整 entry（深拷贝）
- * @return cc_result_t，找到返回 OK，未找到返回 CC_ERR_NOT_FOUND
+ * 成功后 out_entry 中所有字符串为深拷贝，调用方用 cc_memory_entry_free 释放。
+ * 未找到返回 CC_ERR_NOT_FOUND。
  */
 static cc_result_t json_get(void *self, const char *key, cc_memory_entry_t *out_entry)
 {
@@ -271,14 +189,9 @@ static cc_result_t json_get(void *self, const char *key, cc_memory_entry_t *out_
 }
 
 /*
- * match_query — 子串匹配辅助函数
+ * 简单子串匹配 helper。
  *
- * 功能：在 haystack 中查找 needle 子串（使用 strstr 进行大小写敏感的模糊匹配）。
- *       haystack 为 NULL 时视为不匹配。
- *
- * @param haystack 被搜索的字符串（可为 NULL）
- * @param needle   搜索关键词
- * @return 匹配成功返回 1，否则返回 0
+ * JSON 文件后端不做向量检索，只在 key/value/category 上做 strstr；needle 为空时不会匹配。
  */
 static int match_query(const char *haystack, const char *needle)
 {
@@ -286,21 +199,10 @@ static int match_query(const char *haystack, const char *needle)
 }
 
 /*
- * json_search — vtable 方法：模糊搜索记忆
+ * 旧版 search API：按 query 子串扫描 JSON memory entries。
  *
- * 功能：遍历所有 entries，在 key/value/category 三个字段中使用 strstr
- *       进行子串匹配（大小写敏感，OR 逻辑——任一字段匹配即命中）。
- *
- * 结果限制：最多返回 limit 条匹配结果，未设置（≤0）则返回全部。
- *
- * 流程：加锁 → 遍历匹配 → 深拷贝结果 → 解锁
- *
- * @param self         存储实例指针
- * @param query        搜索关键词（模糊匹配）
- * @param limit        最大返回条数（≤0 表示无限制）
- * @param out_entries  输出参数，匹配结果数组（调用者负责调用 cc_memory_entry_free_array 释放）
- * @param out_count    输出参数，实际匹配的条目数量
- * @return cc_result_t
+ * 返回数组由调用方释放。该实现保留为轻量 fallback；结构化 query/score 更完整的实现可以
+ * 由其它 adapter 提供。
  */
 static cc_result_t json_search(void *self, const char *query, int limit,
                                 cc_memory_entry_t **out_entries, size_t *out_count)
@@ -334,22 +236,9 @@ static cc_result_t json_search(void *self, const char *query, int limit,
 }
 
 /*
- * json_list — vtable 方法：列出所有记忆（可按 category 过滤）
+ * 按 category 列举 entries。
  *
- * 功能：遍历所有 entries，根据 category 参数过滤：
- *       - category 为 NULL 或空字符串 → 返回全部条目
- *       - category 非空 → 仅返回 category 字段精确匹配的条目
- *
- * 结果限制：最多返回 limit 条结果，未设置（≤0）则返回全部。
- *
- * 流程：加锁 → 遍历筛选 → 深拷贝结果 → 解锁
- *
- * @param self         存储实例指针
- * @param category     过滤分类（可为 NULL 表示不过滤）
- * @param limit        最大返回条数（≤0 表示无限制）
- * @param out_entries  输出参数，结果数组
- * @param out_count    输出参数，实际条目数量
- * @return cc_result_t
+ * category 为空表示全部，limit <= 0 表示不限。返回数据是深拷贝，调用方不持有内部数组。
  */
 static cc_result_t json_list(void *self, const char *category, int limit,
                               cc_memory_entry_t **out_entries, size_t *out_count)
@@ -383,19 +272,10 @@ static cc_result_t json_list(void *self, const char *category, int limit,
 }
 
 /*
- * json_delete_entry — vtable 方法：按 key 删除一条记忆
+ * 删除指定 key 的 entry。
  *
- * 功能：遍历 entries 数组，按 key 精确匹配（strcmp）找到目标条目后：
- *       1. 释放该条目的内部字符串
- *       2. 将后续元素前移（memmove），紧凑化数组
- *       3. count 减 1
- *       4. 回写到 JSON 文件
- *
- * 流程：加锁 → 遍历匹配 → 删除 + memmove → save_to_file → 解锁
- *
- * @param self 存储实例指针
- * @param key  要删除的记忆键名
- * @return cc_result_t，找到并删除返回 OK，未找到返回 CC_ERR_NOT_FOUND
+ * 删除后压缩数组并立即保存文件；未找到返回 CC_ERR_NOT_FOUND，便于 memory tool 给用户
+ * 明确反馈。
  */
 static cc_result_t json_delete_entry(void *self, const char *key)
 {
@@ -419,18 +299,9 @@ static cc_result_t json_delete_entry(void *self, const char *key)
 }
 
 /*
- * json_delete_by_category — vtable 方法：按分类批量删除记忆
+ * 删除某个 category 下的所有 entries。
  *
- * 功能：遍历 entries 数组，使用双指针（读指针 i / 写指针 write）进行压缩：
- *       1. category 匹配的条目 → 释放资源（cc_memory_entry_free），跳过不复制
- *       2. category 不匹配的条目 → 保留，复制到 write 位置
- *       3. 最后将 count 更新为 write，回写到 JSON 文件
- *
- * 流程：加锁 → 遍历压缩 → save_to_file → 解锁
- *
- * @param self     存储实例指针
- * @param category 要删除的分类标签
- * @return cc_result_t
+ * 使用 write/read 下标原地压缩；匹配项先释放，不匹配项前移。最后保存整个文件。
  */
 static cc_result_t json_delete_by_category(void *self, const char *category)
 {
@@ -454,14 +325,9 @@ static cc_result_t json_delete_by_category(void *self, const char *category)
 }
 
 /*
- * json_destroy — vtable 方法：销毁存储实例，释放所有资源
+ * 销毁 JSON memory store。
  *
- * 功能：
- *   1. 遍历并释放所有 entries 的字符串字段
- *   2. 释放 entries 数组和 file_path 字符串
- *   3. 销毁互斥锁，最后释放结构体自身
- *
- * @param self 存储实例指针
+ * 调用方需保证没有并发操作；函数释放 entries、file_path、mutex 和私有对象。
  */
 static void json_destroy(void *self)
 {
@@ -474,37 +340,23 @@ static void json_destroy(void *self)
     free(s);
 }
 
-/*
- * json_vtable — JSON 文件记忆存储的虚函数表
- *
- * 说明：将全部 7 个 vtable 函数指针绑定到对应的 JSON 文件实现。
- *       上层 memory 工具通过此 vtable 调用，无需感知存储后端细节。
- */
+/* JSON 文件 memory store vtable；当前未实现结构化 query 扩展槽时由 core fallback 处理。 */
 static cc_memory_store_vtable_t json_vtable = {
     json_set, json_get, json_search, json_list,
     json_delete_entry, json_delete_by_category, json_destroy
 };
 
 /*
- * cc_memory_store_create_json_file — 创建 JSON 文件记忆存储实例（工厂函数）
+ * 创建 JSON 文件 memory store。
  *
- * 执行流程：
- *   1. 校验参数（out_store 和 file_path 非空）
- *   2. 分配 cc_json_memory_store_t 结构体
- *   3. 保存文件路径，分配初始容量为 64 的 entries 数组
- *   4. 创建互斥锁
- *   5. 调用 load_from_file 从磁盘加载已有数据（文件不存在则跳过）
- *   6. 填充 cc_memory_store_t 输出参数（self + vtable）
- *
- * 参数：
- *   out_store — 输出参数，填充创建好的存储实例
- *   file_path — JSON 持久化文件路径
- * @return cc_result_t
+ * 成功后 out_store 获得 self/vtable；file_path 由调用方传入并被深拷贝。该函数加载已有
+ * 文件内容，后续写操作会覆盖保存整个数组。
  */
 cc_result_t cc_memory_store_create_json_file(cc_memory_store_t *out_store, const char *file_path)
 {
     if (!out_store || !file_path)
         return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid json file memory store arguments");
+    memset(out_store, 0, sizeof(*out_store));
 
     cc_json_memory_store_t *s = calloc(1, sizeof(cc_json_memory_store_t));
     if (!s) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate json memory store");

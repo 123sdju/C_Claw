@@ -1,109 +1,6 @@
-/**
- * 学习导读：cclaw/core/src/app/cc_mcp_runtime_manager.c
- *
- * 所属层次：核心层。
- * 阅读重点：MCP 协议 JSON-RPC 状态机，重点看 initialize→notifications→
- *           tools/list→tools/call 的调用链、transport vtable 的串行/并发
- *           适配逻辑、tool bridge 命名规则以及 TTL/idle 管理。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_mcp_runtime_manager.c — MCP 协议客户端运行时与工具桥接模块
- *
- * 本模块在整体架构中的角色：
- * ─────────────────────────────
- * 位于 App 层（业务逻辑层），是 SDK 侧 MCP 协议的完整状态机实现。它不启动
- * 进程、不创建 socket、不依赖 curl/Win32，只通过 transport vtable 发送
- * JSON-RPC 请求。具体 stdio、HTTP、SSE、streamable HTTP 等传输方式由
- * app/platform 通过 transport factory 注入。
- *
- * 上游调用方：
- *   - cc_agent_runtime.c —— 在运行时初始化阶段调用 load_tools 注册 MCP 工具
- *   - cc_tool_executor.c —— 通过 tool vtable 间接调用 mcp_tool_call
- *
- * 下游依赖模块：
- *   - cc_json.c —— JSON-RPC 请求构造与响应解析
- *   - cc_tool_registry.c —— 将 MCP tool 注册为 C-Claw 工具
- *   - transport vtable（外部注入）—— send_json / reset / is_serial / destroy
- *   - cc_cancel_token.c —— 工具调用时的取消传播
- *
- * ─── 内部数据结构 ───────────────────────────────────────────────────
- *
- *   cc_mcp_server_runtime_t：
- *     单个 MCP server 的运行时状态。持有 server 名称、transport 名称、
- *     transport 实例、互斥锁、自增 request id、last_used_ms 时间戳、
- *     idle_ttl_ms、connection_timeout_ms 和 needs_initialize 标记。
- *
- *   cc_mcp_tool_t：
- *     单个 MCP 工具的桥接对象。持有 tool_name（MCP 原始名）、display_name
- *     （mcp.<server>.<tool> 格式）、description、schema_json 和指向所属
- *     server 的指针。通过 cc_tool_vtable 暴露给上层工具执行框架。
- *
- *   cc_mcp_runtime_manager（主结构体）：
- *     持有 transport factory 函数指针、factory_user_data 和 servers 动态数组。
- *
- * ─── MCP 协议状态机 ─────────────────────────────────────────────────
- *
- *   每次 mcp_call_raw 调用经历的流程：
- *
- *   1. 检查 cancel token，已取消则立即返回
- *   2. 持锁检查 idle TTL：
- *      - 若距上次使用超过 idle_ttl_ms，调用 transport->reset 复位连接，
- *        并标记 needs_initialize=1
- *   3. 若非 initialize 请求，调用 ensure_initialized_locked：
- *      - 若 needs_initialize==1，发送 initialize 请求（持锁，保证握手原子性）
- *      - 成功后置 needs_initialize=0，记录 last_used_ms
- *   4. 分配 request id（++next_id），更新 last_used_ms
- *   5. 构建 JSON-RPC 请求（jsonrpc_request）
- *   6. 调用 transport_send_locked_or_parallel：
- *      - 串行 transport（is_serial 返回真）：在 server mutex 内发送，
- *        保证同一时刻只有一个请求在 IO 路径上
- *      - 并发 transport（is_serial 返回假）：释放 mutex 后发送，
- *        允许多个请求同时在不同线程中执行
- *   7. 验证响应 id 匹配（cc_mcp_jsonrpc_response_matches_request）
- *   8. 解析响应 JSON，检查 error 字段
- *
- * ─── Tool Bridge 命名规则 ────────────────────────────────────────────
- *
- *   MCP 工具在 C-Claw 中以 "mcp.<server>.<tool>" 格式暴露，例如
- *   "mcp.filesystem.read_file"。display_name 在 register_mcp_tool 中
- *   由 snprintf 构造，确保名称全局唯一且可追溯到来源 server。
- *
- * ─── TTL 与重置管理 ─────────────────────────────────────────────────
- *
- *   idle_ttl_ms：从 config->mcp.session_idle_ttl_ms 传入。当 server
- *   上次使用时间距今超过此值，在下次调用前自动调用 transport->reset
- *   复位连接并重新 initialize。idle_ttl_ms <= 0 表示永不过期。
- *
- *   needs_initialize：标记 server 是否需要重新握手。创建时初始为 1，
- *   每次 TTL 过期 reset 后也置为 1。
- *
- * ─── 设计决策 ───────────────────────────────────────────────────────
- *
- *   为什么 initialize 握手必须在 mutex 内完成？
- *     initialize 是连接级握手，即使 HTTP transport 可以并发，握手也
- *     必须在 mutex 保护下进行，避免两个线程同时发现 needs_initialize
- *     并重复发送初始化请求，导致状态混乱。
- *
- *   为什么 mcp_call_raw 区分 transport 串行/并发语义？
- *     串行 transport（如 stdio）只有一个 IO 线程，若不在 mutex 内发送，
- *     多个请求会交错写入管道导致协议错乱。并发 transport（如 HTTP）可以
- *     并行发送，持锁只保护 request id 分配和 TTL 状态。is_serial vtable
- *     方法让 transport 自己声明其并发能力，manager 据此决定锁策略。
- *
- *   为什么 tools/list 失败被记录到 diagnostics 而非中断整个加载？
- *     load_tools 遍历所有 MCP server，逐个 initialize + list_tools +
- *     register。单个 server 失败时记录 diagnostics 后 continue，
- *     不影响其他 server 的加载。这保证部分 MCP server 不可用不会导致
- *     整个 agent 初始化失败。
- *
- *   为什么 mcp_tool_call 将 JSON-RPC error 转换为 cc_tool_result_t.error？
- *     MCP 协议中 error 字段表示调用层面的错误（如工具不存在、参数非法），
- *     不是传输层错误。tool bridge 将其映射为 result.ok=0 的 tool_result，
- *     让上层 agent 可以像处理普通工具错误一样处理 MCP 错误，无需区分。
- */
+
+
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -117,13 +14,10 @@
 #include <time.h>
 
 /*
- * MCP runtime manager 是 core SDK 的协议状态机：
- *   - server_runtime 持有 transport、初始化状态、TTL 和 request id。
- *   - tool bridge 把 MCP tool 暴露成 C-Claw tool 名称 mcp.<server>.<tool>。
- *   - transport 只通过 vtable 调用，core 不知道它是 stdio、HTTP、SSE 还是 ESP HTTP。
+ * 单个 MCP server 的运行时状态。
  *
- * 锁约定：串行 transport 在 send 期间持有 server mutex；并发 HTTP transport
- * 只在分配 request id、检查 TTL、更新 last_used 时持锁，实际 IO 在锁外执行。
+ * transport 由 server 拥有；mutex 用于串行 transport 或初始化状态保护；next_id 生成
+ * JSON-RPC id；idle_ttl_ms 用于空闲后 reset/reinitialize。
  */
 typedef struct cc_mcp_server_runtime {
     char *name;
@@ -137,6 +31,7 @@ typedef struct cc_mcp_server_runtime {
     int needs_initialize;
 } cc_mcp_server_runtime_t;
 
+/* MCP tool 适配为 SDK cc_tool_t 时的 self 数据。 */
 typedef struct cc_mcp_tool {
     char *tool_name;
     char *display_name;
@@ -145,6 +40,7 @@ typedef struct cc_mcp_tool {
     cc_mcp_server_runtime_t *server;
 } cc_mcp_tool_t;
 
+/* MCP runtime manager 保存 transport factory 和已创建 server runtime。 */
 struct cc_mcp_runtime_manager {
     cc_mcp_transport_factory_fn factory;
     void *factory_user_data;
@@ -152,29 +48,31 @@ struct cc_mcp_runtime_manager {
     size_t server_count;
 };
 
+/* 毫秒级 wall clock，用于 idle TTL；当前精度足够做空闲判断。 */
 static long wall_time_ms(void)
 {
     return (long)time(NULL) * 1000L;
 }
 
+/* 判断 transport 是否必须串行访问；缺省按串行处理更安全。 */
 static int server_transport_is_serial(cc_mcp_server_runtime_t *server)
 {
     if (!server || !server->transport.vtable || !server->transport.vtable->is_serial) return 1;
     return server->transport.vtable->is_serial(server->transport.self);
 }
 
+/* 判断 server 是否超过 idle TTL，需要 reset 并重新 initialize。 */
 static int server_idle_expired(cc_mcp_server_runtime_t *server, long now_ms)
 {
     if (!server || server->idle_ttl_ms <= 0 || server->last_used_ms <= 0) return 0;
     return now_ms - server->last_used_ms >= server->idle_ttl_ms;
 }
 
+/* 构造 MCP initialize params。 */
 static cc_json_value_t *build_initialize_params(void)
 {
-    /*
-     * initialize 参数保持最小集合：声明 protocolVersion、空 capabilities 和 clientInfo。
-     * 这样 mock server、stdio server 和 streamable HTTP server 都能用同一条路径。
-     */
+
+
     cc_json_value_t *params = cc_json_create_object();
     cc_json_object_set(params, "protocolVersion", cc_json_create_string("2024-11-05"));
     cc_json_object_set(params, "capabilities", cc_json_create_object());
@@ -185,6 +83,11 @@ static cc_json_value_t *build_initialize_params(void)
     return params;
 }
 
+/*
+ * 构造 JSON-RPC 请求字符串。
+ *
+ * params 所有权转移给 root；构造失败时销毁 params。返回字符串由调用方 free()。
+ */
 static char *jsonrpc_request(unsigned long id, const char *method, cc_json_value_t *params)
 {
     cc_json_value_t *root = cc_json_create_object();
@@ -201,6 +104,7 @@ static char *jsonrpc_request(unsigned long id, const char *method, cc_json_value
     return json;
 }
 
+/* 从 JSON-RPC 文本中提取 id 的 JSON 字符串表示，用于 request/response 匹配。 */
 static cc_result_t jsonrpc_id_string(const char *json, char **out_id)
 {
     *out_id = NULL;
@@ -214,6 +118,7 @@ static cc_result_t jsonrpc_id_string(const char *json, char **out_id)
     return cc_result_ok();
 }
 
+/* 校验 response id 是否匹配 request id，防止串行 transport 读到错位响应。 */
 cc_result_t cc_mcp_jsonrpc_response_matches_request(
     const char *request_json,
     const char *response_json,
@@ -236,6 +141,12 @@ cc_result_t cc_mcp_jsonrpc_response_matches_request(
     return rc;
 }
 
+/*
+ * 发送请求并处理串行/并行 transport 锁策略。
+ *
+ * 串行 transport 在持锁状态下发送；并行 transport 会先释放锁，避免阻塞同 server 的其他
+ * 并行请求。
+ */
 static cc_result_t transport_send_locked_or_parallel(
     cc_mcp_server_runtime_t *server,
     char *request,
@@ -263,6 +174,7 @@ static cc_result_t transport_send_locked_or_parallel(
     return rc;
 }
 
+/* 发送 JSON-RPC 请求、校验 id 并解析响应 JSON。 */
 static cc_result_t send_request_and_parse(
     cc_mcp_server_runtime_t *server,
     char *request,
@@ -297,6 +209,11 @@ static cc_result_t send_request_and_parse(
     return rc;
 }
 
+/*
+ * 在保持 server 锁时发送请求。
+ *
+ * initialize 阶段必须串行执行，避免多个线程同时初始化同一个 server。
+ */
 static cc_result_t send_request_and_parse_while_locked(
     cc_mcp_server_runtime_t *server,
     char *request,
@@ -334,6 +251,11 @@ static cc_result_t send_request_and_parse_while_locked(
     return rc;
 }
 
+/*
+ * 确保 server 已完成 initialize。
+ *
+ * 调用时持有 server->mutex；如果无需初始化则释放锁返回。初始化成功后更新状态并释放锁。
+ */
 static cc_result_t ensure_initialized_locked(cc_mcp_server_runtime_t *server)
 {
     if (!server->needs_initialize) {
@@ -349,10 +271,8 @@ static cc_result_t ensure_initialized_locked(cc_mcp_server_runtime_t *server)
     }
 
     cc_json_value_t *response = NULL;
-    /*
-     * initialize 是连接级握手。即使 HTTP transport 可以并发，握手也必须在
-     * server mutex 内完成，避免两个线程同时发现 needs_initialize 并重复握手。
-     */
+
+
     cc_result_t rc = send_request_and_parse_while_locked(server, request, &response);
     cc_json_destroy(response);
     if (rc.code == CC_OK) {
@@ -363,6 +283,12 @@ static cc_result_t ensure_initialized_locked(cc_mcp_server_runtime_t *server)
     return rc;
 }
 
+/*
+ * 发起一次 MCP JSON-RPC 调用。
+ *
+ * 负责取消检查、空闲 reset、按需 initialize、构造请求、发送并解析响应。params 所有权
+ * 在函数内消费，失败路径也会销毁。
+ */
 static cc_result_t mcp_call_raw(
     cc_mcp_server_runtime_t *server,
     const char *method,
@@ -402,10 +328,8 @@ static cc_result_t mcp_call_raw(
             cc_json_destroy(params);
             return init_rc;
         }
-        /*
-         * ensure_initialized_locked 总是在返回前释放 server mutex。这里重新加锁，
-         * 是为了保护 request id 分配、TTL 状态更新和 serial transport 的 send。
-         */
+
+
         cc_mutex_lock(server->mutex);
     }
 
@@ -428,6 +352,7 @@ static cc_result_t mcp_call_raw(
     return rc;
 }
 
+/* 销毁 MCP server runtime、transport、mutex 和字符串字段。 */
 static void server_runtime_destroy(cc_mcp_server_runtime_t *server)
 {
     if (!server) return;
@@ -440,6 +365,7 @@ static void server_runtime_destroy(cc_mcp_server_runtime_t *server)
     free(server);
 }
 
+/* 创建 MCP runtime manager。 */
 cc_result_t cc_mcp_runtime_manager_create(
     cc_mcp_transport_factory_fn factory,
     void *factory_user_data,
@@ -457,6 +383,7 @@ cc_result_t cc_mcp_runtime_manager_create(
     return cc_result_ok();
 }
 
+/* 销毁 manager 和所有 server runtime。 */
 void cc_mcp_runtime_manager_destroy(cc_mcp_runtime_manager_t *manager)
 {
     if (!manager) return;
@@ -467,21 +394,30 @@ void cc_mcp_runtime_manager_destroy(cc_mcp_runtime_manager_t *manager)
     free(manager);
 }
 
+/* MCP tool vtable: 返回展示给 registry/provider 的工具名。 */
 static const char *mcp_tool_name(void *self)
 {
     return ((cc_mcp_tool_t *)self)->display_name;
 }
 
+/* MCP tool vtable: 返回工具描述。 */
 static const char *mcp_tool_description(void *self)
 {
     return ((cc_mcp_tool_t *)self)->description;
 }
 
+/* MCP tool vtable: 返回参数 schema JSON。 */
 static const char *mcp_tool_schema_json(void *self)
 {
     return ((cc_mcp_tool_t *)self)->schema_json;
 }
 
+/*
+ * MCP tool vtable: 执行 tools/call。
+ *
+ * args_json 解析失败时退化为空对象；MCP error 作为可恢复 tool result 返回，避免整个 run
+ * 崩溃。
+ */
 static cc_result_t mcp_tool_call(
     void *self,
     const char *args_json,
@@ -525,11 +461,12 @@ static cc_result_t mcp_tool_call(
 
     cc_json_value_t *result = cc_json_object_get(response, "result");
     out_result->ok = 1;
-    out_result->content = result ? cc_json_stringify_unformatted(result) : strdup("{}");
+    out_result->text = result ? cc_json_stringify_unformatted(result) : strdup("{}");
     cc_json_destroy(response);
     return cc_result_ok();
 }
 
+/* 销毁 MCP tool self。 */
 static void mcp_tool_destroy(void *self)
 {
     cc_mcp_tool_t *tool = (cc_mcp_tool_t *)self;
@@ -541,6 +478,7 @@ static void mcp_tool_destroy(void *self)
     free(tool);
 }
 
+/* MCP tool 的 vtable 实例。 */
 static const cc_tool_vtable_t mcp_tool_vtable = {
     mcp_tool_name,
     mcp_tool_description,
@@ -549,6 +487,11 @@ static const cc_tool_vtable_t mcp_tool_vtable = {
     mcp_tool_destroy
 };
 
+/*
+ * 把 MCP tools/list 中的一项注册为 SDK tool。
+ *
+ * 对外工具名加上 mcp.<server>.<tool> 前缀，避免不同 server 的 tool 名冲突。
+ */
 static cc_result_t register_mcp_tool(
     cc_tool_registry_t *registry,
     cc_mcp_server_runtime_t *server,
@@ -590,6 +533,7 @@ static cc_result_t register_mcp_tool(
     return rc;
 }
 
+/* 调用 server 的 tools/list 并逐项注册工具。 */
 static cc_result_t list_server_tools(
     cc_mcp_server_runtime_t *server,
     cc_tool_registry_t *registry
@@ -624,6 +568,7 @@ static cc_result_t list_server_tools(
     return cc_result_ok();
 }
 
+/* 把 server runtime 加入 manager 动态数组，manager 接管 server 所有权。 */
 static cc_result_t manager_add_server(
     cc_mcp_runtime_manager_t *manager,
     cc_mcp_server_runtime_t *server
@@ -637,6 +582,12 @@ static cc_result_t manager_add_server(
     return cc_result_ok();
 }
 
+/*
+ * 根据配置创建单个 server runtime。
+ *
+ * transport 由 factory 创建；server 复制 name/transport_name 并创建 mutex。失败时销毁
+ * transport 和 server 半成品。
+ */
 static cc_result_t server_runtime_create(
     cc_mcp_runtime_manager_t *manager,
     const cc_config_mcp_server_t *config,
@@ -675,6 +626,12 @@ static cc_result_t server_runtime_create(
     return cc_result_ok();
 }
 
+/*
+ * 加载 MCP server 并注册工具。
+ *
+ * 每个 server 创建失败、initialize 失败或 tools/list 失败都会写入 diagnostics 并继续下
+ * 一个 server，保证单个 MCP server 不影响整个 runtime 启动。
+ */
 cc_result_t cc_mcp_runtime_manager_load_tools(
     cc_mcp_runtime_manager_t *manager,
     const cc_config_t *config,

@@ -1,96 +1,6 @@
-/**
- * 学习导读：cclaw/core/src/app/cc_skill_catalog.c
- *
- * 所属层次：核心层。
- * 阅读重点：SKILL.md 文件解析与 prompt 快照生成，重点看多目录加载顺序
- *          决定的同名覆盖语义、allowlist 过滤以及 entry 的字符串所有权。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_skill_catalog.c — AgentSkills 风格 SKILL.md 目录索引模块
- *
- * 本模块在整体架构中的角色：
- * ─────────────────────────────
- * 位于 App 层（业务逻辑层），只负责"把一组目录里的 SKILL.md 读成可注入
- * prompt 的快照"。不启动文件 watcher、不访问平台专用 API、不关心 skill
- * 目录的发现策略——这些由 app/builder 层决定何时调用 load_from_config。
- *
- * 上游调用方：
- *   - cc_context_builder.c —— 通过 cc_skill_catalog_build_prompt 获取
- *     skill prompt 快照，注入到 LLM 上下文的 system prompt 中
- *   - app/builder 层 —— 在配置解析后调用 load_from_config 加载 skill
- *
- * 下游依赖模块：
- *   - cc_filesystem.c —— 遍历目录、读取文件内容（通过 vtable）
- *   - cc_string_builder.c —— 拼接 prompt 文本
- *   - cc_config.c —— 读取 skills.extra_dirs、plugin skill_dirs、workspace_path
- *
- * ─── 内部数据结构 ───────────────────────────────────────────────────
- *
- *   cc_skill_entry_t：
- *     单个 skill 条目。持有三个字符串（catalog 拥有所有权）：
- *     - name：skill 名称，即 SKILL.md 所在目录名
- *     - source_path：SKILL.md 文件的完整路径（用于调试）
- *     - content：SKILL.md 的文本内容
- *
- *   cc_skill_catalog（主结构体）：
- *     持有 entries 动态数组、count 和 capacity。
- *
- * ─── 同名覆盖规则 ───────────────────────────────────────────────────
- *
- *   upsert_skill 实现"后加载覆盖先加载"语义：如果 name 已存在，释放旧的
- *   source_path 和 content 并写入新值，保留旧的 name 字符串不变（避免
- *   重复分配）。如果 name 不存在，追加新 entry。
- *
- *   加载顺序从低到高优先级为：
- *     1. ~/.cclaw/skills（用户家目录，优先级最低）
- *     2. agent_dir/skills（agent 个人目录）
- *     3. plugin skill_dirs（各 plugin 配置的 skill 目录）
- *     4. config->skills.extra_dirs（配置文件额外指定）
- *     5. workspace_path/.agents/skills（项目工作区，优先级最高）
- *
- *   这个顺序确保项目级 skill 能覆盖 plugin 或用户级的同名定义。
- *
- * ─── SKILL.md 解析流程 ──────────────────────────────────────────────
- *
- *   load_skill_dir：
- *     1. 检查目录是否存在（通过 filesystem->exists）
- *     2. list_dir 获取子目录名列表
- *     3. 对每个子目录，拼接 "<子目录>/SKILL.md" 路径
- *     4. read_text 读取文件内容
- *     5. 若非空，调用 upsert_skill(name=子目录名, path=SKILL.md路径, content=内容)
- *
- * ─── Prompt Snapshot 生成 ────────────────────────────────────────────
- *
- *   build_prompt：
- *     1. 若 catalog 为空或无 entry，直接返回 OK（out_prompt=NULL）
- *     2. 用 string_builder 拼接 "[Skills]\n" 头部和说明文字
- *     3. 遍历所有 entry，用 allowlist 过滤（allowlist 为空则不过滤）
- *     4. 每个 skill 格式为 "\n## <name>\n<content>"，确保末尾有换行
- *     5. 若结果仅包含头部无实际 skill 内容，返回 NULL 而非空 prompt
- *     6. 通过 cc_string_builder_take 转移字符串所有权给调用方
- *
- * ─── 设计决策 ───────────────────────────────────────────────────────
- *
- *   为什么 catalog 拥有 name/source_path/content 三个字符串？
- *     catalog 是 skill 数据的唯一所有者。加载后原始文件和目录可能变化，
- *     catalog 的快照语义要求它持有的数据在生命周期内不变。调用方通过
- *     build_prompt 获取的 prompt 字符串由调用方负责 free。
- *
- *   为什么同名覆盖不替换 name 字符串？
- *     upsert 时如果 name 相同，保留旧的 name 指针并更新 source_path 和
- *     content。这减少了一次 free+malloc 开销，且 name 内容本就相同。
- *
- *   为什么空 content 的 SKILL.md 被视为无 skill？
- *     load_skill_dir 中 read_text 返回后检查 content 非空才调用 upsert。
- *     空文件不产生 entry，避免在 prompt 中注入无效内容。
- *
- *   为什么 allowlist 为空时不过滤？
- *     allow_skill 在 allowlist==NULL 或 count==0 时返回 1（允许全部）。
- *     这允许调用方省略 allowlist 参数以获得完整的 skill prompt。
- */
+
+
 
 #include "cc/app/cc_skill_catalog.h"
 #include "cc/util/cc_string_builder.h"
@@ -99,25 +9,21 @@
 #include <stdio.h>
 #include <string.h>
 
-/*
- * Skill catalog 只实现"目录 -> SKILL.md -> prompt snapshot"的可移植语义。
- * 文件 watcher、个人目录发现策略、plugin skill dir 注入时机由 app/builder 负责。
- *
- * 同名覆盖规则通过加载顺序表达：后加载的 entry 覆盖先加载的 entry，最终 prompt
- * 只输出一个同名 skill。catalog 拥有 name/source_path/content 三个字符串。
- */
+/* 单个 skill 条目；catalog 拥有 name/source_path/content。 */
 typedef struct cc_skill_entry {
     char *name;
     char *source_path;
     char *content;
 } cc_skill_entry_t;
 
+/* skill catalog 内部动态数组。 */
 struct cc_skill_catalog {
     cc_skill_entry_t *entries;
     size_t count;
     size_t capacity;
 };
 
+/* 释放单个 skill 条目。 */
 static void free_entry(cc_skill_entry_t *entry)
 {
     if (!entry) return;
@@ -127,6 +33,7 @@ static void free_entry(cc_skill_entry_t *entry)
     memset(entry, 0, sizeof(*entry));
 }
 
+/* 创建空 skill catalog。 */
 cc_result_t cc_skill_catalog_create(cc_skill_catalog_t **out_catalog)
 {
     if (!out_catalog) {
@@ -140,6 +47,7 @@ cc_result_t cc_skill_catalog_create(cc_skill_catalog_t **out_catalog)
     return cc_result_ok();
 }
 
+/* 销毁 catalog 和所有已加载 skill。 */
 void cc_skill_catalog_destroy(cc_skill_catalog_t *catalog)
 {
     if (!catalog) return;
@@ -150,6 +58,7 @@ void cc_skill_catalog_destroy(cc_skill_catalog_t *catalog)
     free(catalog);
 }
 
+/* 确保 catalog 有可写槽位。 */
 static int ensure_capacity(cc_skill_catalog_t *catalog)
 {
     if (catalog->count < catalog->capacity) return 1;
@@ -162,6 +71,7 @@ static int ensure_capacity(cc_skill_catalog_t *catalog)
     return 1;
 }
 
+/* 按 skill 名称查找现有条目。 */
 static long find_skill(cc_skill_catalog_t *catalog, const char *name)
 {
     for (size_t i = 0; i < catalog->count; i++) {
@@ -172,6 +82,7 @@ static long find_skill(cc_skill_catalog_t *catalog, const char *name)
     return -1;
 }
 
+/* 拼接两个 POSIX 风格路径片段；返回值由调用方 free()。 */
 static char *join_path2(const char *a, const char *b)
 {
     if (!a || !b) return NULL;
@@ -188,6 +99,7 @@ static char *join_path2(const char *a, const char *b)
     return out;
 }
 
+/* 构造用户 home 下的默认 skill 目录。 */
 static char *home_skill_dir(void)
 {
     const char *home = getenv("HOME");
@@ -195,6 +107,12 @@ static char *home_skill_dir(void)
     return join_path2(home, ".cclaw/skills");
 }
 
+/*
+ * 插入或更新 skill。
+ *
+ * 同名 skill 后加载会覆盖先加载内容，这让 workspace/plugin skill 可以按加载顺序替换
+ * 默认 skill。name 首次插入后保持不变，内容和 source_path 可更新。
+ */
 static cc_result_t upsert_skill(
     cc_skill_catalog_t *catalog,
     const char *name,
@@ -231,6 +149,12 @@ static cc_result_t upsert_skill(
     return cc_result_ok();
 }
 
+/*
+ * 从一个目录加载 skills。
+ *
+ * 目录下每个子目录的 SKILL.md 被视为一个 skill，子目录名作为 skill 名。缺失目录、
+ * 不支持 list/read 或单个文件读取失败都按可恢复 no-op 处理。
+ */
 static cc_result_t load_skill_dir(
     cc_skill_catalog_t *catalog,
     cc_filesystem_t *fs,
@@ -285,6 +209,7 @@ static cc_result_t load_skill_dir(
     return cc_result_ok();
 }
 
+/* 加载 plugin 配置中声明的 skill_dirs。 */
 static cc_result_t load_plugin_skill_dirs(
     cc_skill_catalog_t *catalog,
     cc_filesystem_t *fs,
@@ -302,6 +227,12 @@ static cc_result_t load_plugin_skill_dirs(
     return cc_result_ok();
 }
 
+/*
+ * 按配置加载所有 skill 来源。
+ *
+ * 加载顺序包括用户 home、agent 默认目录、plugin skill_dirs、extra_dirs 和 workspace
+ * .agents/skills。后加载同名 skill 会覆盖先前内容。
+ */
 cc_result_t cc_skill_catalog_load_from_config(
     cc_skill_catalog_t *catalog,
     cc_filesystem_t *filesystem,
@@ -312,10 +243,8 @@ cc_result_t cc_skill_catalog_load_from_config(
         return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid skill catalog load request");
     }
 
-    /*
-     * 加载顺序从低优先级到高优先级。upsert 语义保证后加载的同名 skill
-     * 覆盖先加载内容，所以项目/workspace 能覆盖用户级或 plugin 级定义。
-     */
+
+
     char *home_dir = home_skill_dir();
     cc_result_t rc = load_skill_dir(catalog, filesystem, home_dir);
     free(home_dir);
@@ -345,6 +274,7 @@ cc_result_t cc_skill_catalog_load_from_config(
     return cc_result_ok();
 }
 
+/* 判断 skill 是否在 allowlist 中；空 allowlist 表示全部允许。 */
 static int allow_skill(const cc_config_string_list_t *allowlist, const char *name)
 {
     if (!allowlist || allowlist->count == 0) return 1;
@@ -354,6 +284,12 @@ static int allow_skill(const cc_config_string_list_t *allowlist, const char *nam
     return 0;
 }
 
+/*
+ * 构建 skill prompt 片段。
+ *
+ * 只把 allowlist 允许的 skill 写入 prompt；没有可用 skill 时返回 NULL prompt，避免向
+ * system prompt 注入空标题。
+ */
 cc_result_t cc_skill_catalog_build_prompt(
     cc_skill_catalog_t *catalog,
     const cc_config_string_list_t *allowlist,
@@ -392,6 +328,7 @@ cc_result_t cc_skill_catalog_build_prompt(
     return cc_result_ok();
 }
 
+/* 列出 catalog 中的 skill 名称，返回数组和字符串由调用方释放。 */
 cc_result_t cc_skill_catalog_list_names(
     cc_skill_catalog_t *catalog,
     char ***out_names,

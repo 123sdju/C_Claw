@@ -1,15 +1,16 @@
-/**
- * test_plugin_protocol_envelope.c
- *
- * plugin 的 JSON-RPC envelope 属于 core SDK：测试固定请求必须是单行 JSON，
- * 且响应解析能把 result/error 从 transport 字符串中拆出来。
- */
+
 
 #include "cc/app/cc_plugin_protocol.h"
 
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * 验证 plugin JSON-RPC envelope helper。
+ *
+ * 覆盖请求构造不带换行、params 作为 JSON object 嵌入，以及响应 result/error 两条解析路径
+ * 的输出所有权。
+ */
 int main(void)
 {
     char *request = cc_plugin_protocol_build_request("weather.query", "{\"city\":\"Beijing\"}");

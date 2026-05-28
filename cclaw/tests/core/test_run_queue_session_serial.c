@@ -1,13 +1,9 @@
-/**
- * test_run_queue_session_serial.c
- *
- * 测试目标：同一个 session key 的 run 默认串行。这个约束保护 session store
- * 和上下文构建，避免两次 turn 同时写入同一段历史。
- */
+
 
 #include "cc/app/cc_run_queue.h"
 #include "cc/ports/cc_thread.h"
 
+/* 同 session 串行化测试状态。 */
 typedef struct serial_state {
     cc_run_queue_t *queue;
     cc_mutex_t mutex;
@@ -15,6 +11,11 @@ typedef struct serial_state {
     int violation;
 } serial_state_t;
 
+/*
+ * 队列任务：进入时 active++，退出时 active--。
+ *
+ * 如果 per_session_concurrency=1 失效，同一 session 的两个任务会同时 active>1。
+ */
 static cc_result_t queued_task(void *user_data)
 {
     serial_state_t *state = (serial_state_t *)user_data;
@@ -32,6 +33,7 @@ static cc_result_t queued_task(void *user_data)
     return cc_result_ok();
 }
 
+/* 并发提交同一个 session_key 的 run_queue 任务。 */
 static void *worker(void *arg)
 {
     serial_state_t *state = (serial_state_t *)arg;
@@ -44,6 +46,7 @@ static void *worker(void *arg)
     return NULL;
 }
 
+/* 验证同一 session 即使 lane 并发为 2，也会被 per-session 限制串行执行。 */
 int main(void)
 {
     cc_run_queue_config_t config = cc_run_queue_default_config();

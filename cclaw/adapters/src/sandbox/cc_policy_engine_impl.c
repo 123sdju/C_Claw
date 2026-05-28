@@ -1,41 +1,17 @@
-/**
- * 学习导读：cclaw/adapters/src/sandbox/cc_policy_engine_impl.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * @file cc_policy_engine_impl.c
- * @brief 默认策略引擎实现——检查工具调用风险并决定是否需要用户审批
- *
- * 策略引擎在工具调用执行前进行评估，决定是否允许执行以及是否需要用户审批。
- * 当前默认策略覆盖两类高风险操作：
- *   - shell_run：Shell 命令执行（可通过配置控制是否需要审批）
- *   - file_delete：文件删除操作（始终需要用户审批）
- *
- * 实现 cc_policy_engine_vtable 中的 2 个虚函数：
- *   check_tool_call / destroy
- *
- * 安全注意：
- *   - 策略引擎是安全防线的重要组成部分，应根据部署环境调整风险阈值
- *   - 当前为最小化默认实现，生产环境建议扩展更多规则（如文件写入、网络访问等）
- */
+
+
 
 #include "cc/adapters/cc_default_policy_engine.h"
 #include "cc/ports/cc_policy_engine.h"
 #include <stdlib.h>
 #include <string.h>
 
-/**
- * @brief 释放策略决策结果中的动态资源
+/*
+ * 释放策略决策里的动态 reason 字符串。
  *
- * 释放 reason 字段中通过 strdup 分配的字符串内存。
- * 调用者在获取策略决策结果后必须调用此函数。
- *
- * @param decision 指向策略决策结果的指针，可为 NULL
+ * policy engine 把“为什么需要审批/为什么拒绝”返回给调用方；reason 的所有权交给调用方，
+ * 因此 runtime/tool executor 在处理完决策后必须调用本函数，避免安全错误路径泄漏内存。
  */
 void cc_policy_decision_free(cc_policy_decision_t *decision)
 {
@@ -44,35 +20,22 @@ void cc_policy_decision_free(cc_policy_decision_t *decision)
     decision->reason = NULL;
 }
 
-/**
- * @brief 默认策略引擎的私有数据结构
+/*
+ * 默认策略引擎的私有状态。
  *
- * @field shell_requires_approval 是否要求对 shell_run 工具调用进行用户审批
- *                                1 = 需要审批, 0 = 自动允许
+ * 当前只包含 shell_requires_approval 开关，后续如果增加网络、文件删除等策略，也应继续
+ * 放在 self 中，通过 vtable 隐藏实现细节。这是 C 语言面向对象封装的典型写法。
  */
 typedef struct {
     int shell_requires_approval;
 } cc_default_policy_engine_t;
 
-/**
- * @brief vtable 函数：检查工具调用是否需要审批
+/*
+ * 检查一次工具调用是否允许执行。
  *
- * 根据工具名称判断是否需要用户审批，当前规则：
- *   1. 无效调用保护：如果 call 或 call->name 为 NULL，直接拒绝（allowed=0）
- *   2. shell_run：根据配置项 shell_requires_approval 决定是否需要审批
- *   3. file.delete：始终要求用户审批
- *   4. 其他工具：默认 allowed=1 且 require_approval=0（直接允许执行）
- *
- * 决策结果通过 out_decision 返回，包含三个关键字段：
- *   - allowed：是否允许执行（0=拒绝, 1=允许）
- *   - require_approval：是否需要用户交互审批（0=自动执行, 1=暂停等待审批）
- *   - reason：审批原因的文本描述（由 strdup 分配，调用者须通过 cc_policy_decision_free 释放）
- *
- * @param self         策略引擎实例指针
- * @param call         待评估的工具调用对象（主要关注 call->name）
- * @param ctx          工具调用上下文（当前实现未使用，保留用于未来扩展）
- * @param out_decision 输出参数，填充策略决策结果
- * @return cc_result_t 始终返回 OK
+ * 默认策略不直接执行安全动作，只给出 allowed/require_approval/reason，真正的审批回调由
+ * tool executor 触发。这样策略、UI 审批和工具执行三者解耦；无审批 handler 时 executor
+ * 会把 require_approval 转成可恢复工具错误。
  */
 static cc_result_t default_check_tool_call(
     void *self,
@@ -94,12 +57,14 @@ static cc_result_t default_check_tool_call(
 
     out_decision->allowed = 1;
 
-    if (strcmp(call->name, "shell_run") == 0) {
+    if (strcmp(call->name, "shell_run") == 0 ||
+        strcmp(call->name, "shell.run") == 0) {
         if (engine->shell_requires_approval) {
             out_decision->require_approval = 1;
             out_decision->reason = strdup("Shell execution requires user approval");
         }
-    } else if (strcmp(call->name, "file_delete") == 0) {
+    } else if (strcmp(call->name, "file_delete") == 0 ||
+               strcmp(call->name, "file.delete") == 0) {
         out_decision->require_approval = 1;
         out_decision->reason = strdup("File deletion requires user approval");
     }
@@ -107,45 +72,34 @@ static cc_result_t default_check_tool_call(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：销毁策略引擎实例
- *
- * 默认策略引擎无特殊资源需要释放，仅释放结构体内存。
- *
- * @param self 策略引擎实例指针
- */
+/* 销毁默认策略引擎私有状态；端口结构本身由创建者栈上或 builder 内嵌持有。 */
 static void default_destroy(void *self)
 {
     free(self);
 }
 
-/**
- * @brief 默认策略引擎的虚函数表
- *
- * 绑定 check_tool_call → default_check_tool_call, destroy → default_destroy
- */
+/* 默认 policy engine 的 vtable，向 core 暴露“接口”，隐藏 adapter 私有结构。 */
 static cc_policy_engine_vtable_t default_vtable = {
     default_check_tool_call,
     default_destroy
 };
 
-/**
- * @brief 创建默认策略引擎实例（公共工厂函数）
+/*
+ * 创建默认策略引擎。
  *
- * 执行流程：
- *   1. 分配 cc_default_policy_engine_t 结构体
- *   2. 设置 shell_requires_approval 配置项
- *   3. 填充 out_engine 的 self 和 vtable
- *
- * @param shell_requires_approval 是否要求 shell_run 工具调用需要用户审批（非零=需要）
- * @param out_engine               输出参数，填充创建好的策略引擎实例
- * @return cc_result_t             成功返回 OK，calloc 失败返回 OUT_OF_MEMORY
+ * out_engine 由调用方提供并接收 self/vtable；成功后 destroy 由 cc_policy_engine_t 的使用方
+ * 在 builder/runtime 销毁阶段调用。shell_requires_approval 为真时 shell.run 默认需要审批，
+ * 符合 SDK 安全优先的核心契约。
  */
 cc_result_t cc_policy_engine_create_default(
     int shell_requires_approval,
     cc_policy_engine_t *out_engine
 )
 {
+    if (!out_engine) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null policy engine output");
+    }
+    memset(out_engine, 0, sizeof(*out_engine));
     cc_default_policy_engine_t *self = calloc(1, sizeof(cc_default_policy_engine_t));
     if (!self) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create policy engine");
 

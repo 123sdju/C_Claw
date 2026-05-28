@@ -1,11 +1,4 @@
-/**
- * 学习导读：cclaw/tests/core/test_config_missing_defaults.c
- *
- * 所属层次：测试层。
- * 阅读重点：这里用小型 Given/When/Then 场景固定行为，阅读时重点看每个断言防止哪类回归。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
+
 
 #include "cc/util/cc_config.h"
 #include "cc/ports/cc_platform.h"
@@ -14,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 浮点配置比较 helper，避免二进制浮点精度导致测试抖动。 */
 static int double_eq(double a, double b)
 {
     double d = a - b;
@@ -21,6 +15,7 @@ static int double_eq(double a, double b)
     return d < 0.000001;
 }
 
+/* 设置测试环境变量，兼容 Windows 和 POSIX。 */
 static void set_test_env(const char *key, const char *value)
 {
 #if defined(_WIN32)
@@ -30,6 +25,7 @@ static void set_test_env(const char *key, const char *value)
 #endif
 }
 
+/* 清理测试环境变量，避免影响后续测试进程。 */
 static void unset_test_env(const char *key)
 {
 #if defined(_WIN32)
@@ -39,10 +35,12 @@ static void unset_test_env(const char *key)
 #endif
 }
 
-/**
- * main — 执行本文件的 Given/When/Then 回归测试，失败时返回非零退出码。
+
+/*
+ * 验证配置缺失时默认值仍完整可用。
  *
- * @return 0 表示断言全部通过，非 0 表示行为回归。
+ * 覆盖缺失文件降级默认配置、UI/模型字段覆盖、thinking mode 对 stream 的影响，以及
+ * api_key_env 优先于文件明文 api_key 的安全契约。
  */
 int main(void)
 {

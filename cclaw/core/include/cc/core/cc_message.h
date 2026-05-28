@@ -1,167 +1,173 @@
-/**
- * 学习导读：cclaw/core/include/cc/core/cc_message.h
- *
- * 所属层次：核心层。
- * 阅读重点：这里定义会话消息结构，重点看 role、tool_calls_json、reasoning_content
- *           和 tool_call_id 的深拷贝规则。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_message.h — 消息数据模型模块
- *
- * @file    cc/core/cc_message.h
- * @brief   定义 Agent 对话中的消息实体及其角色枚举。
- *
- * 一条消息是构成会话（cc_session_t）的最小单元。每次用户输入、
- * LLM 回复、工具调用结果都会被建模为一个 cc_message_t 实例。
- *
- * ─── 接口契约 ─────────────────────────────────────────────────────────
- *
- * 本模块是纯数据结构定义 + 构造/析构函数，不包含业务逻辑。
- * 消息本身不感知 LLM 或工具，仅存储角色和内容文本。
- *
- * ─── 角色模型 ─────────────────────────────────────────────────────────
- *
- * 遵循 OpenAI Chat Completions API 的角色模型：
- *   - CC_ROLE_SYSTEM    : 系统提示词，定义 Agent 行为
- *   - CC_ROLE_USER      : 用户输入
- *   - CC_ROLE_ASSISTANT : LLM 生成的回复
- *   - CC_ROLE_TOOL      : 工具调用的返回结果
- *
- * ─── 依赖 ─────────────────────────────────────────────────────────────
- *
- *   依赖 cc_result.h 作为错误传递机制。
- *   不依赖任何外部库（纯标准 C 结构体）。
- */
 
 #ifndef CC_MESSAGE_H
 #define CC_MESSAGE_H
 
-#include "cc_result.h"
+#include "cc/core/cc_media.h"
+#include "cc/core/cc_result.h"
+#include "cc/core/cc_tool_call.h"
+#include <stddef.h>
 
-/**
- * cc_message_role_t — 消息角色枚举
+/*
+ * Agent 对话消息的角色枚举。
  *
- * 定义消息的发送者角色，遵循 OpenAI Chat API 规范。
- * 不同角色在构建 LLM 上下文时有不同的含义和序列化方式。
+ * 这些值对应主流 LLM chat 协议中的 role 字段，也是 session store、
+ * context builder 和 provider adapter 之间共享的稳定语义。嵌入式面试里
+ * 可以把它解释为“协议层状态的类型安全表达”：外部 JSON 使用字符串，
+ * SDK 内部使用 enum，避免业务代码到处比较裸字符串。
  */
 typedef enum cc_message_role {
-    CC_ROLE_SYSTEM,    /**< 系统提示词，设定 Agent 的行为、风格和约束 */
-    CC_ROLE_USER,      /**< 用户输入，用户向 Agent 提出的自然语言请求 */
-    CC_ROLE_ASSISTANT, /**< 助手回复，LLM 生成的文本或工具调用指令 */
-    CC_ROLE_TOOL       /**< 工具返回，工具执行后将结果传回 LLM */
+    CC_ROLE_SYSTEM,
+    CC_ROLE_USER,
+    CC_ROLE_ASSISTANT,
+    CC_ROLE_TOOL
 } cc_message_role_t;
 
-/**
- * cc_message_t — 对话消息结构体
+/*
+ * 一条对话消息的核心数据模型。
  *
- * 表示 Agent 对话流中的一条消息，可以是用户输入、LLM 回复、
- * 或工具调用的返回结果。消息按时间顺序组成会话历史。
+ * 所有 char * 字段和嵌套列表都由该结构拥有；调用方通过
+ * cc_message_cleanup() 释放栈上对象，通过 cc_message_destroy() 释放
+ * cc_message_create_*() 创建的堆对象。结构本身不做内部加锁，因此同一条
+ * message 不能被多个线程同时写；跨线程传递时应先深拷贝或由上层队列保证
+ * 所有权转移。后续扩展字段应保持“清理函数统一释放”的规则。
  */
 typedef struct cc_message {
-    char *id;              /**< 消息的唯一标识符（调用方生成的唯一字符串），用于索引和去重 */
-    char *session_id;      /**< 所属会话的 ID，关联到 cc_session_t */
-    cc_message_role_t role; /**< 消息的发送者角色（system/user/assistant/tool） */
-    char *content;         /**< 消息的文本内容，角色不同含义不同：
-                            *   - user/assistant: 自然语言文本
-                            *   - tool: 工具执行的输出结果
-                            *   - system: 系统提示词 */
-    char *content_parts_json; /**< 多模态消息内容数组 JSON。非 NULL 时优先用于构建
-                               *   provider-neutral content parts，content 保留为文本摘要。 */
-    char *tool_calls_json; /**< 结构化 assistant tool_calls 数组 JSON。
-                            *   仅 CC_ROLE_ASSISTANT 需要调用工具时使用。
-                            *   tool_calls 独立保存，避免和自然语言 content 混在一起。 */
-    char *reasoning_content; /**< LLM 推理/思考内容，独立于用户可见 content 存储。 */
-    char *tool_call_id;    /**< 关联的工具调用 ID。仅 CC_ROLE_TOOL 角色有效，
-                            *   用于将工具返回结果与对应的 tool_call 请求关联 */
-    char *created_at;      /**< 消息创建时间戳（ISO 8601 格式字符串） */
+    char *id;
+    char *session_id;
+    cc_message_role_t role;
+    cc_content_parts_t content;
+    cc_tool_call_list_t tool_calls;
+    char *reasoning_content;
+    char *tool_call_id;
+    char *created_at;
 } cc_message_t;
 
-/**
- * cc_message_create — 创建一条新消息
+/*
+ * 创建纯文本消息。
  *
- * 在堆上分配并初始化 cc_message_t。所有字符串参数会被内部拷贝，
- * 调用者仍保有原字符串的所有权。
- *
- * @param id           消息唯一标识符（可为 NULL，但调用方应传入唯一字符串）
- * @param session_id   所属会话 ID（不可为 NULL）
- * @param role         消息角色（system/user/assistant/tool）
- * @param content      消息文本内容（可为 NULL）
- * @param tool_call_id 关联的工具调用 ID（可为 NULL，仅 TOOL 角色使用）
- * @param out_message  输出：指向新创建消息的指针（调用者负责 cc_message_destroy）
- * @return             CC_OK 表示成功，否则包含错误码
+ * 函数会深拷贝 id/session_id/text/tool_call_id，并把文本转换为 content
+ * parts 中的一个输入文本片段。成功后 *out_message 的所有权交给调用方；
+ * 失败时不会泄漏半初始化对象，错误通过 cc_result_t 返回。
  */
-cc_result_t cc_message_create(
+cc_result_t cc_message_create_text(
     const char *id,
     const char *session_id,
     cc_message_role_t role,
-    const char *content,
+    const char *text,
     const char *tool_call_id,
     cc_message_t **out_message
 );
 
-/**
- * cc_message_destroy — 销毁消息并释放所有关联内存
+/*
+ * 创建多模态 content parts 消息。
  *
- * 释放 message 结构体及其所有字符串字段的内存。
- * 传入 NULL 是安全的（无操作）。
- *
- * @param message  要销毁的消息指针
+ * parts 会被深拷贝，调用方仍然拥有原始 parts。这个接口用于 assistant/user
+ * 同时携带文本、图片、artifact 引用等内容的场景；失败时 *out_message 保持
+ * NULL，便于嵌入式代码用单一路径处理 OOM。
  */
+cc_result_t cc_message_create_parts(
+    const char *id,
+    const char *session_id,
+    cc_message_role_t role,
+    const cc_content_parts_t *parts,
+    const char *tool_call_id,
+    cc_message_t **out_message
+);
+
+/* 释放堆上消息；允许传入 NULL，适合作为错误路径的统一清理函数。 */
 void cc_message_destroy(cc_message_t *message);
 
-/**
- * cc_message_cleanup — 释放栈上或数组内消息持有的字段
+/*
+ * 清理栈上或数组内的消息对象。
  *
- * 只释放字段，不释放 message 指针本身。用于 store->load_messages 返回的
- * 连续数组元素。
+ * 只释放字段和嵌套资源，不释放 message 指针本身；清理后结构被清零，调用方
+ * 可以安全地重新初始化。不要对同一对象重复 cleanup 后再访问旧字段。
  */
 void cc_message_cleanup(cc_message_t *message);
 
-/**
- * cc_message_copy — 深拷贝消息字段
+/*
+ * 深拷贝消息。
+ *
+ * dst 会先被清零，再获得 src 的独立副本；如果中途失败，函数会清理 dst，
+ * 避免调用方处理半拷贝状态。调用前 dst 不应持有需要保留的资源。
  */
 cc_result_t cc_message_copy(const cc_message_t *src, cc_message_t *dst);
 
-/**
- * cc_message_set_tool_calls_json — 替换 assistant 消息中的 tool_calls JSON 副本。
- *
- * @param message 要更新的消息；函数释放旧 tool_calls_json。
- * @param tool_calls_json 借用的新 JSON 文本；函数会深拷贝。
- * @return CC_OK 表示更新成功；失败返回参数或内存错误。
- */
-cc_result_t cc_message_set_tool_calls_json(cc_message_t *message, const char *tool_calls_json);
+/* 向消息追加一个 content part；part 内容会被底层列表深拷贝。 */
+cc_result_t cc_message_add_content_part(
+    cc_message_t *message,
+    const cc_content_part_t *part
+);
 
-/**
- * cc_message_set_content_parts_json — 替换消息中的多模态 content parts JSON 副本。
- *
- * @param message 要更新的消息；函数释放旧 content_parts_json。
- * @param content_parts_json 借用的新 JSON 文本；函数会深拷贝。
- * @return CC_OK 表示更新成功；失败返回参数或内存错误。
- */
-cc_result_t cc_message_set_content_parts_json(cc_message_t *message, const char *content_parts_json);
+/* 向 assistant 消息追加一次 tool call；call 会被深拷贝到消息内部列表。 */
+cc_result_t cc_message_add_tool_call(
+    cc_message_t *message,
+    const cc_tool_call_t *call
+);
 
-/**
- * cc_message_set_reasoning_content — 替换消息中的 reasoning_content 副本。
+/*
+ * 替换消息中的 tool call 列表。
  *
- * @param message 要更新的消息；函数释放旧 reasoning_content。
- * @param reasoning_content 借用的新推理内容；函数会深拷贝。
- * @return CC_OK 表示更新成功；失败返回参数或内存错误。
+ * 先拷贝新列表，拷贝成功后再释放旧列表，保证失败时原消息状态不被破坏。
  */
-cc_result_t cc_message_set_reasoning_content(cc_message_t *message, const char *reasoning_content);
+cc_result_t cc_message_set_tool_calls(
+    cc_message_t *message,
+    const cc_tool_call_list_t *tool_calls
+);
 
-/**
- * cc_message_role_string — 将角色枚举转换为字符串标识
+/* 设置 assistant 推理内容；传入 NULL 表示清空，字符串会被深拷贝。 */
+cc_result_t cc_message_set_reasoning_content(
+    cc_message_t *message,
+    const char *reasoning_content
+);
+
+/*
+ * 提取消息文本摘要。
  *
- * 用于 JSON 序列化、日志输出等场景。
- * 映射关系：CC_ROLE_SYSTEM→"system", CC_ROLE_USER→"user",
- *          CC_ROLE_ASSISTANT→"assistant", CC_ROLE_TOOL→"tool"
- *
- * @param role  消息角色枚举值
- * @return      对应的角色字符串（静态常量，不需要释放）
+ * 多模态消息会只汇总文本片段，返回的 out_summary 由调用方 free()。该接口用于
+ * 日志、memory 摘要和不支持多模态 provider 的降级路径。
  */
+cc_result_t cc_message_get_text_summary(
+    const cc_message_t *message,
+    char **out_summary
+);
+
+/*
+ * 序列化单条消息为 provider 友好的 JSON。
+ *
+ * include_reasoning_content 控制是否输出 reasoning_content，避免默认把模型思考
+ * 内容写入日志或发给不需要该字段的 provider。返回的 JSON 字符串由调用方 free()。
+ */
+cc_result_t cc_message_to_json(
+    const cc_message_t *message,
+    int include_reasoning_content,
+    char **out_json
+);
+
+/* 序列化消息数组；数组元素不会被修改，返回 JSON 字符串由调用方 free()。 */
+cc_result_t cc_messages_to_json(
+    const cc_message_t *messages,
+    size_t count,
+    int include_reasoning_content,
+    char **out_json
+);
+
+/*
+ * 从 JSON 解析消息到调用方提供的对象。
+ *
+ * out_message 会被初始化为可 cleanup 的深拷贝状态；失败时函数会清理已分配字段。
+ * 当前解析的是 SDK/provider 交互使用的 message 子集，不承诺保留未知字段。
+ */
+cc_result_t cc_message_from_json(
+    const char *json,
+    cc_message_t *out_message
+);
+
+/* role enum 到协议字符串的稳定映射；未知值返回 "unknown" 供日志诊断。 */
 const char *cc_message_role_string(cc_message_role_t role);
+
+/* 协议字符串到 role enum 的宽松解析；NULL 或未知字符串按 user 处理。 */
+cc_message_role_t cc_message_role_from_string(const char *role);
 
 #endif

@@ -1,19 +1,21 @@
-/**
- * test_run_queue_async_interrupt.c
- *
- * 固定真实 job queue 的 submit/interrupt/collect 行为：job 由 queue worker
- * 线程执行，调用方可在 job 运行期间取消 run，worker 通过 cancel token 协作退出。
- */
+
 
 #include "cc/app/cc_run_queue.h"
 #include "cc/ports/cc_thread.h"
 
+/* interrupt 测试状态，用 cond 等待任务真正开始后再取消。 */
 typedef struct interrupt_state {
     cc_mutex_t mutex;
     cc_cond_t cond;
     int started;
 } interrupt_state_t;
 
+/*
+ * 可取消任务。
+ *
+ * 任务启动后循环检查 cancel token；收到中断后返回 CC_ERR_CANCELLED，验证取消能传播到
+ * 正在运行的 job。
+ */
 static cc_result_t cancellable_task(void *user_data, cc_cancel_token_t *token)
 {
     interrupt_state_t *state = (interrupt_state_t *)user_data;
@@ -29,6 +31,11 @@ static cc_result_t cancellable_task(void *user_data, cc_cancel_token_t *token)
     return cc_result_error(CC_ERR_CANCELLED, "Task observed cancellation");
 }
 
+/*
+ * 验证异步提交后按 run_id interrupt。
+ *
+ * collect 应收到 CC_ERR_CANCELLED，并且 queue 的 in_flight/pending 计数归零。
+ */
 int main(void)
 {
     cc_run_queue_config_t config = cc_run_queue_default_config();

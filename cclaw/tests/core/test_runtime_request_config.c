@@ -8,6 +8,7 @@
 
 extern cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
 
+/* fake LLM 记录 runtime 传入 request 的 max_tokens/temperature。 */
 typedef struct {
     int sync_seen;
     int sync_max_tokens;
@@ -20,6 +21,7 @@ typedef struct {
     double summary_temperature;
 } fake_llm_state_t;
 
+/* 浮点比较 helper。 */
 static int double_eq(double a, double b)
 {
     double d = a - b;
@@ -27,30 +29,46 @@ static int double_eq(double a, double b)
     return d < 0.000001;
 }
 
+/*
+ * fake 同步 LLM。
+ *
+ * 普通 run 返回 sync-ok；如果上下文 builder 触发摘要 prompt，则记录 summary 配置并返回
+ * summary-ok，用来验证 summary_max_tokens/summary_temperature 透传。
+ */
 static cc_result_t fake_chat(void *self, const cc_llm_chat_request_t *request, cc_llm_response_t *out)
 {
     fake_llm_state_t *state = (fake_llm_state_t *)self;
-    memset(out, 0, sizeof(*out));
+    cc_llm_response_init(out);
 
-    if (request && request->messages_json &&
-        strstr(request->messages_json, "Summarize the following conversation")) {
+    char *messages_text = NULL;
+    if (request) {
+        cc_result_t json_rc = cc_messages_to_json(
+            request->messages, request->message_count, 1, &messages_text);
+        if (json_rc.code != CC_OK) return json_rc;
+    }
+
+    if (messages_text &&
+        strstr(messages_text, "Summarize the following conversation")) {
         state->summary_seen = 1;
         state->summary_max_tokens = request->max_tokens;
         state->summary_temperature = request->temperature;
-        out->text = strdup("summary-ok");
+        cc_result_t rc = cc_llm_response_set_text(out, "summary-ok");
+        free(messages_text);
+        if (rc.code != CC_OK) return rc;
     } else {
         state->sync_seen = 1;
         state->sync_max_tokens = request ? request->max_tokens : -1;
         state->sync_temperature = request ? request->temperature : -1.0;
-        out->text = strdup("sync-ok");
+        cc_result_t rc = cc_llm_response_set_text(out, "sync-ok");
+        free(messages_text);
+        if (rc.code != CC_OK) return rc;
     }
 
-    out->has_text = 1;
     out->finished = 1;
-    return out->text ? cc_result_ok() :
-        cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate fake response");
+    return cc_result_ok();
 }
 
+/* fake stream LLM：记录 stream request 配置并发出 text + finished chunk。 */
 static cc_result_t fake_chat_stream(
     void *self,
     const cc_llm_chat_request_t *request,
@@ -70,12 +88,14 @@ static cc_result_t fake_chat_stream(
     return cc_result_ok();
 }
 
+/* fake provider vtable，只实现 chat/chat_stream。 */
 static cc_llm_provider_vtable_t fake_vtable = {
     fake_chat,
     fake_chat_stream,
     NULL
 };
 
+/* 创建一套最小 runtime 依赖，供多个测试段复用。 */
 static int create_runtime(
     fake_llm_state_t *state,
     cc_agent_runtime_config_t config,
@@ -99,6 +119,7 @@ static int create_runtime(
     return cc_agent_runtime_create(&deps, &options, out_runtime).code == CC_OK ? 0 : 1;
 }
 
+/* 销毁 create_runtime 创建的 runtime/store/registry。 */
 static void destroy_runtime(
     cc_tool_registry_t *registry,
     cc_session_store_t *store,
@@ -110,10 +131,11 @@ static void destroy_runtime(
     cc_tool_registry_destroy(registry);
 }
 
+/* 向 session store 追加 user message，用来制造需要压缩的长历史。 */
 static int append_user_message(cc_session_store_t *store, const char *session_id, const char *id, const char *content)
 {
     cc_message_t *msg = NULL;
-    cc_result_t rc = cc_message_create(id, session_id, CC_ROLE_USER, content, NULL, &msg);
+    cc_result_t rc = cc_message_create_text(id, session_id, CC_ROLE_USER, content, NULL, &msg);
     if (rc.code != CC_OK) return 1;
     rc = store->vtable->append_message(store->self, msg);
     cc_message_destroy(msg);
@@ -122,6 +144,12 @@ static int append_user_message(cc_session_store_t *store, const char *session_id
     return failed;
 }
 
+/*
+ * 验证 runtime request 配置透传。
+ *
+ * 覆盖同步 run、stream run 的 max_tokens/temperature，以及 context 压缩摘要请求使用独立的
+ * summary 配置。
+ */
 int main(void)
 {
     int failed = 0;
@@ -192,13 +220,20 @@ int main(void)
         if (append_user_message(&store, "summary", id, long_text)) failed = 1;
     }
 
-    char *messages_json = NULL;
-    rc = cc_context_builder_build_messages(runtime, "summary", "system", &messages_json);
-    if (rc.code != CC_OK || !messages_json) failed = 1;
+    cc_message_t *messages = NULL;
+    size_t message_count = 0;
+    rc = cc_context_builder_build_messages(runtime, "summary", "system", &messages, &message_count);
+    char *messages_text = NULL;
+    if (rc.code == CC_OK) {
+        rc = cc_messages_to_json(messages, message_count, 1, &messages_text);
+    }
+    if (rc.code != CC_OK || !messages_text) failed = 1;
     if (!state.summary_seen || state.summary_max_tokens != 321 ||
         !double_eq(state.summary_temperature, 0.15)) failed = 1;
-    if (messages_json && !strstr(messages_json, "summary-ok")) failed = 1;
-    free(messages_json);
+    if (messages_text && !strstr(messages_text, "summary-ok")) failed = 1;
+    free(messages_text);
+    for (size_t i = 0; i < message_count; i++) cc_message_cleanup(&messages[i]);
+    free(messages);
     cc_result_free(&rc);
     destroy_runtime(registry, &store, runtime);
 

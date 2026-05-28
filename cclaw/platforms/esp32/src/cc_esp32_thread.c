@@ -1,38 +1,6 @@
-/**
- * 学习导读：cclaw/platforms/esp32/src/cc_esp32_thread.c
- *
- * 所属层次：平台层。
- * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_esp32_thread.c — ESP32 FreeRTOS 线程与同步原语封装
- *
- * 在整体架构中的角色和层次：
- *   本模块位于 Platform 层的 ESP32 平台实现子层。
- *   Platform 层是整个系统的最底层，负责封装操作系统差异。
- *   本文件是 cc_thread.h 端口接口在 ESP32（FreeRTOS）平台的具体实现，
- *   基于 FreeRTOS xTaskCreate / xSemaphore 提供线程创建/等待、互斥锁
- *   和条件变量等同步原语。向上层提供统一的线程管理接口。
- *
- * 线程模型（FreeRTOS Task + Binary Semaphore Join）：
- *   FreeRTOS task 本身没有 pthread_join 等价物，因此每个线程 wrapper
- *   （cc_esp32_thread_t）持有一个 binary semaphore。task 启动时执行入口函数，
- *   执行完毕后 xSemaphoreGive(done) 通知，cc_thread_join 通过
- *   xSemaphoreTake(done, portMAX_DELAY) 等待。wrapper 在 join 完成后释放。
- *   栈大小固定为 8192 字节，优先级为 tskIDLE_PRIORITY + 1，任务名为 "cclaw_thread"。
- *
- * 互斥锁模型（FreeRTOS Mutex Semaphore）：
- *   使用 xSemaphoreCreateMutex() 创建互斥信号量，支持优先级继承。
- *   lock/unlock 分别映射为 xSemaphoreTake/xSemaphoreGive。
- *
- * 条件变量模型（Binary Semaphore 模拟）：
- *   FreeRTOS 没有原生条件变量，使用 binary semaphore 模拟：
- *   wait 操作先释放互斥锁、等待条件信号量、再重新获取互斥锁。
- *   此实现不支持 broadcast（signal 和 broadcast 行为相同，仅 give 一次）。
- */
+
+
 
 #include "cc/ports/cc_thread.h"
 
@@ -42,11 +10,11 @@
 #include "freertos/semphr.h"
 #include <stdlib.h>
 
-/**
- * cc_esp32_thread — FreeRTOS task join 包装。
+/*
+ * ESP32 thread 包装对象。
  *
- * FreeRTOS task 本身没有 pthread_join 等价物，因此 wrapper 持有一个 binary
- * semaphore。task 结束前 give，cc_thread_join take 后释放 wrapper。
+ * FreeRTOS task 本身不能像 pthread 那样直接 join，因此用二值信号量 done 表示任务函数
+ * 已结束。join 等待 done 后释放包装对象。
  */
 typedef struct cc_esp32_thread {
     cc_thread_fn_t fn;
@@ -54,11 +22,11 @@ typedef struct cc_esp32_thread {
     SemaphoreHandle_t done;
 } cc_esp32_thread_t;
 
-/**
- * cc_esp32_thread_entry — FreeRTOS task trampoline。
+/*
+ * FreeRTOS task 入口。
  *
- * arg 是 cc_esp32_thread_t*，由 cc_thread_create 分配并由 join 释放。入口函数
- * 执行完后通知 done semaphore，再删除当前 task。
+ * 调用 SDK 线程函数后释放 done 信号量通知 join，再删除当前 task。arg 指向堆上的
+ * cc_esp32_thread_t。
  */
 static void cc_esp32_thread_entry(void *arg)
 {
@@ -68,11 +36,10 @@ static void cc_esp32_thread_entry(void *arg)
     vTaskDelete(NULL);
 }
 
-/**
- * cc_thread_create — 用 FreeRTOS task 实现 cc_thread_t。
+/*
+ * 创建 ESP32 FreeRTOS task。
  *
- * wrapper 拥有 done semaphore，但不拥有 arg；arg 生命周期仍由调用方或上层 job
- * 对象管理。栈大小固定为 8192 字节，适合当前 QEMU smoke 和轻量 SDK 任务。
+ * cc_thread_t 返回包装对象指针；栈大小当前固定 8192，嵌入式产品可按实际 profile 调整。
  */
 cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thread)
 {
@@ -107,11 +74,10 @@ cc_result_t cc_thread_create(cc_thread_fn_t fn, void *arg, cc_thread_t *out_thre
     return cc_result_ok();
 }
 
-/**
- * cc_thread_join — 等待平台线程结束，并把底层 join 错误转换为统一结果。
+/*
+ * 等待 ESP32 task 完成。
  *
- * @param handle 按值传入，用于控制本次操作。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * join 通过 done 信号量实现，只能调用一次；成功后删除信号量并释放包装对象。
  */
 cc_result_t cc_thread_join(cc_thread_t handle)
 {
@@ -123,12 +89,7 @@ cc_result_t cc_thread_join(cc_thread_t handle)
     return cc_result_ok();
 }
 
-/**
- * cc_mutex_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
- *
- * @param out_mutex 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
- */
+/* 创建 FreeRTOS mutex；返回的不透明句柄由调用方 destroy。 */
 cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
 {
     if (!out_mutex) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid mutex output");
@@ -138,36 +99,30 @@ cc_result_t cc_mutex_create(cc_mutex_t *out_mutex)
     return cc_result_ok();
 }
 
-/**
- * cc_mutex_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
- *
- * @param mutex 借用的对象；函数不释放该对象本身。
- */
+/* 删除 FreeRTOS mutex；调用方必须保证没有任务仍在等待或持有。 */
 void cc_mutex_destroy(cc_mutex_t mutex)
 {
     if (mutex) vSemaphoreDelete((SemaphoreHandle_t)mutex);
 }
 
-/**
- * cc_mutex_lock — 获取 ESP32 FreeRTOS mutex，进入临界区。
- *
- * @param mutex 借用互斥锁句柄；NULL 时函数直接返回。
- */
+/* 阻塞获取 mutex。 */
 void cc_mutex_lock(cc_mutex_t mutex)
 {
     if (mutex) xSemaphoreTake((SemaphoreHandle_t)mutex, portMAX_DELAY);
 }
 
-/**
- * cc_mutex_unlock — 离开平台互斥锁临界区，让其他线程继续访问共享状态。
- *
- * @param mutex 借用的对象；函数不释放该对象本身。
- */
+/* 释放 mutex。 */
 void cc_mutex_unlock(cc_mutex_t mutex)
 {
     if (mutex) xSemaphoreGive((SemaphoreHandle_t)mutex);
 }
 
+/*
+ * 创建条件变量替代物。
+ *
+ * FreeRTOS 没有 pthread cond，这里用二值信号量近似；它不具备真正 broadcast 语义，适合
+ * 简单等待/唤醒场景。
+ */
 cc_result_t cc_cond_create(cc_cond_t *out_cond)
 {
     if (!out_cond) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid condition output");
@@ -177,11 +132,17 @@ cc_result_t cc_cond_create(cc_cond_t *out_cond)
     return cc_result_ok();
 }
 
+/* 删除条件变量信号量。 */
 void cc_cond_destroy(cc_cond_t cond)
 {
     if (cond) vSemaphoreDelete((SemaphoreHandle_t)cond);
 }
 
+/*
+ * 条件等待。
+ *
+ * 进入等待前释放 mutex，被唤醒后重新获取 mutex，模拟 pthread_cond_wait 的基本语义。
+ */
 void cc_cond_wait(cc_cond_t cond, cc_mutex_t mutex)
 {
     if (!cond || !mutex) return;
@@ -190,6 +151,7 @@ void cc_cond_wait(cc_cond_t cond, cc_mutex_t mutex)
     xSemaphoreTake((SemaphoreHandle_t)mutex, portMAX_DELAY);
 }
 
+/* 带超时条件等待；timeout_ms <= 0 表示永久等待。 */
 int cc_cond_timedwait(cc_cond_t cond, cc_mutex_t mutex, int timeout_ms)
 {
     if (!cond || !mutex) return 0;
@@ -200,11 +162,13 @@ int cc_cond_timedwait(cc_cond_t cond, cc_mutex_t mutex, int timeout_ms)
     return ok == pdTRUE ? 1 : 0;
 }
 
+/* 唤醒一个等待者。 */
 void cc_cond_signal(cc_cond_t cond)
 {
     if (cond) xSemaphoreGive((SemaphoreHandle_t)cond);
 }
 
+/* FreeRTOS 二值信号量无法真正广播，这里退化为一次 give。 */
 void cc_cond_broadcast(cc_cond_t cond)
 {
     if (cond) xSemaphoreGive((SemaphoreHandle_t)cond);

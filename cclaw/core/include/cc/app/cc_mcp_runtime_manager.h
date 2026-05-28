@@ -1,12 +1,4 @@
-/**
- * cc_mcp_runtime_manager.h — MCP client runtime and tool bridge.
- *
- * 所属层次：核心 SDK。
- *
- * 本模块负责 MCP 协议状态机、session cache、TTL、工具注册和 JSON-RPC
- * request/response 语义。它不启动进程、不创建 socket、不依赖 curl/Win32；
- * 具体 stdio、HTTP、SSE、streamable HTTP 由 app/platform 提供 transport。
- */
+
 
 #ifndef CC_MCP_RUNTIME_MANAGER_H
 #define CC_MCP_RUNTIME_MANAGER_H
@@ -21,20 +13,29 @@
 extern "C" {
 #endif
 
+/*
+ * MCP runtime manager 不透明句柄。
+ *
+ * manager 负责根据配置连接 MCP server、发现工具并注册到 tool registry。SDK 只提供协议
+ * 管理层，不内置具体业务 server。
+ */
 typedef struct cc_mcp_runtime_manager cc_mcp_runtime_manager_t;
 
+/* MCP transport 接口对象：self + vtable，便于进程管道、stdio、测试 fake 等实现。 */
 typedef struct cc_mcp_transport {
     void *self;
     const struct cc_mcp_transport_vtable *vtable;
 } cc_mcp_transport_t;
 
+/* MCP transport vtable。 */
 typedef struct cc_mcp_transport_vtable {
-    /**
-     * 发送一条完整 JSON-RPC request，并返回匹配该 request id 的 JSON-RPC response。
+
+
+    /*
+     * 发送 JSON-RPC 请求并等待响应。
      *
-     * out_response_json 由 transport 分配，core manager 在解析后 free。transport
-     * 可以是串行的 stdio，也可以是允许并发的 HTTP；并发语义通过 is_serial 告诉
-     * manager，由 manager 决定是否在 send 期间持有 server mutex。
+     * request_json 借用；out_response_json 成功后由调用方 free()。timeout/cancel_token
+     * 用于避免 server 卡死阻塞 runtime。
      */
     cc_result_t (*send_json)(
         void *self,
@@ -43,28 +44,40 @@ typedef struct cc_mcp_transport_vtable {
         cc_cancel_token_t *cancel_token,
         char **out_response_json
     );
-    /** 复位连接/session。TTL、reload dispose 或 session reset 都走同一语义。 */
+
+    /* 重置连接状态；用于协议错误或 reload 后重新同步。 */
     cc_result_t (*reset)(void *self);
-    /** 非 0 表示 transport 内部只能串行执行请求，例如单 stdio worker。 */
+
+    /* 返回 transport 是否只能串行请求；stdio 类 transport 通常需要串行化。 */
     int (*is_serial)(void *self);
-    /** 销毁 transport 私有资源；manager 取得 transport 所有权后负责调用。 */
+
+    /* 销毁 transport self。 */
     void (*destroy)(void *self);
 } cc_mcp_transport_vtable_t;
 
+/*
+ * MCP transport factory。
+ *
+ * server_config 只在调用期间借用；out_transport 成功后由 manager 管理。user_data 由调用方
+ * 注入，用于测试 fake 或平台特定创建参数。
+ */
 typedef cc_result_t (*cc_mcp_transport_factory_fn)(
     const cc_config_mcp_server_t *server_config,
     cc_mcp_transport_t *out_transport,
     void *user_data
 );
 
+/* 创建 MCP runtime manager；factory 用于后续 load_tools 时创建 server transport。 */
 cc_result_t cc_mcp_runtime_manager_create(
     cc_mcp_transport_factory_fn factory,
     void *factory_user_data,
     cc_mcp_runtime_manager_t **out_manager
 );
 
+/* 销毁 manager 和所有已加载 transport/tool state。 */
 void cc_mcp_runtime_manager_destroy(cc_mcp_runtime_manager_t *manager);
 
+/* 根据 config 加载 MCP tools 并注册到 registry；diagnostics 记录可恢复加载问题。 */
 cc_result_t cc_mcp_runtime_manager_load_tools(
     cc_mcp_runtime_manager_t *manager,
     const cc_config_t *config,
@@ -72,12 +85,8 @@ cc_result_t cc_mcp_runtime_manager_load_tools(
     cc_runtime_diagnostics_t *diagnostics
 );
 
-/**
- * 判断 response_json 是否是 request_json 对应 id 的 JSON-RPC response。
- *
- * HTTP/SSE transport 用它从 event stream 中挑出当前请求的响应。这样 request id
- * 比较规则留在 SDK 协议层，而不是散落在各个平台 transport 里。
- */
+
+/* 校验 JSON-RPC response id 是否匹配 request id；out_matches 写 0/1。 */
 cc_result_t cc_mcp_jsonrpc_response_matches_request(
     const char *request_json,
     const char *response_json,

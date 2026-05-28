@@ -1,20 +1,17 @@
-/**
- * test_config_runtime_sections.c
- *
- * 测试目标：固定新的分段配置模型，避免后续把 queue/tools/plugins/skills/mcp
- * 又散落回硬编码或旧的独立配置文件中。
- */
+
 
 #include "cc/util/cc_config.h"
 
 #include <stdio.h>
 #include <string.h>
 
+/* 空安全字符串相等 helper，减少断言处重复判空。 */
 static int streq(const char *a, const char *b)
 {
     return a && b && strcmp(a, b) == 0;
 }
 
+/* 写入临时非法配置并断言 cc_config_load 返回 invalid argument 且 message 命中关键字。 */
 static int load_invalid_config_fails(const char *json, const char *needle)
 {
     const char *path = "__c_claw_invalid_config_test__.json";
@@ -34,6 +31,48 @@ static int load_invalid_config_fails(const char *json, const char *needle)
     return ok;
 }
 
+/* 写入临时配置并断言返回指定错误码和错误信息关键字。 */
+static int load_config_fails(const char *json, cc_error_code_t code, const char *needle)
+{
+    const char *path = "__c_claw_unsupported_config_test__.json";
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+    fputs(json, f);
+    fclose(f);
+
+    cc_config_t config;
+    cc_result_t rc = cc_config_load(path, &config);
+    remove(path);
+    int ok = rc.code == code &&
+        rc.message &&
+        strstr(rc.message, needle) != NULL;
+    cc_result_free(&rc);
+    cc_config_destroy(&config);
+    return ok;
+}
+
+/* 写入临时合法配置并加载到调用方提供的 config，成功后由调用方 destroy。 */
+static int load_config_ok(const char *json, cc_config_t *config)
+{
+    const char *path = "__c_claw_supported_config_test__.json";
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+    fputs(json, f);
+    fclose(f);
+
+    cc_result_t rc = cc_config_load(path, config);
+    remove(path);
+    int ok = rc.code == CC_OK;
+    cc_result_free(&rc);
+    return ok;
+}
+
+/*
+ * 验证 runtime 相关配置 section。
+ *
+ * 覆盖 queue/agents/tools/plugins/skills/MCP/active memory/multimodal 的解析、默认裁剪宏下
+ * 的 unsupported 行为，以及几个关键非法配置的校验错误。
+ */
 int main(void)
 {
     const char *path = "__c_claw_runtime_sections_test__.json";
@@ -49,6 +88,7 @@ int main(void)
         "\"skills\":[\"core\"]},\"list\":[{\"id\":\"reviewer\",\"model\":\"review-model\","
         "\"skills\":[\"code-review\"]}]},"
         "\"tools\":{\"enabled\":[\"file_read\",\"plugin.echo\"],\"defaultTimeoutMs\":1234,"
+        "\"networkAllowlist\":[\"api.example.com\",\"*.trusted.local\"],"
         "\"perTool\":{\"plugin.echo\":{\"concurrency\":2,\"timeoutMs\":4567}}},"
         "\"plugins\":{\"hotReload\":true,\"reloadDebounceMs\":88,\"entries\":{"
         "\"echo\":{\"command\":\"python3\",\"args\":[\"plugin.py\"],\"workers\":2,"
@@ -92,6 +132,8 @@ int main(void)
     ok = ok && config.tools.enabled.count == 2;
     ok = ok && config.enabled_tools_count == 2;
     ok = ok && config.tools.default_timeout_ms == 1234;
+    ok = ok && config.tools.network_allowlist.count == 2;
+    ok = ok && streq(config.tools.network_allowlist.items[0], "api.example.com");
     ok = ok && config.tools.policy_count == 1;
     ok = ok && streq(config.tools.policies[0].name, "plugin.echo");
     ok = ok && config.tools.policies[0].concurrency == 2;
@@ -120,8 +162,34 @@ int main(void)
     ok = ok && config.active_memory_write_summary == 1;
     ok = ok && config.active_memory_max_value_chars == 256;
     ok = ok && streq(config.active_memory_category, "turn_summary");
+    ok = ok && config.multimodal.input.image == 0;
+    ok = ok && config.multimodal.output.image == 0;
 
     cc_config_destroy(&config);
+
+#if CC_ENABLE_MULTIMODAL && CC_ENABLE_MEDIA_IMAGE
+    cc_config_t mm_config;
+    if (load_config_ok(
+        "{\"multimodal\":{\"input\":{\"image\":true},"
+        "\"output\":{\"image\":false},\"limits\":{\"maxArtifacts\":4,"
+        "\"maxArtifactBytes\":4096,\"allowedMimePrefixes\":[\"image/\"]}}}",
+        &mm_config)) {
+        ok = ok && mm_config.multimodal.input.image == 1;
+        ok = ok && mm_config.multimodal.output.image == 0;
+        ok = ok && mm_config.multimodal.limits.max_artifacts == 4;
+        ok = ok && mm_config.multimodal.limits.allowed_mime_prefixes.count == 1;
+        ok = ok && streq(mm_config.multimodal.limits.allowed_mime_prefixes.items[0], "image/");
+        cc_config_destroy(&mm_config);
+    } else {
+        ok = 0;
+    }
+#else
+    ok = ok && load_config_fails(
+        "{\"multimodal\":{\"input\":{\"image\":true}}}",
+        CC_ERR_UNSUPPORTED,
+        "multimodal");
+#endif
+
     ok = ok && load_invalid_config_fails(
         "{\"mcp\":{\"enabled\":true,\"servers\":{\"bad\":{\"transport\":\"streamable_http\"}}}}",
         "requires url");

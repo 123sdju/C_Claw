@@ -1,28 +1,61 @@
-# 学习导读：cclaw/CMakeLists.txt
-# 所属层次：构建脚本。
-# 阅读重点：这里描述目标、源码、依赖和编译宏，阅读时重点看 profile 如何决定最终被编译的模块。
-# 注释说明：如果注释与代码冲突，以代码行为和测试为准。
+
+
+
+
 cmake_minimum_required(VERSION 3.16)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(c_claw C)
+    project(c_claw VERSION 0.1.0 LANGUAGES C)
 endif()
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers")
 
+if(NOT DEFINED CCLAW_VERSION)
+    set(CCLAW_VERSION "0.1.0")
+endif()
+
+option(CC_BUILD_SHARED "Build c-claw runtime as a shared library" OFF)
+if(CC_BUILD_SHARED)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 set(CC_PROFILE "core-minimal" CACHE STRING "Build profile: core-minimal")
-set_property(CACHE CC_PROFILE PROPERTY STRINGS core-minimal)
+set_property(CACHE CC_PROFILE PROPERTY STRINGS
+    core-minimal
+    multimodal-full
+    desktop-agent
+    mcu-text
+    mcu-mm-lite)
 
 set(CC_PROFILE_FILE "${CMAKE_CURRENT_LIST_DIR}/profiles/${CC_PROFILE}.cmake")
 if(NOT EXISTS "${CC_PROFILE_FILE}")
     message(FATAL_ERROR "Unknown CC_PROFILE: ${CC_PROFILE}")
 endif()
-# profile 文件只设置默认值；用户仍可在 cmake 命令行里覆盖 CACHE 选项。
+
 include("${CC_PROFILE_FILE}")
 
-# CC_TARGET_PLATFORM 可以显式指定，也可以 auto；resolved 值会驱动 platforms/<name> 子目录。
+function(cc_profile_default var value)
+    if(NOT DEFINED ${var})
+        set(${var} "${value}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+cc_profile_default(CC_PROFILE_ENABLE_MULTIMODAL OFF)
+cc_profile_default(CC_PROFILE_ENABLE_MEDIA_IMAGE OFF)
+cc_profile_default(CC_PROFILE_ENABLE_MEDIA_AUDIO OFF)
+cc_profile_default(CC_PROFILE_ENABLE_MEDIA_VIDEO OFF)
+cc_profile_default(CC_PROFILE_ENABLE_MEDIA_FILE OFF)
+cc_profile_default(CC_PROFILE_ENABLE_MEDIA_OUTPUT OFF)
+cc_profile_default(CC_PROFILE_ENABLE_INLINE_BASE64 OFF)
+cc_profile_default(CC_PROFILE_ENABLE_ARTIFACT_STORE OFF)
+cc_profile_default(CC_PROFILE_ENABLE_STREAMING ON)
+cc_profile_default(CC_PROFILE_ENABLE_SESSION_STORE_MEMORY ON)
+cc_profile_default(CC_PROFILE_ENABLE_SESSION_STORE_JSON_FILE ON)
+cc_profile_default(CC_PROFILE_ENABLE_SESSION_STORE_SQLITE "${CC_PROFILE_ENABLE_SQLITE}")
+
+
 set(CC_TARGET_PLATFORM "${CC_PROFILE_TARGET_PLATFORM}" CACHE STRING "Target platform: auto, posix, windows, esp32, freertos")
 set_property(CACHE CC_TARGET_PLATFORM PROPERTY STRINGS auto posix windows esp32 freertos)
 
@@ -39,7 +72,7 @@ else()
 endif()
 set(CC_TARGET_PLATFORM_RESOLVED "${CC_TARGET_PLATFORM_RESOLVED}" CACHE INTERNAL "Resolved c-claw platform")
 
-# 平台 ID 会变成 C 宏 CC_PLATFORM，供 cc_platform.h 推导平台能力。
+
 if(CC_TARGET_PLATFORM_RESOLVED STREQUAL "posix")
     set(CC_PLATFORM_ID 100)
 elseif(CC_TARGET_PLATFORM_RESOLVED STREQUAL "windows")
@@ -58,7 +91,7 @@ if(CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32" AND NOT ESP_PLATFORM)
         "(ESP_PLATFORM is not set).")
 endif()
 
-# 同一个 build 目录不能在 posix/windows/esp32 间反复切换，否则对象文件和配置缓存会混在一起。
+
 if(DEFINED CC_CACHED_TARGET_PLATFORM AND
    NOT CC_CACHED_TARGET_PLATFORM STREQUAL CC_TARGET_PLATFORM_RESOLVED)
     message(FATAL_ERROR
@@ -87,21 +120,39 @@ option(CC_ENABLE_MCP_HTTP "Enable HTTP/SSE MCP transport" ${CC_PROFILE_ENABLE_MC
 option(CC_ENABLE_SUBAGENTS "Enable subagent services" ${CC_PROFILE_ENABLE_SUBAGENTS})
 option(CC_ENABLE_ACTIVE_MEMORY "Enable active memory hook for run context and summary writes" ${CC_PROFILE_ENABLE_ACTIVE_MEMORY})
 option(CC_ENABLE_DOCKER_SANDBOX "Enable Docker sandbox adapter" ${CC_PROFILE_ENABLE_DOCKER_SANDBOX})
-option(CC_ENABLE_SQLITE "Enable SQLite storage backend" ${CC_PROFILE_ENABLE_SQLITE})
+option(CC_ENABLE_MULTIMODAL "Enable SDK multimodal content/artifact APIs at runtime" ${CC_PROFILE_ENABLE_MULTIMODAL})
+option(CC_ENABLE_MEDIA_IMAGE "Enable image modality" ${CC_PROFILE_ENABLE_MEDIA_IMAGE})
+option(CC_ENABLE_MEDIA_AUDIO "Enable audio modality" ${CC_PROFILE_ENABLE_MEDIA_AUDIO})
+option(CC_ENABLE_MEDIA_VIDEO "Enable video modality" ${CC_PROFILE_ENABLE_MEDIA_VIDEO})
+option(CC_ENABLE_MEDIA_FILE "Enable generic file modality" ${CC_PROFILE_ENABLE_MEDIA_FILE})
+option(CC_ENABLE_MEDIA_OUTPUT "Enable non-text media output" ${CC_PROFILE_ENABLE_MEDIA_OUTPUT})
+option(CC_ENABLE_INLINE_BASE64 "Enable inline base64 media payloads" ${CC_PROFILE_ENABLE_INLINE_BASE64})
+option(CC_ENABLE_ARTIFACT_STORE "Enable local artifact store adapters" ${CC_PROFILE_ENABLE_ARTIFACT_STORE})
+option(CC_ENABLE_STREAMING "Enable streaming response/event code paths" ${CC_PROFILE_ENABLE_STREAMING})
+option(CC_ENABLE_SESSION_STORE_MEMORY "Enable in-memory session store" ${CC_PROFILE_ENABLE_SESSION_STORE_MEMORY})
+option(CC_ENABLE_SESSION_STORE_JSON_FILE "Enable JSON-file session store" ${CC_PROFILE_ENABLE_SESSION_STORE_JSON_FILE})
+option(CC_ENABLE_SESSION_STORE_SQLITE "Enable SQLite session store" ${CC_PROFILE_ENABLE_SESSION_STORE_SQLITE})
+option(CC_ENABLE_SQLITE "Compatibility alias for CC_ENABLE_SESSION_STORE_SQLITE" ${CC_ENABLE_SESSION_STORE_SQLITE})
+if(CC_ENABLE_SQLITE AND NOT CC_ENABLE_SESSION_STORE_SQLITE)
+    set(CC_ENABLE_SESSION_STORE_SQLITE ON CACHE BOOL "Enable SQLite session store" FORCE)
+elseif(CC_ENABLE_SESSION_STORE_SQLITE AND NOT CC_ENABLE_SQLITE)
+    set(CC_ENABLE_SQLITE ON CACHE BOOL "Compatibility alias for CC_ENABLE_SESSION_STORE_SQLITE" FORCE)
+endif()
 option(CC_ENABLE_OPENAI "Enable OpenAI-compatible LLM adapter" ${CC_PROFILE_ENABLE_OPENAI})
 option(CC_ENABLE_OLLAMA "Enable Ollama LLM adapter" ${CC_PROFILE_ENABLE_OLLAMA})
 option(CC_ENABLE_ANTHROPIC "Enable Anthropic LLM adapter" ${CC_PROFILE_ENABLE_ANTHROPIC})
+option(CC_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
 message(STATUS "c-claw profile: ${CC_PROFILE}")
 message(STATUS "c-claw target platform: ${CC_TARGET_PLATFORM_RESOLVED}")
 
-# 桌面平台需要线程库；ESP32 线程能力由 ESP-IDF 适配层提供。
+
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32" AND NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "freertos")
     find_package(Threads REQUIRED)
 endif()
 
-# 只要启用 HTTP 工具或任一 HTTP-backed LLM，就需要编译平台 HTTP client。
+
 set(CC_NEEDS_HTTP_CLIENT OFF)
 if(CC_ENABLE_HTTP_TOOL OR CC_ENABLE_OPENAI OR CC_ENABLE_OLLAMA OR CC_ENABLE_ANTHROPIC OR CC_ENABLE_MCP_HTTP)
     set(CC_NEEDS_HTTP_CLIENT ON)
@@ -112,7 +163,7 @@ if(CC_TARGET_PLATFORM_RESOLVED STREQUAL "windows" AND CC_ENABLE_DOCKER_SANDBOX)
     set(CC_ENABLE_DOCKER_SANDBOX OFF CACHE BOOL "Enable Docker sandbox adapter" FORCE)
 endif()
 
-# 这些默认路径被编译成宏，配置文件缺失时 cc_config_load_default 会使用它们。
+
 if(NOT DEFINED CC_PROFILE_DEFAULT_CONFIG_PATH)
     set(CC_PROFILE_DEFAULT_CONFIG_PATH "")
 endif()
@@ -123,7 +174,7 @@ if(NOT DEFINED CC_PROFILE_DEFAULT_WORKSPACE_PATH)
     set(CC_PROFILE_DEFAULT_WORKSPACE_PATH "${CMAKE_BINARY_DIR}/${CC_PROFILE}/runtime/workspace")
 endif()
 if(NOT DEFINED CC_PROFILE_DEFAULT_STORAGE_PATH)
-    if(CC_ENABLE_SQLITE)
+    if(CC_ENABLE_SESSION_STORE_SQLITE)
         set(CC_PROFILE_DEFAULT_STORAGE_PATH "${CC_PROFILE_DEFAULT_DATA_DIR}/c-claw.db")
     else()
         set(CC_PROFILE_DEFAULT_STORAGE_PATH "${CC_PROFILE_DEFAULT_DATA_DIR}/sessions.json")
@@ -147,7 +198,7 @@ set(CC_DEFAULT_MEMORY_PATH_VALUE "${CC_PROFILE_DEFAULT_MEMORY_PATH}")
 set(CC_DEFAULT_SOUL_FILE_VALUE "${CC_PROFILE_DEFAULT_SOUL_FILE}")
 set(CC_DEFAULT_USER_FILE_VALUE "${CC_PROFILE_DEFAULT_USER_FILE}")
 
-# 桌面构建提前创建 runtime/data 和 workspace，避免首次运行时工具写入失败。
+
 if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32" AND NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "freertos")
     file(MAKE_DIRECTORY
         "${CC_DEFAULT_DATA_DIR_VALUE}"
@@ -155,7 +206,7 @@ if(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32" AND NOT CC_TARGET_PLATFORM_R
     )
 endif()
 
-# c_claw_project_options 是全仓库共享的编译契约：功能开关、平台能力和默认路径都从这里传入 C 代码。
+
 add_library(c_claw_project_options INTERFACE)
 target_compile_definitions(c_claw_project_options INTERFACE
     CC_PLATFORM=${CC_PLATFORM_ID}
@@ -178,9 +229,18 @@ target_compile_definitions(c_claw_project_options INTERFACE
     CC_ENABLE_MCP_HTTP=$<BOOL:${CC_ENABLE_MCP_HTTP}>
     CC_ENABLE_SUBAGENTS=$<BOOL:${CC_ENABLE_SUBAGENTS}>
     CC_ENABLE_ACTIVE_MEMORY=$<BOOL:${CC_ENABLE_ACTIVE_MEMORY}>
-    CC_STORAGE_SQLITE=$<BOOL:${CC_ENABLE_SQLITE}>
-    CC_STORAGE_JSON_FILE=1
-    CC_STORAGE_MEMORY=1
+    CC_ENABLE_MULTIMODAL=$<BOOL:${CC_ENABLE_MULTIMODAL}>
+    CC_ENABLE_MEDIA_IMAGE=$<BOOL:${CC_ENABLE_MEDIA_IMAGE}>
+    CC_ENABLE_MEDIA_AUDIO=$<BOOL:${CC_ENABLE_MEDIA_AUDIO}>
+    CC_ENABLE_MEDIA_VIDEO=$<BOOL:${CC_ENABLE_MEDIA_VIDEO}>
+    CC_ENABLE_MEDIA_FILE=$<BOOL:${CC_ENABLE_MEDIA_FILE}>
+    CC_ENABLE_MEDIA_OUTPUT=$<BOOL:${CC_ENABLE_MEDIA_OUTPUT}>
+    CC_ENABLE_INLINE_BASE64=$<BOOL:${CC_ENABLE_INLINE_BASE64}>
+    CC_ENABLE_ARTIFACT_STORE=$<BOOL:${CC_ENABLE_ARTIFACT_STORE}>
+    CC_ENABLE_STREAMING=$<BOOL:${CC_ENABLE_STREAMING}>
+    CC_STORAGE_SQLITE=$<BOOL:${CC_ENABLE_SESSION_STORE_SQLITE}>
+    CC_STORAGE_JSON_FILE=$<BOOL:${CC_ENABLE_SESSION_STORE_JSON_FILE}>
+    CC_STORAGE_MEMORY=$<BOOL:${CC_ENABLE_SESSION_STORE_MEMORY}>
     CC_LLM_OPENAI=$<BOOL:${CC_ENABLE_OPENAI}>
     CC_LLM_OLLAMA=$<BOOL:${CC_ENABLE_OLLAMA}>
     CC_LLM_ANTHROPIC=$<BOOL:${CC_ENABLE_ANTHROPIC}>
@@ -193,6 +253,20 @@ target_compile_definitions(c_claw_project_options INTERFACE
     CC_DEFAULT_SOUL_FILE="${CC_DEFAULT_SOUL_FILE_VALUE}"
     CC_DEFAULT_USER_FILE="${CC_DEFAULT_USER_FILE_VALUE}"
 )
+
+if(CC_ENABLE_SANITIZERS)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(c_claw_project_options INTERFACE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer
+        )
+        target_link_options(c_claw_project_options INTERFACE
+            -fsanitize=address,undefined
+        )
+    else()
+        message(WARNING "CC_ENABLE_SANITIZERS is only configured for GCC/Clang")
+    endif()
+endif()
 
 if(CC_TARGET_PLATFORM_RESOLVED STREQUAL "windows" AND NOT MINGW)
     target_compile_definitions(c_claw_project_options INTERFACE
@@ -208,18 +282,29 @@ elseif(NOT CC_TARGET_PLATFORM_RESOLVED STREQUAL "esp32")
         _XOPEN_SOURCE=700)
 endif()
 
-# 先编译抽象端口和核心，再编译可选适配器，最后选中一个平台实现。
+
 add_subdirectory(ports)
 add_subdirectory(core)
 add_subdirectory(adapters)
 add_subdirectory("platforms/${CC_TARGET_PLATFORM_RESOLVED}")
 
-# runtime 静态库把 core/adapters/platform 的对象文件合并，供 app 或测试链接。
+
 set(CC_PLATFORM_OBJECT_TARGET "c_claw_platform_${CC_TARGET_PLATFORM_RESOLVED}_objects")
-add_library(c_claw_runtime STATIC
+set(CC_RUNTIME_LIBRARY_TYPE STATIC)
+if(CC_BUILD_SHARED)
+    set(CC_RUNTIME_LIBRARY_TYPE SHARED)
+endif()
+
+add_library(c_claw_runtime ${CC_RUNTIME_LIBRARY_TYPE}
     $<TARGET_OBJECTS:c_claw_core_objects>
     $<TARGET_OBJECTS:c_claw_adapters_objects>
     $<TARGET_OBJECTS:${CC_PLATFORM_OBJECT_TARGET}>
+)
+add_library(CClaw::runtime ALIAS c_claw_runtime)
+set_target_properties(c_claw_runtime PROPERTIES
+    EXPORT_NAME runtime
+    VERSION "${CCLAW_VERSION}"
+    SOVERSION "0"
 )
 target_link_libraries(c_claw_runtime PUBLIC
     c_claw_core_headers
@@ -239,5 +324,59 @@ if(CC_PLATFORM_PUBLIC_LIBRARIES)
     target_link_libraries(c_claw_runtime PUBLIC ${CC_PLATFORM_PUBLIC_LIBRARIES})
 endif()
 if(CC_PLATFORM_PUBLIC_INCLUDE_DIRS)
-    target_include_directories(c_claw_runtime PUBLIC ${CC_PLATFORM_PUBLIC_INCLUDE_DIRS})
+    target_include_directories(c_claw_runtime PRIVATE ${CC_PLATFORM_PUBLIC_INCLUDE_DIRS})
 endif()
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+install(TARGETS
+    c_claw_runtime
+    c_claw_project_options
+    c_claw_core_headers
+    c_claw_adapters_headers
+    c_claw_ports_headers
+    EXPORT CClawTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(DIRECTORY
+    "${CMAKE_CURRENT_LIST_DIR}/core/include/cc"
+    "${CMAKE_CURRENT_LIST_DIR}/adapters/include/cc"
+    "${CMAKE_CURRENT_LIST_DIR}/ports/include/cc"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+set(CCLAW_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/CClaw")
+install(EXPORT CClawTargets
+    NAMESPACE CClaw::
+    FILE CClawTargets.cmake
+    DESTINATION "${CCLAW_CMAKE_INSTALL_DIR}"
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_LIST_DIR}/../cmake/CClawConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/CClawConfig.cmake"
+    INSTALL_DESTINATION "${CCLAW_CMAKE_INSTALL_DIR}"
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/CClawConfigVersion.cmake"
+    VERSION "${CCLAW_VERSION}"
+    COMPATIBILITY SameMajorVersion
+)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/CClawConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/CClawConfigVersion.cmake"
+    DESTINATION "${CCLAW_CMAKE_INSTALL_DIR}"
+)
+
+configure_file(
+    "${CMAKE_CURRENT_LIST_DIR}/../cmake/cclaw.pc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/cclaw.pc"
+    @ONLY
+)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/cclaw.pc"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig"
+)

@@ -1,17 +1,9 @@
-/**
- * 学习导读：cclaw/core/src/core/cc_event_bus.c
- *
- * 所属层次：核心层。
- * 阅读重点：这里实现可配置同步/异步事件总线。同步模式看 handler 快照、
- *           锁外回调和嵌套 publish；异步模式看有界队列、worker 分发、
- *           同 handler 函数 + user_data FIFO 和阻塞隔离。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
+
 
 #include "cc/ports/cc_event_bus.h"
 #include "cc/ports/cc_platform.h"
 #include "cc/ports/cc_thread.h"
+#include "cc/util/cc_redaction.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +18,7 @@
 #define DEFAULT_ASYNC_PENDING 256
 #endif
 
+/* 单个订阅项；event_type 为 NULL 时代表通配订阅。 */
 typedef struct {
     char *event_type;
     cc_event_handler_fn handler;
@@ -33,12 +26,18 @@ typedef struct {
     int busy;
 } cc_event_handler_entry_t;
 
+/*
+ * 发布前拍下的订阅快照。
+ *
+ * sync 模式使用快照后释放锁再执行回调，避免 handler 里再次订阅/发布造成死锁。
+ */
 typedef struct {
     size_t handler_index;
     cc_event_handler_fn handler;
     void *user_data;
 } cc_event_handler_snapshot_t;
 
+/* 异步模式队列任务；payload 字符串由 job 拥有，worker 执行后释放。 */
 typedef struct cc_event_job {
     size_t handler_index;
     cc_event_handler_fn handler;
@@ -48,6 +47,12 @@ typedef struct cc_event_job {
     struct cc_event_job *next;
 } cc_event_job_t;
 
+/*
+ * event bus 内部状态。
+ *
+ * handlers 是固定上限数组，避免订阅表在运行中无限扩张；异步模式下 jobs_* 组成
+ * FIFO 队列，mutex/cond 由平台线程 port 提供，便于 POSIX/FreeRTOS/ESP32 替换。
+ */
 struct cc_event_bus {
     cc_event_handler_entry_t handlers[MAX_HANDLERS];
     size_t count;
@@ -67,11 +72,21 @@ struct cc_event_bus {
     cc_cond_t cond;
 };
 
+/*
+ * 复制可选字符串。
+ *
+ * event_type 可以是 NULL 通配符，event_json 也允许为空；这个 helper 保留 NULL 语义。
+ */
 static char *dup_optional(const char *value)
 {
     return value ? strdup(value) : NULL;
 }
 
+/*
+ * 释放异步事件任务。
+ *
+ * job 中 event_type/event_json 都是发布时复制的快照，释放时不影响原调用方缓冲。
+ */
 static void free_job(cc_event_job_t *job)
 {
     if (!job) return;
@@ -80,21 +95,35 @@ static void free_job(cc_event_job_t *job)
     free(job);
 }
 
+/*
+ * 判断订阅项是否匹配事件。
+ *
+ * NULL 订阅代表观察所有事件，非 NULL 订阅使用精确匹配；不支持通配模式是为了保持
+ * event bus 简单可预测。
+ */
 static int event_matches(const cc_event_handler_entry_t *entry, const char *event_type)
 {
     return entry->event_type == NULL || strcmp(entry->event_type, event_type) == 0;
 }
 
+/* worker_count 为 0 时落到平台默认值。 */
 static size_t normalized_worker_count(size_t value)
 {
     return value ? value : DEFAULT_ASYNC_WORKERS;
 }
 
+/* max_pending 为 0 时落到平台默认值，避免异步队列没有背压。 */
 static size_t normalized_pending_limit(size_t value)
 {
     return value ? value : DEFAULT_ASYNC_PENDING;
 }
 
+/*
+ * 返回默认 event bus 配置。
+ *
+ * 默认同步模式让最小 SDK 和单元测试具备确定性；需要异步观测时由 runtime builder
+ * 或应用显式开启。
+ */
 cc_event_bus_config_t cc_event_bus_default_config(void)
 {
     cc_event_bus_config_t config;
@@ -104,6 +133,12 @@ cc_event_bus_config_t cc_event_bus_default_config(void)
     return config;
 }
 
+/*
+ * 判断某个 handler/user_data 组合是否正在执行。
+ *
+ * 异步模式允许多个 worker 并发处理不同订阅者，但同一个订阅者串行执行，避免 handler
+ * 自身不是线程安全时被并发重入。
+ */
 static int handler_group_busy_locked(const cc_event_bus_t *bus, const cc_event_job_t *job)
 {
     for (size_t i = 0; i < bus->count; i++) {
@@ -115,6 +150,12 @@ static int handler_group_busy_locked(const cc_event_bus_t *bus, const cc_event_j
     return 0;
 }
 
+/*
+ * 从队列中取出当前可运行的 job。
+ *
+ * 函数在持锁状态下调用，会跳过同一 handler 正忙的任务，从而在保持单订阅者串行的
+ * 同时让其他订阅者继续消费事件。
+ */
 static cc_event_job_t *take_runnable_job_locked(cc_event_bus_t *bus)
 {
     cc_event_job_t *prev = NULL;
@@ -140,6 +181,12 @@ static cc_event_job_t *take_runnable_job_locked(cc_event_bus_t *bus)
     return NULL;
 }
 
+/*
+ * 标记 job 完成。
+ *
+ * 释放 handler busy 标记并递减 running_count，然后广播条件变量，唤醒 flush、
+ * destroy 或等待队列空间的 publisher。
+ */
 static void finish_job_locked(cc_event_bus_t *bus, cc_event_job_t *job)
 {
     if (job->handler_index < bus->count) bus->handlers[job->handler_index].busy = 0;
@@ -147,6 +194,12 @@ static void finish_job_locked(cc_event_bus_t *bus, cc_event_job_t *job)
     cc_cond_broadcast(bus->cond);
 }
 
+/*
+ * 异步 worker 主循环。
+ *
+ * worker 在条件变量上等待可运行任务；shutdown 且无 pending 任务时退出。回调在
+ * 不持锁状态下执行，防止 handler 内部发布事件时发生锁重入死锁。
+ */
 static void *event_worker_main(void *arg)
 {
     cc_event_bus_t *bus = (cc_event_bus_t *)arg;
@@ -173,11 +226,18 @@ static void *event_worker_main(void *arg)
     }
 }
 
+/* 使用默认配置创建 event bus。 */
 cc_result_t cc_event_bus_create(cc_event_bus_t **out_bus)
 {
     return cc_event_bus_create_with_config(NULL, out_bus);
 }
 
+/*
+ * 创建 event bus。
+ *
+ * 根据配置初始化 mutex/cond/worker。任一阶段失败都按反向顺序释放已创建资源，
+ * 这是嵌入式 C 中构造复杂对象时最重要的错误路径模式之一。
+ */
 cc_result_t cc_event_bus_create_with_config(
     const cc_event_bus_config_t *config,
     cc_event_bus_t **out_bus
@@ -243,6 +303,12 @@ cc_result_t cc_event_bus_create_with_config(
     return cc_result_ok();
 }
 
+/*
+ * 销毁 event bus。
+ *
+ * 异步模式先设置 shutting_down 并唤醒 worker，再 join 确保不会有回调继续访问 bus。
+ * 最后释放订阅字符串和残留队列任务。
+ */
 void cc_event_bus_destroy(cc_event_bus_t *bus)
 {
     if (!bus) return;
@@ -276,6 +342,12 @@ void cc_event_bus_destroy(cc_event_bus_t *bus)
     free(bus);
 }
 
+/*
+ * 等待异步事件全部处理完成。
+ *
+ * flush 不关闭 bus，只等待 pending 和 running 都归零；测试和需要强一致日志的应用
+ * 可以在关键点调用它。同步模式没有队列，直接成功。
+ */
 cc_result_t cc_event_bus_flush(cc_event_bus_t *bus)
 {
     if (!bus) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null argument");
@@ -289,6 +361,12 @@ cc_result_t cc_event_bus_flush(cc_event_bus_t *bus)
     return cc_result_ok();
 }
 
+/*
+ * 注册事件订阅。
+ *
+ * 订阅表受 mutex 保护，event_type 被深拷贝到 bus 内部。当前设计没有 unsubscribe，
+ * 这样可以避免异步 worker 正在使用 handler 时出现悬垂订阅项。
+ */
 cc_result_t cc_event_bus_subscribe(
     cc_event_bus_t *bus,
     const char *event_type,
@@ -322,6 +400,12 @@ cc_result_t cc_event_bus_subscribe(
     return cc_result_ok();
 }
 
+/*
+ * 在持锁状态下构建匹配订阅快照。
+ *
+ * 快照只保存 handler 指针和 user_data，不复制 event_type；发布路径随后释放锁再执行
+ * 回调，避免用户回调阻塞订阅表。
+ */
 static size_t build_snapshot_locked(
     cc_event_bus_t *bus,
     const char *event_type,
@@ -341,6 +425,12 @@ static size_t build_snapshot_locked(
     return snapshot_count;
 }
 
+/*
+ * 同步发布事件。
+ *
+ * 先拍快照后解锁，再顺序调用 handler。这样保持同步模式的确定性，同时避免 handler
+ * 重入 event bus 时锁住自己。
+ */
 static cc_result_t publish_sync(
     cc_event_bus_t *bus,
     const char *event_type,
@@ -364,6 +454,12 @@ static cc_result_t publish_sync(
     return cc_result_ok();
 }
 
+/*
+ * 为异步订阅者入队一个 job。
+ *
+ * payload 在入队前复制，发布者返回后可以释放自己的缓冲。队列达到 max_pending 时
+ * 发布线程等待，这是内存受限系统里必须有的背压策略。
+ */
 static cc_result_t enqueue_async_job(
     cc_event_bus_t *bus,
     const cc_event_handler_snapshot_t *handler,
@@ -404,6 +500,12 @@ static cc_result_t enqueue_async_job(
     return cc_result_ok();
 }
 
+/*
+ * 异步发布事件。
+ *
+ * 与同步发布一样先构建订阅快照，再为每个订阅者独立入队。这样一个慢 handler 不会
+ * 阻塞其他 handler 的任务生成，只会受到队列背压影响。
+ */
 static cc_result_t publish_async(
     cc_event_bus_t *bus,
     const char *event_type,
@@ -428,6 +530,13 @@ static cc_result_t publish_async(
     return cc_result_ok();
 }
 
+/*
+ * 发布事件并统一脱敏。
+ *
+ * 这是 event bus 的底层入口；业务代码应优先走 observability 构造层。这里对 payload
+ * 做 JSON-aware redaction，确保即使上层忘记脱敏，也不会把 token/password 等敏感
+ * 字段交给订阅者。
+ */
 cc_result_t cc_event_bus_publish(
     cc_event_bus_t *bus,
     const char *event_type,
@@ -435,8 +544,14 @@ cc_result_t cc_event_bus_publish(
 )
 {
     if (!bus || !event_type) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null argument");
+    char *redacted = cc_redact_secrets(event_json);
+    const char *payload = redacted ? redacted : event_json;
+    cc_result_t rc;
     if (bus->mode == CC_EVENT_BUS_MODE_ASYNC) {
-        return publish_async(bus, event_type, event_json);
+        rc = publish_async(bus, event_type, payload);
+    } else {
+        rc = publish_sync(bus, event_type, payload);
     }
-    return publish_sync(bus, event_type, event_json);
+    free(redacted);
+    return rc;
 }

@@ -1,37 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/storage/cc_memory_session_store.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * @file cc_memory_session_store.c
- * @brief 纯内存会话存储适配器（易失性）
- *
- * 基于动态数组在进程堆内存中存储会话和消息数据。所有数据在进程退出后丢失，
- * 不依赖任何外部存储（无文件 I/O、无数据库）。
- *
- * 完整实现 cc_session_store_vtable 中的全部 8 个虚函数：
- *   create_session / append_message / load_messages / append_tool_call /
- *   append_tool_result / list_sessions / destroy
- *
- * 核心数据结构：
- *   - messages 动态数组，初始容量 64，翻倍扩容
- *   - sessions 动态数组，初始容量 64，翻倍扩容
- *   - tool_calls/tool_results 动态数组，用于保留工具调用审计信息
- *
- * 适用场景：
- *   - 单元测试和集成测试（数据隔离、可重复）
- *   - 嵌入式/受限环境（无文件系统或数据库支持）
- *   - 临时会话（不需要持久化）
- *
- * 注意事项：
- *   - 所有数据仅保存在进程内存中，退出后丢失
- *   - 大量数据场景需关注内存占用（无上限保护）
- */
+
+
 
 #include "cc/ports/cc_session_store.h"
 #include "cc/ports/cc_thread.h"
@@ -44,15 +13,11 @@
 
 #define INITIAL_CAPACITY 64
 
-/**
- * @brief 内存会话存储的私有数据结构
+/*
+ * 内存版 tool call 记录。
  *
- * @field messages      消息动态数组，元素类型为 cc_message_t
- * @field message_count 当前消息数量
- * @field message_cap   消息数组当前容量
- * @field sessions      会话动态数组，元素类型为 cc_session_t
- * @field session_count 当前会话数量
- * @field session_cap   会话数组当前容量
+ * session store 不能直接保存调用方传入的 cc_tool_call_t 指针，因为 runtime 可能在返回后
+ * 释放原对象；这里把需要持久化的字段全部深拷贝成独立字符串。
  */
 typedef struct {
     char *id;
@@ -62,26 +27,29 @@ typedef struct {
     char *status;
 } cc_memory_tool_call_record_t;
 
-/**
- * cc_memory_tool_result_record_t — 结果数据结构，承载调用输出和错误信息；其中堆字符串需要由对应 free 函数释放。
+/*
+ * 内存版 tool result 记录。
  *
- * 资源约定：结构体内的堆字符串或数组由本模块 cleanup/free 函数释放；外部借用指针不在这里释放。
+ * artifacts 被序列化为 JSON 字符串保存，避免内存 store 需要理解 artifact list 的内部
+ * 生命周期。读取路径目前主要服务测试和调试，完整持久化 adapter 可以选择更结构化存储。
  */
 typedef struct {
     char *id;
     char *session_id;
     char *tool_call_id;
     int ok;
-    char *content;
+    char *text;
     char *error;
-    char *metadata_json;
-    char *artifacts_json;
+    char *metadata;
+    char *artifacts;
 } cc_memory_tool_result_record_t;
 
-/**
- * cc_memory_session_store_t — 纯内存 session store 私有状态，拥有消息、会话和工具记录数组。
+/*
+ * 内存 session store 的私有状态。
  *
- * 资源约定：结构体内的堆字符串或数组由本模块 cleanup/free 函数释放；外部借用指针不在这里释放。
+ * 该 adapter 使用动态数组保存 session/message/tool 记录，并用一个 mutex 保护所有数组。
+ * 这适合单进程测试或轻量嵌入式 Linux 场景；如果需要掉电保存，应替换为 JSON/SQLite
+ * 等持久化 adapter。
  */
 typedef struct {
     cc_message_t *messages;
@@ -103,22 +71,13 @@ typedef struct {
     cc_mutex_t mutex;
 } cc_memory_session_store_t;
 
-/**
- * dup_required_string — 复制输入数据，让目标对象拥有独立生命周期。
- *
- * @param value 借用的只读字符串；函数不会释放该指针。
- * @return 新分配字符串；返回 NULL 表示分配或输入校验失败，调用方负责 free。
- */
+/* 复制必填字符串字段；NULL 会落成空串，简化记录结构的释放逻辑。 */
 static char *dup_required_string(const char *value)
 {
     return strdup(value ? value : "");
 }
 
-/**
- * free_tool_call_record — 释放内存 session store 中一条工具调用记录的字段。
- *
- * @param record 要清理的记录；NULL 时直接返回。
- */
+/* 释放一条 tool call 记录里的所有深拷贝字段，并清零避免压缩数组时重复释放。 */
 static void free_tool_call_record(cc_memory_tool_call_record_t *record)
 {
     if (!record) return;
@@ -130,29 +89,24 @@ static void free_tool_call_record(cc_memory_tool_call_record_t *record)
     memset(record, 0, sizeof(*record));
 }
 
-/**
- * free_tool_result_record — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
- *
- */
+/* 释放一条 tool result 记录，包括文本、错误、metadata 和 artifact JSON 字符串。 */
 static void free_tool_result_record(cc_memory_tool_result_record_t *record)
 {
     if (!record) return;
     free(record->id);
     free(record->session_id);
     free(record->tool_call_id);
-    free(record->content);
+    free(record->text);
     free(record->error);
-    free(record->metadata_json);
-    free(record->artifacts_json);
+    free(record->metadata);
+    free(record->artifacts);
     memset(record, 0, sizeof(*record));
 }
 
-/**
- * ensure_tool_call_capacity — 扩容内存态 tool call 审计数组。
+/*
+ * 确保 tool call 数组有可写空间。
  *
- * store 拥有 tool_calls 数组；扩容使用 realloc，成功后新增区域清零，保证后续
- * free_tool_call_record() 可以安全处理未完全写入的槽位。失败时保持旧数组和旧容量
- * 不变，让调用方可以直接返回 OOM，不会丢失已有会话数据。
+ * 调用方必须已经持有 store mutex；函数只负责扩容和初始化新槽位，不修改 count。
  */
 static cc_result_t ensure_tool_call_capacity(cc_memory_session_store_t *store)
 {
@@ -170,12 +124,10 @@ static cc_result_t ensure_tool_call_capacity(cc_memory_session_store_t *store)
     return cc_result_ok();
 }
 
-/**
- * ensure_tool_result_capacity — 扩容内存态 tool result 审计数组。
+/*
+ * 确保 tool result 数组有可写空间。
  *
- * tool result 与 tool call 分开存储，是为了保留“LLM 发起调用”和“工具返回观察”
- * 两个事件的独立时间线。扩容策略与 tool_calls 一致：成功后清零新增槽位，失败时
- * 不破坏旧数据结构。
+ * 和 tool call 扩容一样，必须在持锁状态下调用，避免并发 append 看到未同步的数组指针。
  */
 static cc_result_t ensure_tool_result_capacity(cc_memory_session_store_t *store)
 {
@@ -193,17 +145,11 @@ static cc_result_t ensure_tool_result_capacity(cc_memory_session_store_t *store)
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：创建新会话（内存版本）
+/*
+ * 创建或确保一个 session 记录存在。
  *
- * 先在 sessions 数组中遍历检查是否已存在同 ID 会话，若存在则直接返回 OK。
- * 不存在时，若数组已满则翻倍扩容（2x），然后在末尾追加新会话记录。
- * 新会话默认 status=CC_SESSION_ACTIVE，workspace_dir 为 NULL 时默认 profile workspace path。
- *
- * @param self          存储实例指针
- * @param session_id    新会话的唯一标识符
- * @param workspace_dir 工作目录路径，NULL 时使用默认值
- * @return cc_result_t  成功返回 OK，realloc 失败返回 OUT_OF_MEMORY
+ * 如果 session_id 已存在则直接成功返回；否则深拷贝 id/workspace 并追加到 sessions 数组。
+ * workspace 会被后续文件工具作为安全边界读取，所以即使是内存 store 也要保存它。
  */
 static cc_result_t memory_create_session(
     void *self,
@@ -243,16 +189,11 @@ static cc_result_t memory_create_session(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：追加消息（内存版本）
+/*
+ * 追加一条消息。
  *
- * 若消息数组已满则翻倍扩容（2x），然后将 message 的各个字段深拷贝到数组末尾。
- * 深拷贝的字段包括：id、session_id、content、tool_call_id，使用 strdup 分配。
- * role 字段为枚举值，直接值拷贝。
- *
- * @param self    存储实例指针
- * @param message 要追加的消息对象
- * @return cc_result_t 成功返回 OK，realloc 失败返回 OUT_OF_MEMORY
+ * store 在持锁状态下扩容，并通过 cc_message_copy 深拷贝 message 的 content/tool calls，
+ * 因而调用方可以在 append 返回后销毁自己的 cc_message_t。
  */
 static cc_result_t memory_append_message(
     void *self,
@@ -285,22 +226,11 @@ static cc_result_t memory_append_message(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：加载指定会话的消息列表（内存版本）
+/*
+ * 加载指定 session 的历史消息。
  *
- * 采用两遍扫描策略：
- *   1. 第一遍：遍历全部消息，统计 session_id 匹配的消息数量（受 limit 约束）
- *   2. 第二遍：分配结果数组并深拷贝匹配的消息
- *
- * 由于内存数组天然保持插入顺序，返回的消息即为时间序。
- * 深拷贝避免调用者修改结果数组时影响内部存储状态。
- *
- * @param self         存储实例指针
- * @param session_id   目标会话ID
- * @param limit        最大返回消息数
- * @param out_messages 输出参数，指向结果消息数组的指针
- * @param out_count    输出参数，实际返回的消息数量
- * @return cc_result_t 成功返回 OK
+ * 返回数组由调用方拥有，需要逐项 cc_message_cleanup 后 free。limit <= 0 表示不限制。
+ * 为了避免调用方读到内部数组，函数会重新分配并深拷贝每条消息。
  */
 static cc_result_t memory_load_messages(
     void *self,
@@ -346,16 +276,11 @@ static cc_result_t memory_load_messages(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：记录工具调用
+/*
+ * 追加工具调用记录。
  *
- * 将工具调用请求深拷贝到内存审计数组中。虽然内存后端不跨进程持久化，
- * 但在运行期保持与 SQLite/JSON 后端一致的记录语义。
- *
- * @param self       存储实例指针
- * @param session_id 关联的会话ID
- * @param call       工具调用对象
- * @return cc_result_t 成功返回 OK，失败返回 OUT_OF_MEMORY
+ * 工具调用和普通 assistant message 分开保存，方便调试 UI 或审计查看“模型请求了什么
+ * 工具”。所有字段都深拷贝，append 失败时释放临时 record。
  */
 static cc_result_t memory_append_tool_call(
     void *self,
@@ -392,16 +317,11 @@ static cc_result_t memory_append_tool_call(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：记录工具调用结果
+/*
+ * 追加工具结果记录。
  *
- * 将工具调用结果深拷贝到内存审计数组中，保留 ok/content/error/metadata_json。
- *
- * @param self         存储实例指针
- * @param session_id   关联的会话ID
- * @param tool_call_id 关联的工具调用ID
- * @param result       工具调用结果对象
- * @return cc_result_t 成功返回 OK，失败返回 OUT_OF_MEMORY
+ * tool result 可能包含 artifact 列表，内存 store 将其序列化为 JSON 字符串记录。函数
+ * 持锁完成扩容和拷贝，返回后调用方仍然负责释放原 cc_tool_result_t。
  */
 static cc_result_t memory_append_tool_result(
     void *self,
@@ -425,14 +345,19 @@ static cc_result_t memory_append_tool_result(
     record.session_id = dup_required_string(session_id);
     record.tool_call_id = dup_required_string(tool_call_id);
     record.ok = result && result->ok;
-    record.content = dup_required_string(result && result->content ? result->content : "");
+    record.text = dup_required_string(result && result->text ? result->text : "");
     record.error = dup_required_string(result && result->error ? result->error : "");
-    record.metadata_json = dup_required_string(result && result->metadata_json ? result->metadata_json : "");
-    record.artifacts_json = dup_required_string(result && result->artifacts_json ? result->artifacts_json : "");
+    record.metadata = dup_required_string(result && result->metadata ? result->metadata : "");
+    char *artifacts = NULL;
+    if (result) {
+        cc_media_artifact_list_to_json(&result->artifacts, &artifacts);
+    }
+    record.artifacts = dup_required_string(artifacts ? artifacts : "[]");
+    free(artifacts);
 
     if (!record.id || !record.session_id || !record.tool_call_id ||
-        !record.content || !record.error || !record.metadata_json ||
-        !record.artifacts_json) {
+        !record.text || !record.error || !record.metadata ||
+        !record.artifacts) {
         free_tool_result_record(&record);
         cc_mutex_unlock(store->mutex);
         return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to copy tool result record");
@@ -443,16 +368,11 @@ static cc_result_t memory_append_tool_result(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：列出所有会话（内存版本）
+/*
+ * 列举所有 session。
  *
- * 遍历 sessions 数组，将每个会话的 id、name、workspace_dir、status 深拷贝到结果数组。
- * 深拷贝使用 strdup，避免调用者修改返回数据影响内存存储的内部状态。
- *
- * @param self          存储实例指针
- * @param out_sessions  输出参数，指向结果会话数组的指针
- * @param out_count     输出参数，实际返回的会话数量
- * @return cc_result_t  成功返回 OK，calloc 失败返回 OUT_OF_MEMORY
+ * 返回数组由调用方拥有，数组元素中的字符串也是深拷贝。该接口主要给 UI/测试使用；
+ * 内部锁只保护拷贝过程，返回后调用方不会持有 store 内部指针。
  */
 static cc_result_t memory_list_sessions(
     void *self,
@@ -482,12 +402,11 @@ static cc_result_t memory_list_sessions(
     return cc_result_ok();
 }
 
-/**
- * memory_clear_session — 删除指定 session 的 turn 历史，保留 session 元数据。
+/*
+ * 清空某个 session 的消息和工具记录。
  *
- * reset session 的语义不是销毁会话对象，而是让下一轮对话从空上下文开始。
- * 因此这里清理 messages/tool_calls/tool_results 三组历史数组；sessions 数组
- * 不动，gateway 仍可继续复用同一个 session id。
+ * 函数使用读写下标原地压缩数组：匹配 session_id 的记录先释放，不匹配的记录前移。
+ * 前移后尾部槽位清零，避免 destroy 阶段重复释放已经移动走的资源。
  */
 static cc_result_t memory_clear_session(void *self, const char *session_id)
 {
@@ -546,15 +465,11 @@ static cc_result_t memory_clear_session(void *self, const char *session_id)
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：销毁内存存储，释放所有资源
+/*
+ * 销毁内存 session store。
  *
- * 依次遍历 messages 和 sessions 数组，对每个元素调用 cc_message_destroy / cc_session_destroy
- * 释放内部字符串，然后释放数组内存，最后释放存储结构体自身。
- *
- * 安全注意：必须在进程退出前调用，否则造成内存泄漏。
- *
- * @param self 存储实例指针
+ * destroy 时先持锁释放所有深拷贝对象，再销毁 mutex 和 store 自身。调用方必须保证没有
+ * 其它线程还在使用这个 store；这是端口销毁的一般约束。
  */
 static void memory_destroy(void *self)
 {
@@ -586,11 +501,7 @@ static void memory_destroy(void *self)
     free(store);
 }
 
-/**
- * @brief 内存会话存储的虚函数表
- *
- * 将全部 8 个 vtable 函数绑定到对应的内存实现。
- */
+/* 内存 session store 的 vtable，把本文件函数绑定到 cc_session_store_t 端口。 */
 static cc_session_store_vtable_t memory_vtable = {
     memory_create_session,
     memory_append_message,
@@ -602,20 +513,18 @@ static cc_session_store_vtable_t memory_vtable = {
     memory_destroy
 };
 
-/**
- * @brief 创建内存会话存储实例（公共工厂函数）
+/*
+ * 创建内存 session store。
  *
- * 执行流程：
- *   1. 分配 cc_memory_session_store_t 结构体（calloc 零初始化）
- *   2. 分配初始容量为 INITIAL_CAPACITY(64) 的消息数组
- *   3. 分配初始容量为 INITIAL_CAPACITY(64) 的会话数组
- *   4. 填充 out_store 的 self 和 vtable
- *
- * @param out_store 输出参数，填充创建好的存储实例
- * @return cc_result_t 成功返回 OK，分配失败返回 OUT_OF_MEMORY
+ * 成功后 out_store 获得 self/vtable，销毁时通过 vtable->destroy 释放。这个 adapter 不做
+ * 持久化，适合作为测试、最小 profile 或 MCU 原型；生产环境可用同一端口替换成文件/DB。
  */
 cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store)
 {
+    if (!out_store) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null memory session store output");
+    }
+    memset(out_store, 0, sizeof(*out_store));
     cc_memory_session_store_t *self = calloc(1, sizeof(cc_memory_session_store_t));
     if (!self) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create memory store");
 

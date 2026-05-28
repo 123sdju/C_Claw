@@ -1,5 +1,11 @@
 #include "cc/app/cc_mcp_runtime_manager.h"
 
+/*
+ * 验证 MCP JSON-RPC response id 匹配。
+ *
+ * 覆盖数字 id 相等、数字 id 不相等和字符串 id 相等，确保 runtime manager 不会把响应
+ * 误归属给错误请求。
+ */
 int main(void)
 {
     int matches = 0;

@@ -1,14 +1,10 @@
-/**
- * test_tool_executor_pool_lane.c
- *
- * 测试目标：同一个 tool/plugin/MCP lane 的执行数量受配置限制。真实工具调用
- * 由 adapter 完成，本测试只固定 core 层“开始执行前必须 acquire”的并发语义。
- */
+
 
 #include "cc/app/cc_tool_executor_pool.h"
 #include "cc/app/cc_cancel_token.h"
 #include "cc/ports/cc_thread.h"
 
+/* lane 并发测试状态。 */
 typedef struct pool_state {
     cc_tool_executor_pool_t *pool;
     cc_mutex_t mutex;
@@ -16,6 +12,11 @@ typedef struct pool_state {
     int violation;
 } pool_state_t;
 
+/*
+ * 获取 plugin.echo lane ticket 后进入临界区。
+ *
+ * policy.concurrency=1 时两个 worker 不应同时 active>1。
+ */
 static void *pool_worker(void *arg)
 {
     pool_state_t *state = (pool_state_t *)arg;
@@ -41,6 +42,11 @@ static void *pool_worker(void *arg)
     return NULL;
 }
 
+/*
+ * 验证 tool executor pool lane policy。
+ *
+ * 覆盖 per-tool concurrency、timeout 查询，以及等待 lane 时 cancel token 可打断 acquire。
+ */
 int main(void)
 {
     cc_tool_executor_pool_policy_t policy;

@@ -1,22 +1,15 @@
-/**
- * 学习导读：cclaw/core/src/app/cc_agent_runtime_internal.h
- *
- * 所属层次：核心层。
- * 阅读重点：这里是 runtime 内部共享定义，重点看 run options、stream 状态和
- *           私有 helper 之间的所有权约定。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
+
 
 #ifndef CC_AGENT_RUNTIME_INTERNAL_H
 #define CC_AGENT_RUNTIME_INTERNAL_H
 
 #include "cc/app/cc_agent_runtime.h"
 
-/**
- * cc_agent_runtime — runtime 内部完整状态。
+/*
+ * runtime 内部结构。
  *
- * 端口值为浅拷贝，指针依赖均为借用；config 中字符串由 runtime 深拷贝拥有。
+ * public header 只暴露不透明句柄；内部结构集中保存配置、provider、registry、store、
+ * policy、sandbox、observability、memory 和工具执行池。mutex 保护可变 runtime 状态。
  */
 struct cc_agent_runtime {
     cc_agent_runtime_config_t config;
@@ -34,13 +27,12 @@ struct cc_agent_runtime {
     cc_mutex_t mutex;
 };
 
-/**
- * cc_agent_runtime_execute_tool_step — 参与工具注册、工具调用或工具结果写回流程。
+
+/*
+ * 执行一次 tool call step 并把结果写回 session。
  *
- * @param runtime 借用的对象；函数不释放该对象本身。
- * @param session_id 借用的只读字符串；函数不会释放该指针。
- * @param reasoning_content 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 这是 agent loop 内部 helper，不属于 public API；它复用 tool executor 的 schema/policy/
+ * approval/observability 语义，并负责构造 tool role message。
  */
 cc_result_t cc_agent_runtime_execute_tool_step(
     cc_agent_runtime_t *runtime,
@@ -50,14 +42,12 @@ cc_result_t cc_agent_runtime_execute_tool_step(
     cc_cancel_token_t *cancel_token
 );
 
-/**
- * cc_agent_runtime_store_assistant_text — 把最终 assistant 文本和可选 reasoning_content 包装成消息并追加到 session store。
+
+/*
+ * 将 assistant 文本落库。
  *
- * @param runtime 借用的对象；函数不释放该对象本身。
- * @param session_id 借用的只读字符串；函数不会释放该指针。
- * @param text 借用的只读字符串；函数不会释放该指针。
- * @param reasoning_content 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 只存完整 final response；stream partial、取消或错误路径不应通过该 helper 落成完整
+ * assistant 消息。
  */
 cc_result_t cc_agent_runtime_store_assistant_text(
     cc_agent_runtime_t *runtime,

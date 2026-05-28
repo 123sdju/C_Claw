@@ -1,48 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/storage/cc_sqlite_memory_store.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/*
- * cc_sqlite_memory_store.c — SQLite 记忆存储适配器
- *
- * 模块说明：
- *   基于 SQLite3 数据库实现 cc_memory_store_vtable 接口的持久化记忆存储。
- *   使用参数化查询（sqlite3_prepare_v2 + sqlite3_bind_*）防止 SQL 注入。
- *
- * 设计模式：Adapter（适配器）模式
- *   将 SQLite 数据库操作适配为 cc_memory_store vtable 接口，
- *   上层 memory 工具无需关心底层是 JSON 文件、SQLite 还是内存存储。
- *
- * 实现接口：
- *   - cc_memory_store_vtable_t（7 个虚拟方法：set / get / search / list /
- *     delete_entry / delete_by_category / destroy）
- *
- * 数据库表结构：
- *   memory 表包含以下字段：
- *     - key（TEXT PRIMARY KEY）：唯一键名，作为主键
- *     - value（TEXT NOT NULL）：记忆值
- *     - category（TEXT）：分类标签
- *     - session_id（TEXT）：所属会话 ID
- *     - created_at（INTEGER）：创建时间戳（Unix epoch）
- *     - updated_at（INTEGER）：更新时间戳（Unix epoch）
- *   同时创建了 category 和 session_id 上的索引以加速查询。
- *
- * 与 JSON 文件存储的对比：
- *   - SQLite 支持增量写入和事务，适合大数据量场景
- *   - JSON 文件存储每次写操作需全量序列化，适合小数据量
- *   - SQLite 支持 LIKE 搜索，JSON 文件使用 strstr 内存遍历
- *
- * 线程安全性：
- *   - 所有读/写操作均通过 cc_mutex_t 加锁保护
- *
- * 安全注意：
- *   - 所有 SQL 参数使用 sqlite3_bind_* 绑定，从不拼接用户输入到 SQL 字符串
- */
+
+
 
 #include "cc/ports/cc_memory_store.h"
 #include "cc/ports/cc_thread.h"
@@ -52,11 +10,10 @@
 #include <stdio.h>
 
 /*
- * cc_sqlite_memory_store_t — SQLite 记忆存储的内部数据结构
+ * SQLite memory store 私有状态。
  *
- * 字段说明：
- *   db    — SQLite3 数据库连接句柄
- *   mutex — 互斥锁，保护并发访问的线程安全
+ * db 保存长期记忆表，mutex 串行化 SQLite 操作。该实现比 JSON 文件后端更适合长期运行的
+ * 嵌入式 Linux/桌面环境，但仍通过 cc_memory_store_t 端口与 core 解耦。
  */
 typedef struct {
     sqlite3 *db;
@@ -64,15 +21,10 @@ typedef struct {
 } cc_sqlite_memory_store_t;
 
 /*
- * init_db — 初始化数据库表结构
+ * 初始化 memory 表和索引。
  *
- * 功能：执行 CREATE TABLE IF NOT EXISTS 创建 memory 表：
- *       - key 为主键（PRIMARY KEY），确保键名唯一
- *       - value 为 NOT NULL，保证数据完整性
- *       - 创建 category 和 session_id 上的索引以加速查询
- *
- * @param db SQLite3 数据库连接
- * @return SQLITE_OK 表示成功，其他值表示建表失败
+ * key 是主键，category/session_id 建索引用于过滤；时间字段用整数 time_t，便于跨语言
+ * 查询和排序。
  */
 static int init_db(sqlite3 *db)
 {
@@ -97,25 +49,10 @@ static int init_db(sqlite3 *db)
 }
 
 /*
- * sqlite_set — vtable 方法：插入或更新一条记忆（UPSERT 语义）
+ * 写入或替换一条记忆。
  *
- * 功能：使用 INSERT OR REPLACE 实现覆盖写入：
- *       - 若 key 已存在 → 更新 value/category/session_id/updated_at，
- *         保持 created_at 不变（通过 COALESCE + 子查询实现）
- *       - 若 key 不存在 → 插入新行，created_at 和 updated_at 设为当前时间
- *
- * SQL 语句：
- *   INSERT OR REPLACE INTO memory (key, value, category, session_id, created_at, updated_at)
- *   VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM memory WHERE key=?), ?), ?);
- *
- * 安全注意：所有值通过 sqlite3_bind_* 参数化绑定，防止 SQL 注入。
- *
- * @param self      存储实例指针
- * @param key       记忆键名
- * @param value     记忆值
- * @param category  分类标签（可为 NULL）
- * @param session_id 所属会话 ID（可为 NULL）
- * @return cc_result_t
+ * INSERT OR REPLACE 会保留已有 created_at，并更新 updated_at。函数持锁覆盖 prepare/bind/
+ * step/finalize，保证同一连接不会被多个线程交错使用。
  */
 static cc_result_t sqlite_set(void *self, const char *key, const char *value,
                                const char *category, const char *session_id)
@@ -136,6 +73,7 @@ static cc_result_t sqlite_set(void *self, const char *key, const char *value,
     sqlite3_bind_text(stmt, 4, session_id, session_id ? -1 : 0, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, key, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 6, (sqlite3_int64)now);
+    sqlite3_bind_int64(stmt, 7, (sqlite3_int64)now);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -147,15 +85,10 @@ static cc_result_t sqlite_set(void *self, const char *key, const char *value,
 }
 
 /*
- * sqlite_get — vtable 方法：按 key 精确查找一条记忆
+ * 按 key 读取记忆。
  *
- * 功能：使用 SELECT + WHERE key=? 查询单条记录。
- *       找到后从行数据中填充 cc_memory_entry_t 的各个字段（深拷贝字符串）。
- *
- * @param self      存储实例指针
- * @param key       要查找的记忆键名
- * @param out_entry 输出参数，找到时填充完整 entry
- * @return cc_result_t，找到返回 OK，未找到返回 CC_ERR_NOT_FOUND
+ * out_entry 的字符串由本函数深拷贝，调用方需要 cc_memory_entry_free。未命中返回
+ * CC_ERR_NOT_FOUND。
  */
 static cc_result_t sqlite_get(void *self, const char *key, cc_memory_entry_t *out_entry)
 {
@@ -189,14 +122,9 @@ static cc_result_t sqlite_get(void *self, const char *key, cc_memory_entry_t *ou
 }
 
 /*
- * bind_search_query — 绑定搜索查询参数
+ * 绑定 LIKE 查询参数。
  *
- * 功能：构造 LIKE 匹配模式（%query%），绑定到预编译的搜索 statment 中。
- *       三个 LIKE 分别匹配 key、value、category 字段，limit 限制返回行数。
- *
- * @param stmt  预编译的 SQL statment
- * @param query 搜索关键词
- * @param limit 最大返回行数
+ * query 被包裹为 `%query%`，同时匹配 key/value/category；limit 已由调用方归一化。
  */
 static void bind_search_query(sqlite3_stmt *stmt, const char *query, int limit)
 {
@@ -209,20 +137,10 @@ static void bind_search_query(sqlite3_stmt *stmt, const char *query, int limit)
 }
 
 /*
- * sqlite_search — vtable 方法：模糊搜索记忆
+ * 旧版 search API：用 SQL LIKE 做轻量全文检索。
  *
- * 功能：使用 SELECT + WHERE key LIKE ? OR value LIKE ? OR category LIKE ? LIMIT ?
- *       进行 LIKE 模糊匹配搜索。三个字段 OR 逻辑，任一匹配即命中。
- *
- * SQL 使用参数化查询，LIKE 模式通过 snprintf 构造（%query%），
- * 但由于 query 本身通过 sqlite3_bind_text 绑定，不会产生 SQL 注入。
- *
- * @param self         存储实例指针
- * @param query        搜索关键词
- * @param limit        最大返回条数（≤0 时默认 100）
- * @param out_entries  输出参数，匹配结果数组
- * @param out_count    输出参数，实际条目数量
- * @return cc_result_t
+ * 返回 entry 数组由调用方释放。该实现不提供 score；结构化向量检索应通过扩展 query
+ * vtable 或其它 adapter 实现。
  */
 static cc_result_t sqlite_search(void *self, const char *query, int limit,
                                   cc_memory_entry_t **out_entries, size_t *out_count)
@@ -263,19 +181,9 @@ static cc_result_t sqlite_search(void *self, const char *query, int limit,
 }
 
 /*
- * sqlite_list — vtable 方法：列出所有记忆（可按 category 过滤）
+ * 按 category 列举记忆。
  *
- * 功能：
- *   - category 非空时：SELECT WHERE category=? 精确过滤
- *   - category 为 NULL/空时：SELECT 全表扫描，返回所有条目
- *   受 limit 参数约束，limit ≤ 0 时返回全部。
- *
- * @param self         存储实例指针
- * @param category     过滤分类（可为 NULL 表示不过滤）
- * @param limit        最大返回条数
- * @param out_entries  输出参数
- * @param out_count    输出参数
- * @return cc_result_t
+ * category 为空时列出全部；limit 在读取循环中限制返回数量。所有返回字符串都是深拷贝。
  */
 static cc_result_t sqlite_list(void *self, const char *category, int limit,
                                 cc_memory_entry_t **out_entries, size_t *out_count)
@@ -321,14 +229,10 @@ static cc_result_t sqlite_list(void *self, const char *category, int limit,
 }
 
 /*
- * sqlite_delete_entry — vtable 方法：按 key 删除一条记忆
+ * 删除指定 key 的记忆。
  *
- * SQL：DELETE FROM memory WHERE key=?
- * 即使 key 不存在也返回 OK（幂等操作，不报错）。
- *
- * @param self 存储实例指针
- * @param key  要删除的记忆键名
- * @return cc_result_t
+ * 当前实现把“未命中”视为幂等成功，适合工具层 forget 操作重复调用；如果产品需要精确
+ * 区分，可检查 sqlite3_changes。
  */
 static cc_result_t sqlite_delete_entry(void *self, const char *key)
 {
@@ -348,13 +252,9 @@ static cc_result_t sqlite_delete_entry(void *self, const char *key)
 }
 
 /*
- * sqlite_delete_by_category — vtable 方法：按分类批量删除记忆
+ * 删除某个 category 下的所有记忆。
  *
- * SQL：DELETE FROM memory WHERE category=?
- *
- * @param self     存储实例指针
- * @param category 要删除的分类标签
- * @return cc_result_t
+ * 作为批量清理接口，返回成功表示 SQL 执行完成，不表示一定删除了记录。
  */
 static cc_result_t sqlite_delete_by_category(void *self, const char *category)
 {
@@ -374,14 +274,9 @@ static cc_result_t sqlite_delete_by_category(void *self, const char *category)
 }
 
 /*
- * sqlite_destroy — vtable 方法：销毁存储实例，释放所有资源
+ * 销毁 SQLite memory store。
  *
- * 功能：
- *   1. 加锁后调用 sqlite3_close 关闭数据库连接
- *   2. 销毁互斥锁
- *   3. 释放结构体自身内存
- *
- * @param self 存储实例指针
+ * 调用方必须保证没有其它线程继续使用；函数关闭数据库、销毁 mutex 并释放私有对象。
  */
 static void sqlite_destroy(void *self)
 {
@@ -394,36 +289,23 @@ static void sqlite_destroy(void *self)
     free(s);
 }
 
-/*
- * sqlite_vtable — SQLite 记忆存储的虚函数表
- *
- * 说明：将全部 7 个 vtable 函数指针绑定到对应的 SQLite 参数化查询实现。
- */
+/* SQLite memory store vtable；当前使用旧 search/list 接口，结构化 query 可由 core fallback。 */
 static cc_memory_store_vtable_t sqlite_vtable = {
     sqlite_set, sqlite_get, sqlite_search, sqlite_list,
     sqlite_delete_entry, sqlite_delete_by_category, sqlite_destroy
 };
 
 /*
- * cc_memory_store_create_sqlite — 创建 SQLite 记忆存储实例（工厂函数）
+ * 创建 SQLite memory store。
  *
- * 执行流程：
- *   1. 校验参数（out_store 和 db_path 非空）
- *   2. 分配 cc_sqlite_memory_store_t 结构体
- *   3. 调用 sqlite3_open 打开数据库文件
- *   4. 创建互斥锁
- *   5. 调用 init_db 创建表结构和索引
- *   6. 填充 cc_memory_store_t 输出参数
- *
- * 参数：
- *   out_store — 输出参数
- *   db_path   — SQLite 数据库文件路径
- * @return cc_result_t
+ * 成功后 out_store 获得 self/vtable；db_path 由调用方配置，父目录应提前创建。函数打开
+ * 数据库、创建 mutex、初始化表结构。
  */
 cc_result_t cc_memory_store_create_sqlite(cc_memory_store_t *out_store, const char *db_path)
 {
     if (!out_store || !db_path)
         return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Invalid sqlite memory store arguments");
+    memset(out_store, 0, sizeof(*out_store));
 
     cc_sqlite_memory_store_t *s = calloc(1, sizeof(cc_sqlite_memory_store_t));
     if (!s) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate sqlite memory store");

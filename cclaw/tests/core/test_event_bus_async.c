@@ -1,16 +1,11 @@
-/**
- * 学习导读：cclaw/tests/core/test_event_bus_async.c
- *
- * 所属层次：测试层。
- * 阅读重点：这里固定异步事件总线的阻塞隔离、同 handler 函数 + user_data FIFO、
- *           队列背压、destroy drain 和嵌套 publish 行为。
- */
+
 
 #include "cc/ports/cc_event_bus.h"
 #include "cc/ports/cc_thread.h"
 
 #include <string.h>
 
+/* 慢 handler 隔离测试状态：慢订阅者阻塞时，快订阅者仍应由其它 worker 执行。 */
 typedef struct {
     cc_event_bus_t *bus;
     cc_mutex_t mutex;
@@ -20,6 +15,7 @@ typedef struct {
     int fast_count;
 } isolation_state_t;
 
+/* 慢 handler：进入后等待测试释放，用来占住一个 async worker。 */
 static void slow_handler(const char *event_type, const char *event_json, void *user_data)
 {
     (void)event_type;
@@ -34,6 +30,7 @@ static void slow_handler(const char *event_type, const char *event_json, void *u
     cc_mutex_unlock(state->mutex);
 }
 
+/* 快 handler：只递增计数，用来验证没有被慢 handler 阻塞。 */
 static void fast_handler(const char *event_type, const char *event_json, void *user_data)
 {
     (void)event_type;
@@ -45,6 +42,7 @@ static void fast_handler(const char *event_type, const char *event_json, void *u
     cc_mutex_unlock(state->mutex);
 }
 
+/* 验证多 worker 异步 event bus 对不同 handler 的隔离能力。 */
 static int test_slow_handler_does_not_block_fast_handler(void)
 {
     isolation_state_t state = {0};
@@ -79,12 +77,14 @@ static int test_slow_handler_does_not_block_fast_handler(void)
     return ok;
 }
 
+/* FIFO 测试状态：expected 记录同一 handler 应看到的下一个序号。 */
 typedef struct {
     cc_mutex_t mutex;
     int expected;
     int violation;
 } fifo_state_t;
 
+/* 同一 handler 的事件必须按 publish 顺序执行。 */
 static void fifo_handler(const char *event_type, const char *event_json, void *user_data)
 {
     (void)event_type;
@@ -96,6 +96,7 @@ static void fifo_handler(const char *event_type, const char *event_json, void *u
     cc_mutex_unlock(state->mutex);
 }
 
+/* 验证同一订阅 handler 即使在多 worker 下也保持 FIFO。 */
 static int test_same_handler_fifo(void)
 {
     fifo_state_t state = {0};
@@ -122,6 +123,7 @@ static int test_same_handler_fifo(void)
     return ok;
 }
 
+/* 背压测试状态：用阻塞 handler 填满 worker 和队列，再观察第三次 publish 是否阻塞。 */
 typedef struct {
     cc_event_bus_t *bus;
     cc_mutex_t mutex;
@@ -132,6 +134,7 @@ typedef struct {
     int publish_thread_done;
 } backpressure_state_t;
 
+/* 阻塞 handler：占住唯一 worker，直到测试释放。 */
 static void blocking_handler(const char *event_type, const char *event_json, void *user_data)
 {
     (void)event_type;
@@ -144,6 +147,7 @@ static void blocking_handler(const char *event_type, const char *event_json, voi
     cc_mutex_unlock(state->mutex);
 }
 
+/* 第三次 publish 运行在线程中，用来观察队列满时 publish 是否等待空间。 */
 static void *third_publish_thread(void *arg)
 {
     backpressure_state_t *state = (backpressure_state_t *)arg;
@@ -161,6 +165,7 @@ static void *third_publish_thread(void *arg)
     return NULL;
 }
 
+/* 验证 max_pending 满时 publisher 会被背压阻塞，而不是丢事件或越界增长。 */
 static int test_queue_full_blocks_publisher(void)
 {
     backpressure_state_t state = {0};
@@ -198,11 +203,13 @@ static int test_queue_full_blocks_publisher(void)
     return ok;
 }
 
+/* destroy drain 测试状态。 */
 typedef struct {
     cc_mutex_t mutex;
     int count;
 } count_state_t;
 
+/* 简单计数 handler，用来验证 destroy 前 pending 事件被处理。 */
 static void count_handler(const char *event_type, const char *event_json, void *user_data)
 {
     (void)event_type;
@@ -213,6 +220,7 @@ static void count_handler(const char *event_type, const char *event_json, void *
     cc_mutex_unlock(state->mutex);
 }
 
+/* 验证 destroy 会 drain 已发布事件，避免异步事件静默丢失。 */
 static int test_destroy_drains_pending_events(void)
 {
     count_state_t state = {0};
@@ -235,6 +243,7 @@ static int test_destroy_drains_pending_events(void)
     return ok;
 }
 
+/* 嵌套发布测试状态。 */
 typedef struct {
     cc_event_bus_t *bus;
     cc_mutex_t mutex;
@@ -242,6 +251,7 @@ typedef struct {
     int nested_count;
 } nested_state_t;
 
+/* root handler 内再次发布 nested，验证异步 event bus 不会因重入 publish 死锁。 */
 static void nested_handler(const char *event_type, const char *event_json, void *user_data)
 {
     (void)event_json;
@@ -257,6 +267,7 @@ static void nested_handler(const char *event_type, const char *event_json, void 
     cc_mutex_unlock(state->mutex);
 }
 
+/* 验证 handler 内嵌套 publish 能被 flush 正确处理。 */
 static int test_nested_publish_does_not_deadlock(void)
 {
     nested_state_t state = {0};
@@ -279,6 +290,7 @@ static int test_nested_publish_does_not_deadlock(void)
     return ok;
 }
 
+/* 顺序运行异步 event bus 的全部并发契约测试。 */
 int main(void)
 {
     if (!test_slow_handler_does_not_block_fast_handler()) return 1;

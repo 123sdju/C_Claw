@@ -1,35 +1,6 @@
-/**
- * 学习导读：cclaw/ports/include/cc/ports/cc_tool.h
- *
- * 所属层次：端口层。
- * 阅读重点：这里定义可替换接口，阅读时重点看 struct + vtable + void *self 如何表达多态和依赖注入。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_tool.h — 工具抽象端口（Port）
- *
- * @file    cc/ports/cc_tool.h
- * @brief   定义 Agent 可调用工具的抽象接口和上下文。采用 vtable 多态模式。
- *
- * 在 c-claw 的端口-适配器架构中，本模块定义的是"端口"（Port）：
- * 它规定了工具行为的抽象合约，但不提供具体实现。具体工具的创建
- * 通过工厂函数返回填充了 vtable 的 cc_tool_t 实例。
- *
- * ─── 接口契约 ─────────────────────────────────────────────────────────
- *
- *   每个 cc_tool_t 由两个部分组成：
- *     - self      : 指向具体工具实现的私有数据
- *     - vtable    : 指向虚函数表，定义了工具的公共接口
- *
- *   实现者必须填充 vtable 中的所有函数指针，并提供 name/description/schema
- *   等元数据。调用者只依赖 vtable，不感知具体工具类型。
- *
- * ─── 依赖 ─────────────────────────────────────────────────────────────
- *
- *   依赖 cc/core/cc_result.h（错误传递）和 cc/core/cc_tool_call.h（数据模型）。
- */
+
+
 
 #ifndef CC_TOOL_H
 #define CC_TOOL_H
@@ -37,44 +8,25 @@
 #include "cc/core/cc_result.h"
 #include "cc/core/cc_tool_call.h"
 
-/**
- * cc_event_bus_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
- */
+/* event bus/logger/memory store 等服务在此只做前置声明，避免工具接口反向依赖实现。 */
 typedef struct cc_event_bus cc_event_bus_t;
-/**
- * cc_logger_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
- */
+
 typedef struct cc_logger cc_logger_t;
-/**
- * cc_memory_store — 长期记忆端口的前向声明。
- *
- * 工具上下文只借用 memory store 指针，具体结构定义在 memory store 端口头文件中。
- */
+
 typedef struct cc_memory_store cc_memory_store_t;
 
-/**
- * cc_tool_executor_pool — 工具并发池的前向声明。
- *
- * pool 的完整定义在 app/core 层，端口层只保存借用指针。这样工具上下文可以
- * 看到“当前调用受哪个并发池约束”，但端口层不反向依赖 app 头文件。
- */
+
 typedef struct cc_tool_executor_pool cc_tool_executor_pool_t;
 
-/**
- * cc_cancel_token — core SDK 取消令牌的前向声明。
- *
- * 工具上下文只借用 token 指针。工具可以查询它决定是否提前退出，但不能销毁
- * token，也不能假设取消会强制终止其他线程。
- */
+
 typedef struct cc_cancel_token cc_cancel_token_t;
 
-/**
- * cc_tool_approval_fn — 工具调用人工审批回调。
+/*
+ * 工具审批回调。
  *
- * policy engine 判定需要人工确认时，tool executor 会调用该函数。回调只读取
- * tool_name/arguments_json/reason；user_data 由 gateway 注入并负责生命周期。
- *
- * @return 非 0 表示允许继续执行工具，0 表示拒绝。
+ * 返回非 0 表示批准，0 表示拒绝。tool_name/arguments_json/reason 都只在调用期间借用；
+ * user_data 由注册方拥有。无审批 handler 时，高风险工具应默认 deny，这个策略由
+ * tool executor/policy engine 执行。
  */
 typedef int (*cc_tool_approval_fn)(
     const char *tool_name,
@@ -83,117 +35,97 @@ typedef int (*cc_tool_approval_fn)(
     void *user_data
 );
 
-/**
- * cc_runtime_services — 暴露给工具的受限 runtime 服务集合，避免工具直接持有完整 runtime。
+/*
+ * runtime 注入给工具的服务集合。
  *
- * 该结构体不拥有任何字段。runtime 在执行工具时临时提供它，让工具可以发布事件、
- * 写日志、访问长期记忆或请求人工审批，同时避免工具拿到完整 runtime。
+ * 这是依赖注入结构：工具不直接链接全局单例，而是通过 services 使用 logger、memory、
+ * event bus、tool pool 和 approval handler。字段由 runtime 拥有，工具不能保存超过
+ * call 生命周期，除非明确复制所需数据。
  */
 typedef struct cc_runtime_services {
-    /** 可选事件总线；工具可用它发布细粒度进度事件。 */
+
     cc_event_bus_t *event_bus;
-    /** 可选 logger；工具可用它输出诊断日志。 */
+
     cc_logger_t *logger;
-    /** 可选长期记忆存储；为 NULL 表示当前 profile 未启用记忆工具链。 */
+
     cc_memory_store_t *memory_store;
-    /** 可选工具并发池；tool executor 负责 acquire/release，工具本身只借用查看。 */
+
     cc_tool_executor_pool_t *tool_pool;
-    /** 可选人工审批回调；高风险工具可在执行前调用。 */
+
     cc_tool_approval_fn approve_tool_call;
-    /** 传给 approve_tool_call 的调用方上下文。 */
+
     void *approval_user_data;
 } cc_runtime_services_t;
 
-/**
- * cc_tool_context_t — 工具调用上下文
+/*
+ * 单次工具调用上下文。
  *
- * 在工具执行时传入，提供工具需要的环境信息。
- * 只要某个操作需要知道"谁在什么会话、什么目录下调用的我"，
- * 就可以从这个结构中获取。
+ * 字符串字段均为借用指针；workspace_dir 是文件类工具的安全根目录，cancel_token 用于
+ * 长耗时工具响应取消，timeout_ms 是工具层预算，lane/generation 用于执行池和 registry
+ * snapshot 保持一致。工具实现不应修改该结构。
  */
 typedef struct cc_tool_context {
-    const char *session_id;   /**< 当前会话 ID，用于关联存储操作 */
-    const char *workspace_dir; /**< 当前工作区目录，文件操作应限定在此路径下 */
-    const char *user_id;      /**< 调用用户的标识符（留作将来扩展） */
-    const cc_runtime_services_t *services; /**< 受限运行时服务，避免工具拿到完整 runtime */
-    cc_cancel_token_t *cancel_token; /**< 借用的取消令牌；工具应在长耗时步骤之间查询。 */
-    int timeout_ms; /**< 本次工具调用的策略 timeout；0 表示未配置。 */
-    const char *lane_name; /**< 本次调用进入的 tool executor lane 名称，借用临时字符串。 */
-    unsigned long generation; /**< runtime/tool snapshot generation，用于诊断 reload 边界。 */
+    const char *session_id;
+    const char *workspace_dir;
+    const char *user_id;
+    const cc_runtime_services_t *services;
+    cc_cancel_token_t *cancel_token;
+    int timeout_ms;
+    const char *lane_name;
+    unsigned long generation;
 } cc_tool_context_t;
 
-/* ── 前向声明 ───────────────────────────────────────────────────────── */
 
+/* 工具 vtable 前置声明。 */
 typedef struct cc_tool_vtable cc_tool_vtable_t;
-/**
- * cc_tool_t — 前向声明的端口/服务句柄类型，具体字段在本文件后文或对应端口中定义。
- */
+
+/* 工具接口对象前置声明。 */
 typedef struct cc_tool cc_tool_t;
 
-/**
- * cc_tool_t — 工具实例（多态句柄）
+/*
+ * 工具接口对象。
  *
- * 这是一个值语义的结构体，通过 self + vtable 实现多态。
- * 可以直接按值传递和拷贝，浅拷贝后两个实例指向同一个底层工具对象。
- * 生命周期由创建者管理，销毁时通过 vtable->destroy 释放 self。
+ * self 指向具体工具实现，vtable 提供多态函数。registry 接收该结构后通常拥有 self；
+ * 查找返回的是浅拷贝，调用方不能直接释放 self。
  */
 struct cc_tool {
-    void *self;                    /**< 指向具体工具实现的私有数据。
-                                   *   由工厂函数分配，类型因具体工具而异 */
-    const cc_tool_vtable_t *vtable; /**< 虚函数表指针，定义了工具的所有行为 */
+    void *self;
+
+    const cc_tool_vtable_t *vtable;
 };
 
-/**
- * cc_tool_vtable_t — 工具虚函数表
+
+/*
+ * 工具 vtable。
  *
- * 定义工具的抽象接口。每个具体的工具实现必须填充此表。
- * 类似于面向对象语言中的接口/抽象类。
+ * 这是 C 语言模拟接口/虚函数表的核心。name/description/schema_json 返回的字符串由
+ * 工具实现拥有，至少在工具生命周期内有效；call 把结果写入调用方提供的 out_result；
+ * destroy 释放 self。
  */
 struct cc_tool_vtable {
-    /**
-     * name — 获取工具名称
-     *
-     * 用于工具注册表的索引和 LLM 的工具选择。
-     * 名称应对 LLM 友好，使用下划线分隔的小写英文（如 "file_read"）。
-     *
-     * @param self  工具私有数据
-     * @return      工具名称字符串（静态常量，不需要释放）
-     */
+
+
+    /* 返回稳定工具名，用于 LLM tool call 和 registry 查找。 */
     const char *(*name)(void *self);
 
-    /**
-     * description — 获取工具描述
-     *
-     * 用于生成发送给 LLM 的工具 schema。描述应说明工具的功能、
-     * 使用场景和注意事项，帮助 LLM 正确选择工具。
-     *
-     * @param self  工具私有数据
-     * @return      工具描述字符串（静态常量，不需要释放）
-     */
+
+
+    /* 返回给模型和调试 UI 使用的简短描述；可返回 NULL。 */
     const char *(*description)(void *self);
 
-    /**
-     * schema_json — 获取工具参数 JSON Schema
-     *
-     * 返回符合 JSON Schema 规范的参数字符串，定义工具接受的参数
-     * 名称、类型、是否必填、默认值等。LLM 据此生成合法的调用参数。
-     *
-     * @param self  工具私有数据
-     * @return      JSON Schema 字符串（静态常量，不需要释放）
-     */
+
+
+    /* 返回 JSON Schema 参数对象字符串；用于 provider tool schema 和执行前校验。 */
     const char *(*schema_json)(void *self);
 
-    /**
-     * call — 执行工具调用
+
+
+    /*
+     * 执行工具。
      *
-     * 工具调用的核心函数。解析 args_json 参数，执行工具逻辑，
-     * 将结果写入 out_result。
-     *
-     * @param self        工具私有数据
-     * @param args_json   调用参数（JSON 格式字符串），格式由 schema_json 定义
-     * @param ctx         调用上下文（会话 ID、工作区等环境信息）
-     * @param out_result  输出：工具执行结果（调用者负责 cc_tool_result_destroy）
-     * @return            CC_OK 表示执行成功
+     * args_json 是已通过最小 schema 校验的参数字符串；out_result 由调用方提供，工具
+     * 填充其字段并把资源所有权交给调用方 cleanup。工具级失败应返回 ok=0 的 result，
+     * SDK/系统级失败才返回非 OK cc_result_t。
      */
     cc_result_t (*call)(
         void *self,
@@ -202,14 +134,9 @@ struct cc_tool_vtable {
         cc_tool_result_t *out_result
     );
 
-    /**
-     * destroy — 销毁工具实例
-     *
-     * 释放 self 指向的私有数据及工具持有的所有资源。
-     * 如果工具没有需要释放的资源（如纯函数工具），此字段可为 NULL。
-     *
-     * @param self  工具私有数据
-     */
+
+
+    /* 销毁工具实现 self；registry destroy 时调用。 */
     void (*destroy)(void *self);
 };
 

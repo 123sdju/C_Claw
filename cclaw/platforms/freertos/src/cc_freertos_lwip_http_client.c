@@ -1,47 +1,6 @@
-/**
- * 学习导读：cclaw/platforms/freertos/src/cc_freertos_lwip_http_client.c
- *
- * 所属层次：平台层。
- * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_freertos_lwip_http_client.c — 基于 lwIP 裸 socket 的 HTTP 客户端实现
- *
- * 在整体架构中的角色和层次：
- *   本模块位于 Platform 层的 FreeRTOS 平台实现子层。
- *   Platform 层是整个系统的最底层，负责封装操作系统差异。
- *   本文件是 cc_http_client.h 端口接口在裸 FreeRTOS + lwIP 环境的具体实现，
- *   不使用 libcurl 或任何第三方 HTTP 库，直接从 TCP socket 构造 HTTP/1.0 请求
- *   并解析响应。不依赖文件系统、进程或动态加载。向上层提供统一的
- *   cc_http_client_perform() / cc_http_response_free() 接口。
- *
- * 核心架构（纯 lwIP socket + 手动 HTTP 构造）：
- *   1. parse_url() — 手动解析 HTTP/HTTPS URL（scheme、host、port、path）
- *   2. resolve_ipv4() — IPv4 地址解析，优先 inet_addr()，回退 lwip_getaddrinfo()
- *   3. 构造 HTTP/1.0 请求头（Connection: close，禁止 keep-alive）
- *   4. transport_write_all() — 循环发送直到全部数据发出
- *   5. transport_read() — 接收原始 HTTP 响应，累积到动态缓冲区
- *   6. 手动解析响应：查找 "\r\n\r\n" 分割头部和 body，提取状态码
- *   7. 支持流式回调：若 request->on_body 非空，一次性回调整个 body
- *
- * TLS 支持（可选，基于 mbedTLS）：
- *   由 CCLAW_FREERTOS_ENABLE_MBEDTLS 编译宏控制。启用后：
- *     - start_tls() 执行 mbedTLS 握手（VERIFY_NONE，使用 xorshift RNG）
- *     - tls_send / tls_recv 将 mbedTLS 直接绑定到 lwIP socket 的 BIO
- *     - 支持 ECDHE-RSA/ECDSA + AES-GCM 密码套件
- *
- * 限制与设计决策：
- *   - HTTP/1.0 协议：不处理 chunked encoding 或 keep-alive
- *   - 不支持取消令牌：cancel_token 字段未在实现中使用
- *   - 不支持流式 SSE：流式回调在完整响应接收后一次性调用
- *   - 无 header 解析：响应头被丢弃，仅提取状态码和 body
- *   - 仅 IPv4：不支持 IPv6
- *   - 缓冲区：header 构造 768 字节，读取分块 512 字节
- *   - 超时：通过 lwip_setsockopt SO_RCVTIMEO/SO_SNDTIMEO 设置 socket 超时
- */
+
+
 
 #include "cc/ports/cc_http_client.h"
 
@@ -62,6 +21,7 @@
 #include "mbedtls/ssl_ciphersuites.h"
 #endif
 
+/* 解析后的 URL，固定长度数组用于避免 MCU 上动态分配。 */
 typedef struct parsed_url {
     char scheme[6];
     char host[128];
@@ -70,6 +30,12 @@ typedef struct parsed_url {
     int use_tls;
 } parsed_url_t;
 
+/*
+ * lwIP/mbedTLS 传输状态。
+ *
+ * fd 是 TCP socket；启用 mbedTLS 时附带 SSL context/config。tls_active 用于 close 时决定
+ * 是否发送 close_notify 和释放 TLS 对象。
+ */
 typedef struct transport {
     int fd;
 #if defined(CCLAW_FREERTOS_ENABLE_MBEDTLS) && CCLAW_FREERTOS_ENABLE_MBEDTLS
@@ -80,6 +46,7 @@ typedef struct transport {
 #endif
 } transport_t;
 
+/* 查找请求头；返回值是 request 内部借用指针。 */
 static const char *request_header_value(const cc_http_request_t *request, const char *name)
 {
     for (size_t i = 0; i < request->header_count; i++) {
@@ -91,6 +58,7 @@ static const char *request_header_value(const cc_http_request_t *request, const 
     return NULL;
 }
 
+/* 复制指定长度的字节为 NUL 结尾字符串。 */
 static char *cc_strdup_len(const char *data, size_t len)
 {
     char *copy = (char *)malloc(len + 1);
@@ -100,6 +68,11 @@ static char *cc_strdup_len(const char *data, size_t len)
     return copy;
 }
 
+/*
+ * 追加原始响应字节。
+ *
+ * max_len 用于限制响应缓存大小；该 lwIP 实现先缓存完整 raw response，再拆 header/body。
+ */
 static int append_bytes(char **buf, size_t *len, size_t max_len, const char *data, size_t data_len)
 {
     if (max_len > 0 && *len + data_len > max_len) return 0;
@@ -112,6 +85,12 @@ static int append_bytes(char **buf, size_t *len, size_t max_len, const char *dat
     return 1;
 }
 
+/*
+ * 解析 http/https URL。
+ *
+ * 为 MCU 轻量实现，只支持 http:// 和可选 mbedTLS 的 https://，不支持 userinfo、IPv6 或
+ * 超长 host/path。
+ */
 static cc_result_t parse_url(const char *url, parsed_url_t *out)
 {
     if (!url) return cc_result_error(CC_ERR_INVALID_ARGUMENT, "HTTP URL is missing");
@@ -173,6 +152,11 @@ static cc_result_t parse_url(const char *url, parsed_url_t *out)
     return cc_result_ok();
 }
 
+/*
+ * 解析 IPv4 地址。
+ *
+ * 先尝试 dotted IPv4，再使用 lwIP DNS；当前实现只返回第一个 AF_INET 结果。
+ */
 static cc_result_t resolve_ipv4(const char *host, uint16_t port, struct sockaddr_in *out)
 {
     memset(out, 0, sizeof(*out));
@@ -202,6 +186,12 @@ static cc_result_t resolve_ipv4(const char *host, uint16_t port, struct sockaddr
 }
 
 #if defined(CCLAW_FREERTOS_ENABLE_MBEDTLS) && CCLAW_FREERTOS_ENABLE_MBEDTLS
+/*
+ * 测试用轻量 RNG。
+ *
+ * 这是示例级伪随机实现，真实产品应接入硬件 TRNG/mbedTLS entropy。这里保留是为了让
+ * 裁剪环境能编译 HTTPS 路径。
+ */
 static int test_rng(void *ctx, unsigned char *out, size_t len)
 {
     uint32_t *state = (uint32_t *)ctx;
@@ -216,6 +206,7 @@ static int test_rng(void *ctx, unsigned char *out, size_t len)
     return 0;
 }
 
+/* mbedTLS send 回调，底层走 lwIP socket。 */
 static int tls_send(void *ctx, const unsigned char *buf, size_t len)
 {
     int fd = *(int *)ctx;
@@ -223,6 +214,7 @@ static int tls_send(void *ctx, const unsigned char *buf, size_t len)
     return sent < 0 ? -1 : sent;
 }
 
+/* mbedTLS recv 回调，底层走 lwIP socket。 */
 static int tls_recv(void *ctx, unsigned char *buf, size_t len)
 {
     int fd = *(int *)ctx;
@@ -230,6 +222,12 @@ static int tls_recv(void *ctx, unsigned char *buf, size_t len)
     return got < 0 ? -1 : got;
 }
 
+/*
+ * 在已连接 TCP socket 上启动 TLS。
+ *
+ * 当前配置关闭证书校验以降低移植门槛；生产固件应启用 CA/证书校验，否则 HTTPS 无法防
+ * 中间人攻击。
+ */
 static cc_result_t start_tls(transport_t *transport, const char *tls_host)
 {
     static const int suites[] = {
@@ -276,6 +274,7 @@ static cc_result_t start_tls(transport_t *transport, const char *tls_host)
 }
 #endif
 
+/* 关闭 transport，按需关闭 TLS，再关闭 lwIP socket。 */
 static void transport_close(transport_t *transport)
 {
 #if defined(CCLAW_FREERTOS_ENABLE_MBEDTLS) && CCLAW_FREERTOS_ENABLE_MBEDTLS
@@ -289,6 +288,7 @@ static void transport_close(transport_t *transport)
     transport->fd = -1;
 }
 
+/* 写完整 buffer，处理短写；TLS 和明文 socket 共用这个 helper。 */
 static cc_result_t transport_write_all(transport_t *transport, const char *data, size_t len)
 {
     while (len > 0) {
@@ -310,6 +310,7 @@ static cc_result_t transport_write_all(transport_t *transport, const char *data,
     return cc_result_ok();
 }
 
+/* 从 transport 读取一次数据；TLS 模式下处理 WANT_READ/WANT_WRITE。 */
 static int transport_read(transport_t *transport, char *buf, size_t len)
 {
 #if defined(CCLAW_FREERTOS_ENABLE_MBEDTLS) && CCLAW_FREERTOS_ENABLE_MBEDTLS
@@ -325,6 +326,12 @@ static int transport_read(transport_t *transport, char *buf, size_t len)
     return lwip_recv(transport->fd, buf, len, 0);
 }
 
+/*
+ * 执行 FreeRTOS/lwIP HTTP 请求。
+ *
+ * 该实现手写 HTTP/1.0 请求并缓存完整 raw response，再拆出 body；适合资源受限 profile。
+ * 当前不解析响应头数组，stream on_body 在 body 完整缓存后回调，不是逐包流式。
+ */
 cc_result_t cc_http_client_perform(const cc_http_request_t *request, cc_http_response_t *out_response)
 {
     if (!request || !request->url || !out_response) {
@@ -465,6 +472,7 @@ cc_result_t cc_http_client_perform(const cc_http_request_t *request, cc_http_res
     return cc_result_ok();
 }
 
+/* 释放 lwIP HTTP response 的 headers/body。 */
 void cc_http_response_free(cc_http_response_t *response)
 {
     if (!response) return;

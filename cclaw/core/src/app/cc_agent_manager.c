@@ -1,101 +1,6 @@
-/**
- * 学习导读：cclaw/core/src/app/cc_agent_manager.c
- *
- * 所属层次：核心层。
- * 阅读重点：这里是 SDK 的多 agent 编排中心，重点看 agent_id→runtime 映射、
- *          message task 构造与 run queue 集成、pending_run 异步响应机制
- *          以及 session key 的生成规则。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_agent_manager.c — 多 Agent 编排与消息路由中心
- *
- * 本模块在整体架构中的角色：
- * ─────────────────────────────
- * 位于核心 SDK 层，是 gateway/app 面向 SDK 的主入口。它不创建 LLM、
- * store、plugin 进程，也不读取文件 watcher。它只做三件事：(1) 维护
- * agent_id 到 cc_agent_runtime_t 的映射表；(2) 将每次 handle_message 包装
- * 为 message_task 提交到 run queue；(3) 通过 pending_run 链表追踪异步 run
- * 的响应指针，支持 submit+collect 分离的调用模式。
- *
- * 上游调用方：
- *   - gateway / app 层 —— 通过 cc_agent_manager_handle_message 发起交互 turn
- *   - 高层编排逻辑 —— 通过 submit + collect 分离调用实现异步流水线
- *
- * 下游依赖模块：
- *   - cc_agent_runtime.c —— runtime 的 handle_message_with_options，
- *     是 message_task 最终执行体；也用于 reset_session 获取 session store
- *   - cc_run_queue.c —— job 调度，manager 把 message_task 提交为
- *     STEER action 的 run queue job
- *   - cc_cancel_token.c —— cancel token 从 run queue 透传到 runtime，
- *     再到 LLM stream、tool executor、plugin/MCP transport
- *
- * ─── 内部数据结构 ───────────────────────────────────────────────────
- *
- *   cc_agent_manager_entry_t：
- *     动态数组条目，保存 agent_id 字符串（manager 拥有）和 runtime 指针
- *     （manager 只借用，由 runtime_builder 或 app 创建）。
- *
- *   cc_agent_manager_message_task_t：
- *     每次消息提交时分配的 task 对象。持有 runtime 指针、session_id、
- *     user_input 副本和反向引用 pending_run。其生命周期由 run queue 的
- *     owns_user_data 机制管理：若 job 被取消未执行，队列负责 free；若
- *     job 正常执行，collect 时释放。
- *
- *   cc_agent_manager_pending_run_t：
- *     submit 时创建、collect 时销毁的异步追踪节点。保存 run_id 和
- *     response 输出指针（由 runtime 在 handle_message 中写入）。
- *     通过单向链表串联，collect 时用 take_pending_run_locked 取出。
- *
- *   cc_agent_manager（主结构体）：
- *     持有 entries 动态数组、run_queue（可借用也可拥有，由 owns_queue 控制）、
- *     current_agent_id、default_action、pending_runs 链表及 mutex。
- *
- * ─── 消息处理流程 ───────────────────────────────────────────────────
- *
- *   handle_message_with_options：
- *     1. 调用 submit_with_options 将消息提交到 run queue，获取 run_id
- *     2. 调用 collect 阻塞等待 run 完成并取回 response
- *
- *   submit_with_options：
- *     1. 查找 agent_id 对应的 runtime（未指定时用 current_agent_id 或 "default"）
- *     2. 构造 session_key = "agent_id:session_id"
- *     3. 分配 message_task（拷贝 session_id、user_input）和 pending_run
- *     4. 包装为 run_queue_request（lane 和 action 可配置，默认 MAIN+STEER）
- *     5. 通过 cc_run_queue_submit_with_token 提交
- *     6. 将 pending_run 插入 manager 链表
- *
- *   collect：
- *     1. 验证 run_id 存在
- *     2. 调用 cc_run_queue_collect 等待 run queue 完成
- *     3. 从 pending_run 链表取出节点，提取 response 指针返回给调用方
- *     4. 释放 message_task 和 pending_run
- *
- * ─── Session Key 设计 ────────────────────────────────────────────────
- *
- *   session_key 格式为 "agent_id:session_id"，由 cc_agent_manager_make_session_key
- *   生成。这个 key 作为 run queue 的 session_key 传入，确保同 agent 同 session
- *   的请求在 run queue 层面被串行化（per_session_concurrency=1），不同 agent
- *   的 session 互不干扰。
- *
- * ─── 设计决策 ───────────────────────────────────────────────────────
- *
- *   为什么 manager 不拥有 runtime？
- *     runtime 由 runtime_builder 或 app 创建，manager 只保存指针。这样
- *     同一个 runtime 可以被多个 manager 引用，也可以由 app 在 manager
- *     销毁后继续使用。生命周期分离使得热重载等场景更容易实现。
- *
- *   为什么 message_task 要拷贝 session_id 和 user_input？
- *     submit 返回后调用方栈上的字符串可能失效，而 message_task 需要
- *     在 worker 线程中异步访问这些值。拷贝确保异步安全。
- *
- *   为什么 cancel_token 从 run queue 透传到 runtime？
- *     manager 只负责调度，不解释取消语义。当 run queue 取消 job 时，
- *     cancel token 自动传播到 runtime → LLM stream → tool executor →
- *     plugin/MCP transport，每一层在安全点检查 token 并释放资源。
- */
+
+
 
 #include "cc/app/cc_agent_manager.h"
 #include "cc/ports/cc_thread.h"
@@ -104,22 +9,16 @@
 #include <stdio.h>
 #include <string.h>
 
-/*
- * Agent manager 是 gateway/app 面向 SDK 的主入口。它不拥有 runtime 的内部依赖，
- * 只保存 agent_id -> runtime 的映射，并把每次消息提交到 run queue。
- *
- * 生命周期：
- *   - runtime 指针由 runtime_builder 或 app 创建，manager 只借用。
- *   - queue 可借用也可由 manager 拥有，取决于 owns_queue。
- *   - pending_run 保存异步 run 的响应指针；collect 后释放节点。
- */
+/* agent id 到 runtime 指针的路由表项；manager 不拥有 runtime。 */
 typedef struct cc_agent_manager_entry {
     char *id;
     cc_agent_runtime_t *runtime;
 } cc_agent_manager_entry_t;
 
+/* 异步消息任务前置声明，pending run 中保存指向任务的指针。 */
 typedef struct cc_agent_manager_message_task cc_agent_manager_message_task_t;
 
+/* 等待 collect 的异步 run；response 由任务写入并在 collect 时转移给调用方。 */
 typedef struct cc_agent_manager_pending_run {
     cc_run_id_t run_id;
     char *response;
@@ -127,6 +26,12 @@ typedef struct cc_agent_manager_pending_run {
     struct cc_agent_manager_pending_run *next;
 } cc_agent_manager_pending_run_t;
 
+/*
+ * agent manager 内部状态。
+ *
+ * entries 是 agent 路由表，queue 是运行队列，pending_runs 保存已提交但未 collect 的结果。
+ * mutex 保护路由表、当前 agent 和 pending 链表。
+ */
 struct cc_agent_manager {
     cc_agent_manager_entry_t *entries;
     size_t entry_count;
@@ -139,6 +44,7 @@ struct cc_agent_manager {
     cc_mutex_t mutex;
 };
 
+/* 单次用户消息处理任务；由 run queue worker 调用，完成后由 collect 释放。 */
 struct cc_agent_manager_message_task {
     cc_agent_runtime_t *runtime;
     char *session_id;
@@ -146,6 +52,12 @@ struct cc_agent_manager_message_task {
     cc_agent_manager_pending_run_t *pending_run;
 };
 
+/*
+ * run queue worker 执行的消息任务。
+ *
+ * 任务把 run queue 提供的 cancel token 传给 runtime，同步处理消息并把 response 写入
+ * pending_run，等待 collect 转移所有权。
+ */
 static cc_result_t run_message_task(void *user_data, cc_cancel_token_t *cancel_token)
 {
     cc_agent_manager_message_task_t *task = (cc_agent_manager_message_task_t *)user_data;
@@ -154,10 +66,8 @@ static cc_result_t run_message_task(void *user_data, cc_cancel_token_t *cancel_t
     }
     cc_agent_runtime_run_options_t options;
     memset(&options, 0, sizeof(options));
-    /*
-     * cancel_token 直接透传到 runtime。runtime 再把它传给 LLM stream fallback、
-     * tool executor、plugin/MCP transport。manager 自己不解释取消细节。
-     */
+
+
     options.cancel_token = cancel_token;
     return cc_agent_runtime_handle_message_with_options(
         task->runtime,
@@ -168,6 +78,7 @@ static cc_result_t run_message_task(void *user_data, cc_cancel_token_t *cancel_t
     );
 }
 
+/* 归一化未知 action，避免外部传入非法 enum 破坏队列策略。 */
 static cc_run_queue_action_t normalize_action(cc_run_queue_action_t action)
 {
     switch (action) {
@@ -181,6 +92,7 @@ static cc_run_queue_action_t normalize_action(cc_run_queue_action_t action)
     }
 }
 
+/* 确保 agent 路由表有空间。 */
 static int ensure_entry_capacity(cc_agent_manager_t *manager)
 {
     if (manager->entry_count < manager->entry_capacity) return 1;
@@ -193,6 +105,12 @@ static int ensure_entry_capacity(cc_agent_manager_t *manager)
     return 1;
 }
 
+/*
+ * 查找 agent runtime。
+ *
+ * agent_id 为 NULL 时使用 current_agent_id，再回退到 "default"。调用方必须持有 manager
+ * mutex，保证 entries/current_agent_id 不被并发修改。
+ */
 static cc_agent_runtime_t *find_runtime(cc_agent_manager_t *manager, const char *agent_id)
 {
     const char *effective_id = agent_id ? agent_id :
@@ -205,6 +123,11 @@ static cc_agent_runtime_t *find_runtime(cc_agent_manager_t *manager, const char 
     return NULL;
 }
 
+/*
+ * 构造 run queue session key。
+ *
+ * key 采用 agent:session，保证不同 agent 的同名 session 不会在队列中互相阻塞或中断。
+ */
 cc_result_t cc_agent_manager_make_session_key(
     const char *agent_id,
     const char *session_id,
@@ -222,6 +145,7 @@ cc_result_t cc_agent_manager_make_session_key(
     return cc_result_ok();
 }
 
+/* 释放异步消息任务。 */
 static void free_message_task(cc_agent_manager_message_task_t *task)
 {
     if (!task) return;
@@ -230,6 +154,7 @@ static void free_message_task(cc_agent_manager_message_task_t *task)
     free(task);
 }
 
+/* 在持锁状态下查找 pending run。 */
 static cc_agent_manager_pending_run_t *find_pending_run_locked(
     cc_agent_manager_t *manager,
     cc_run_id_t run_id
@@ -241,6 +166,7 @@ static cc_agent_manager_pending_run_t *find_pending_run_locked(
     return NULL;
 }
 
+/* 在持锁状态下从 pending 链表摘除 run，所有权交给调用方。 */
 static cc_agent_manager_pending_run_t *take_pending_run_locked(
     cc_agent_manager_t *manager,
     cc_run_id_t run_id
@@ -261,6 +187,12 @@ static cc_agent_manager_pending_run_t *take_pending_run_locked(
     return NULL;
 }
 
+/*
+ * 创建 agent manager。
+ *
+ * 如果外部没有提供 run queue，manager 会创建并拥有一个默认队列；如果提供 default_runtime，
+ * 会注册默认 agent 并设为当前 agent。
+ */
 cc_result_t cc_agent_manager_create(
     const cc_agent_manager_options_t *options,
     cc_agent_manager_t **out_manager
@@ -310,6 +242,12 @@ cc_result_t cc_agent_manager_create(
     return cc_result_ok();
 }
 
+/*
+ * 销毁 agent manager。
+ *
+ * 如果 owns_queue 为真则销毁队列；pending run 尚未 collect 时释放其 response/task，避免
+ * 异步调用方泄漏。runtime 指针不由 manager 销毁。
+ */
 void cc_agent_manager_destroy(cc_agent_manager_t *manager)
 {
     if (!manager) return;
@@ -333,6 +271,12 @@ void cc_agent_manager_destroy(cc_agent_manager_t *manager)
     free(manager);
 }
 
+/*
+ * 注册或替换 agent runtime。
+ *
+ * agent id 被复制进 manager；runtime 只是借用指针，外部必须保证生命周期覆盖 manager
+ * 使用期间。
+ */
 cc_result_t cc_agent_manager_add_agent(
     cc_agent_manager_t *manager,
     const char *agent_id,
@@ -365,6 +309,7 @@ cc_result_t cc_agent_manager_add_agent(
     return cc_result_ok();
 }
 
+/* 使用默认提交选项同步处理消息。 */
 cc_result_t cc_agent_manager_handle_message(
     cc_agent_manager_t *manager,
     const char *agent_id,
@@ -377,6 +322,11 @@ cc_result_t cc_agent_manager_handle_message(
         manager, agent_id, session_id, user_input, NULL, out_response);
 }
 
+/*
+ * 同步处理消息。
+ *
+ * 实现复用 submit + collect，保证同步和异步路径共享队列串行化、中断和取消语义。
+ */
 cc_result_t cc_agent_manager_handle_message_with_options(
     cc_agent_manager_t *manager,
     const char *agent_id,
@@ -400,6 +350,7 @@ cc_result_t cc_agent_manager_handle_message_with_options(
     return rc;
 }
 
+/* 使用默认提交选项异步提交消息。 */
 cc_result_t cc_agent_manager_submit(
     cc_agent_manager_t *manager,
     const char *agent_id,
@@ -412,6 +363,12 @@ cc_result_t cc_agent_manager_submit(
         manager, agent_id, session_id, user_input, NULL, out_run_id);
 }
 
+/*
+ * 异步提交消息处理任务。
+ *
+ * 函数在锁内查找 runtime 和当前 agent，然后复制必要字符串，构造 pending/task 并提交到
+ * run queue。提交成功后 pending run 进入链表，等待 collect 取回。
+ */
 cc_result_t cc_agent_manager_submit_with_options(
     cc_agent_manager_t *manager,
     const char *agent_id,
@@ -483,6 +440,12 @@ cc_result_t cc_agent_manager_submit_with_options(
     return cc_result_ok();
 }
 
+/*
+ * 收集异步 run 结果。
+ *
+ * 先确认 pending run 存在，再等待 run queue 完成；完成后从 pending 链表摘除，成功时把
+ * response 所有权转移给调用方，失败时释放 response。
+ */
 cc_result_t cc_agent_manager_collect(
     cc_agent_manager_t *manager,
     cc_run_id_t run_id,
@@ -515,6 +478,7 @@ cc_result_t cc_agent_manager_collect(
     return rc;
 }
 
+/* 设置当前 agent，并校验目标 agent 已注册。 */
 cc_result_t cc_agent_manager_set_current_agent(
     cc_agent_manager_t *manager,
     const char *agent_id
@@ -539,6 +503,7 @@ cc_result_t cc_agent_manager_set_current_agent(
     return cc_result_ok();
 }
 
+/* 切换当前 agent；当前语义等同 set_current_agent。 */
 cc_result_t cc_agent_manager_switch_agent(
     cc_agent_manager_t *manager,
     const char *agent_id
@@ -547,12 +512,19 @@ cc_result_t cc_agent_manager_switch_agent(
     return cc_agent_manager_set_current_agent(manager, agent_id);
 }
 
+/* 返回当前 agent id；返回值由 manager 拥有。 */
 const char *cc_agent_manager_current_agent(cc_agent_manager_t *manager)
 {
     if (!manager) return NULL;
     return manager->current_agent_id ? manager->current_agent_id : "default";
 }
 
+/*
+ * 中断指定 agent/session 的队列任务。
+ *
+ * 函数先复制 effective agent id，再构造 session key 并转发给 run queue，避免持锁期间调用
+ * 队列造成锁顺序问题。
+ */
 cc_result_t cc_agent_manager_interrupt(
     cc_agent_manager_t *manager,
     const char *agent_id,
@@ -577,6 +549,12 @@ cc_result_t cc_agent_manager_interrupt(
     return rc;
 }
 
+/*
+ * 重置 session。
+ *
+ * 重置前先中断该 agent/session 的运行任务，再调用 runtime 的 session store clear_session。
+ * 如果 store 不支持 reset，返回明确错误。
+ */
 cc_result_t cc_agent_manager_reset_session(
     cc_agent_manager_t *manager,
     const char *agent_id,
@@ -614,6 +592,7 @@ cc_result_t cc_agent_manager_reset_session(
     return store->vtable->clear_session(store->self, session_id);
 }
 
+/* 列出已注册 agent id，返回数组和字符串所有权交给调用方。 */
 cc_result_t cc_agent_manager_list_agents(
     cc_agent_manager_t *manager,
     char ***out_ids,

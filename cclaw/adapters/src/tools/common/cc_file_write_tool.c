@@ -1,27 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/tools/common/cc_file_write_tool.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/*
- * cc_file_write_tool.c — file_write 工具适配器
- *
- * 模块说明：
- *   本文件实现了 "file_write" 工具的适配器（Adapter）。
- *   设计模式：Adapter（适配器）模式 —— 将底层 cc_filesystem_t 文件系统接口
- *   适配为 cc_tool vtable 接口，使 LLM 可通过统一工具接口写入文件。
- *
- * 实现接口：
- *   - cc_tool_vtable_t（5 个虚拟方法：name / description / schema_json / call / destroy）
- *
- * 安全约束：
- *   - 写入路径限制在 workspace 范围内，防止路径穿越攻击
- *   - 强制解析 JSON 参数并校验 path、content 必填
- */
+
+
 
 #include "cc/adapters/cc_builtin_tools.h"
 #include "cc/ports/cc_tool.h"
@@ -32,36 +11,23 @@
 #include <string.h>
 
 /*
- * cc_file_write_tool_t — file_write 工具的内部数据结构
+ * file_write 工具的私有状态。
  *
- * 字段说明：
- *   fs — 底层文件系统实例（cc_filesystem_t），
- *        提供 write_text 等方法用于实际写入文件
+ * 和 file_read 一样，它只借用 filesystem 端口，不拥有平台文件系统对象。工具本身保持
+ * 很薄，安全边界由 path helper、policy/approval 和 filesystem adapter 共同完成。
  */
 typedef struct {
     cc_filesystem_t fs;
 } cc_file_write_tool_t;
 
-/*
- * file_write_name — 返回工具名称
- *
- * 功能：返回该工具在工具注册表中的唯一标识名称。
- * 参数：self — 工具实例指针（本函数未使用）
- * 返回值：工具名称字符串 "file_write"
- */
+/* 返回工具注册名；LLM tool call 必须使用该名字才能命中 registry。 */
 static const char *file_write_name(void *self)
 {
     (void)self;
     return "file_write";
 }
 
-/*
- * file_write_description — 返回工具描述
- *
- * 功能：返回工具的自然语言描述，供 LLM 理解工具用途。
- * 参数：self — 工具实例指针（本函数未使用）
- * 返回值：工具描述字符串 "Write content to a file"
- */
+/* 返回工具说明文本；静态字符串由工具实现持有，调用方只读使用。 */
 static const char *file_write_description(void *self)
 {
     (void)self;
@@ -69,11 +35,10 @@ static const char *file_write_description(void *self)
 }
 
 /*
- * file_write_schema_json — 返回工具参数的 JSON Schema
+ * 返回写文件工具的参数 schema。
  *
- * 功能：定义工具调用时必须/可选的参数及其类型，符合 JSON Schema 规范。
- * 参数：self — 工具实例指针（本函数未使用）
- * 返回值：JSON Schema 字符串，定义了 path（string，必填）和 content（string，必填）参数
+ * path/content 都是必填 string，core 层会先做最小校验；这里仍保留运行时检查，因为
+ * adapter 不能假设所有调用方都一定经过 tool executor。
  */
 static const char *file_write_schema_json(void *self)
 {
@@ -89,21 +54,11 @@ static const char *file_write_schema_json(void *self)
 }
 
 /*
- * file_write_call — 执行文件写入操作
+ * 执行文件写入。
  *
- * 功能：
- *   1. 解析 JSON 参数，提取目标路径和写入内容
- *   2. 安全校验：将相对路径拼接到 workspace 根目录，检查是否越界
- *   3. 调用底层文件系统 write_text 写入文件内容
- *   4. 将结果填充到 out_result 中
- *
- * 参数：
- *   self      — 工具实例指针
- *   args_json — JSON 格式的调用参数（必须包含 "path" 和 "content" 字段）
- *   ctx       — 工具上下文，包含 workspace_dir（workspace 根目录）
- *   out_result— 输出结果结构体，包含 ok/content/error 字段
- *
- * 返回值：cc_result_t，始终返回 OK（业务错误通过 out_result->ok 标识）
+ * 写入工具比读取工具风险更高：目标文件可能还不存在，因此除了检查 full_path，还要检查
+ * parent_dir 是否在 workspace 内，防止 `../`、prefix 绕过或符号链接相关路径逃逸。
+ * 业务失败通过 out_result 返回给 agent，cc_result 保持 OK，表示这次工具错误可恢复。
  */
 static cc_result_t file_write_call(
     void *self,
@@ -137,13 +92,30 @@ static cc_result_t file_write_call(
     }
 
     char *full_path = cc_path_join(ctx->workspace_dir, path);
-    if (!cc_path_is_within(ctx->workspace_dir, full_path)) {
+    if (!full_path) {
         out_result->ok = 0;
-        out_result->error = strdup("Access denied: path is outside workspace");
+        out_result->error = strdup("Failed to resolve target path");
+        cc_json_destroy(args);
+        return cc_result_ok();
+    }
+    char *parent_dir = cc_path_dirname(full_path);
+    if (!parent_dir) {
+        out_result->ok = 0;
+        out_result->error = strdup("Failed to resolve target parent path");
         free(full_path);
         cc_json_destroy(args);
         return cc_result_ok();
     }
+    if (!cc_path_is_within(ctx->workspace_dir, full_path) ||
+        !cc_path_is_within(ctx->workspace_dir, parent_dir)) {
+        out_result->ok = 0;
+        out_result->error = strdup("Access denied: path is outside workspace");
+        free(parent_dir);
+        free(full_path);
+        cc_json_destroy(args);
+        return cc_result_ok();
+    }
+    free(parent_dir);
 
     rc = tool->fs.vtable->write_text(tool->fs.self, full_path, content);
     free(full_path);
@@ -157,28 +129,17 @@ static cc_result_t file_write_call(
     }
 
     out_result->ok = 1;
-    out_result->content = strdup("File written successfully");
+    out_result->text = strdup("File written successfully");
     return cc_result_ok();
 }
 
-/*
- * file_write_destroy — 销毁 file_write 工具实例
- *
- * 功能：释放工具实例占用的内存。
- * 参数：self — 工具实例指针
- * 返回值：无
- */
+/* 销毁 file_write 工具私有对象；filesystem 端口由 builder/platform 层管理。 */
 static void file_write_destroy(void *self)
 {
     free(self);
 }
 
-/*
- * file_write_vtable — file_write 工具的虚拟方法表
- *
- * 说明：将 5 个静态函数绑定为 cc_tool_vtable_t 接口的实现，
- *       使用 Adapter 模式将文件系统功能适配为标准工具接口。
- */
+/* file_write vtable，把工具方法暴露给通用 tool executor。 */
 static cc_tool_vtable_t file_write_vtable = {
     file_write_name,
     file_write_description,
@@ -188,21 +149,17 @@ static cc_tool_vtable_t file_write_vtable = {
 };
 
 /*
- * cc_file_write_tool_create — 创建 file_write 工具实例（工厂函数） 
+ * 创建 file_write 工具实例。
  *
- * 功能：
- *   1. 分配并初始化 cc_file_write_tool_t 结构体
- *   2. 注入底层文件系统依赖
- *   3. 填充 cc_tool_t 输出参数，返回工厂模式创建的实例
- *
- * 参数：
- *   fs       — 底层文件系统实例（依赖注入）
- *   out_tool — 输出参数，创建成功后包含工具 self 指针和 vtable
- *
- * 返回值：cc_result_t，成功返回 CC_OK，内存不足返回 CC_ERR_OUT_OF_MEMORY
+ * 成功后 out_tool 由 registry/runtime 持有并负责调用 destroy；fs 必须在工具生命周期内
+ * 有效。这里不创建目录策略，目录是否存在由 filesystem adapter 的 write_text 决定。
  */
 cc_result_t cc_file_write_tool_create(cc_filesystem_t fs, cc_tool_t *out_tool)
 {
+    if (!out_tool) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null file write tool output");
+    }
+    memset(out_tool, 0, sizeof(*out_tool));
     cc_file_write_tool_t *self = calloc(1, sizeof(cc_file_write_tool_t));
     if (!self) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create file write tool");
 

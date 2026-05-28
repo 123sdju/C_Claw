@@ -1,85 +1,66 @@
-/**
- * 学习导读：cclaw/tests/adapters/test_tool_executor_policy_approval.c
- *
- * 所属层次：测试层。
- * 阅读重点：这里用小型 Given/When/Then 场景固定行为，阅读时重点看每个断言防止哪类回归。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
+
 
 #include "cc/app/cc_tool_executor.h"
 #include "cc/app/cc_agent_runtime.h"
+#include "cc/core/cc_observability.h"
 #include "cc/ports/cc_policy_engine.h"
 #include "cc/ports/cc_tool_registry.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/**
- * cc_policy_engine_create_default — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
- *
- * @param shell_requires_approval 按值传入，用于控制本次操作。
- * @param out_engine 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
- */
+
 extern cc_result_t cc_policy_engine_create_default(
     int shell_requires_approval,
     cc_policy_engine_t *out_engine
 );
-/**
- * cc_memory_session_store_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
- *
- * @param out_store 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
- */
+
 extern cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
 
-/**
- * fake_name — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
- *
- * Given：测试先构造最小依赖、mock 或输入数据。
- * When：调用被验证的公开 API 或并发入口。
- * Then：通过断言确认行为、错误路径或资源释放没有回归。
- */
+typedef struct event_capture {
+    int approval_required;
+    int approval_denied;
+    int approval_approved;
+    int tool_finish;
+    int tool_error;
+    int schema_payload_seen;
+} event_capture_t;
+
+/* 捕获审批和工具事件，确认 tool executor 已经迁移到统一 observability schema。 */
+static void on_event(const char *event_type, const char *event_json, void *user_data)
+{
+    event_capture_t *capture = (event_capture_t *)user_data;
+    if (!capture) return;
+    if (strcmp(event_type, CC_OBS_EVENT_APPROVAL_REQUIRED) == 0) capture->approval_required++;
+    if (strcmp(event_type, CC_OBS_EVENT_APPROVAL_DENIED) == 0) capture->approval_denied++;
+    if (strcmp(event_type, CC_OBS_EVENT_APPROVAL_APPROVED) == 0) capture->approval_approved++;
+    if (strcmp(event_type, CC_OBS_EVENT_TOOL_FINISH) == 0) capture->tool_finish++;
+    if (strcmp(event_type, CC_OBS_EVENT_TOOL_ERROR) == 0) capture->tool_error++;
+    if (event_json && strstr(event_json, "\"schema_version\":1")) capture->schema_payload_seen++;
+}
+
+/* fake shell 工具名，触发默认 policy 的 shell 审批规则。 */
 static const char *fake_name(void *self)
 {
     (void)self;
     return "shell_run";
 }
 
-/**
- * fake_description — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
- *
- * Given：测试先构造最小依赖、mock 或输入数据。
- * When：调用被验证的公开 API 或并发入口。
- * Then：通过断言确认行为、错误路径或资源释放没有回归。
- */
+/* fake 工具说明。 */
 static const char *fake_description(void *self)
 {
     (void)self;
     return "fake shell tool";
 }
 
-/**
- * fake_schema — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
- *
- * Given：测试先构造最小依赖、mock 或输入数据。
- * When：调用被验证的公开 API 或并发入口。
- * Then：通过断言确认行为、错误路径或资源释放没有回归。
- */
+/* fake 工具 schema，此测试关注 approval，不关注参数校验。 */
 static const char *fake_schema(void *self)
 {
     (void)self;
     return "{}";
 }
 
-/**
- * fake_call — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
- *
- * Given：测试先构造最小依赖、mock 或输入数据。
- * When：调用被验证的公开 API 或并发入口。
- * Then：通过断言确认行为、错误路径或资源释放没有回归。
- */
+/* fake 工具调用：只有审批通过时才应增加 called 并返回 called 文本。 */
 static cc_result_t fake_call(
     void *self,
     const char *args_json,
@@ -93,10 +74,11 @@ static cc_result_t fake_call(
     (*called)++;
     memset(out_result, 0, sizeof(*out_result));
     out_result->ok = 1;
-    out_result->content = strdup("called");
+    out_result->text = strdup("called");
     return cc_result_ok();
 }
 
+/* fake shell 工具 vtable。 */
 static cc_tool_vtable_t fake_vtable = {
     fake_name,
     fake_description,
@@ -105,13 +87,7 @@ static cc_tool_vtable_t fake_vtable = {
     NULL
 };
 
-/**
- * approval_approve — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
- *
- * Given：测试先构造最小依赖、mock 或输入数据。
- * When：调用被验证的公开 API 或并发入口。
- * Then：通过断言确认行为、错误路径或资源释放没有回归。
- */
+/* 审批回调：记录调用次数并允许执行。 */
 static int approval_approve(
     const char *tool_name,
     const char *arguments_json,
@@ -127,13 +103,7 @@ static int approval_approve(
     return 1;
 }
 
-/**
- * approval_deny — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
- *
- * Given：测试先构造最小依赖、mock 或输入数据。
- * When：调用被验证的公开 API 或并发入口。
- * Then：通过断言确认行为、错误路径或资源释放没有回归。
- */
+/* 审批回调：记录调用次数并拒绝执行。 */
 static int approval_deny(
     const char *tool_name,
     const char *arguments_json,
@@ -149,33 +119,30 @@ static int approval_deny(
     return 0;
 }
 
-/**
- * clear_tool_result — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
- *
- */
+/* 清理工具结果，封装成 helper 让测试主流程更清晰。 */
 static void clear_tool_result(cc_tool_result_t *result)
 {
-    free(result->content);
-    free(result->error);
-    free(result->metadata_json);
-    memset(result, 0, sizeof(*result));
+    cc_tool_result_cleanup(result);
 }
 
-/**
- * main — 执行本文件的 Given/When/Then 回归测试，失败时以非零退出码暴露问题。
+/*
+ * 验证 tool executor 的 policy/approval 契约。
  *
- * @return 0 通常表示成功完成，非 0 表示失败或应向进程层传播的状态。
+ * 覆盖无 approval handler 默认拒绝、handler deny、handler approve、缺失工具错误，以及
+ * approval/tool observability 事件 schema。
  */
 int main(void)
 {
     cc_tool_registry_t *registry = NULL;
     cc_policy_engine_t policy = {0};
     cc_session_store_t store = {0};
+    cc_event_bus_t *bus = NULL;
     cc_agent_runtime_t *runtime = NULL;
     cc_tool_result_t result;
     int called = 0;
     int approvals = 0;
     int failed = 0;
+    event_capture_t events = {0};
 
     memset(&result, 0, sizeof(result));
 
@@ -197,17 +164,26 @@ int main(void)
         cc_tool_registry_destroy(registry);
         return 1;
     }
+    if (cc_event_bus_create(&bus).code != CC_OK) {
+        store.vtable->destroy(store.self);
+        if (policy.vtable && policy.vtable->destroy) policy.vtable->destroy(policy.self);
+        cc_tool_registry_destroy(registry);
+        return 1;
+    }
+    cc_event_bus_subscribe(bus, NULL, on_event, &events);
 
     cc_agent_runtime_deps_t deps;
     memset(&deps, 0, sizeof(deps));
     deps.tool_registry = registry;
     deps.policy = policy;
     deps.store = store;
+    deps.event_bus = bus;
     cc_agent_runtime_options_t options;
     memset(&options, 0, sizeof(options));
     options.config.max_steps = 1;
     options.config.workspace_dir = ".";
     if (cc_agent_runtime_create(&deps, &options, &runtime).code != CC_OK) {
+        cc_event_bus_destroy(bus);
         store.vtable->destroy(store.self);
         if (policy.vtable && policy.vtable->destroy) policy.vtable->destroy(policy.self);
         cc_tool_registry_destroy(registry);
@@ -225,6 +201,7 @@ int main(void)
     if (result.ok != 0) failed = 1;
     if (!result.error || !strstr(result.error, "approval")) failed = 1;
     if (called != 0) failed = 1;
+    if (events.approval_required != 1 || events.approval_denied != 1) failed = 1;
     cc_result_free(&rc);
     clear_tool_result(&result);
 
@@ -235,6 +212,7 @@ int main(void)
     if (!result.error || !strstr(result.error, "denied")) failed = 1;
     if (called != 0) failed = 1;
     if (approvals != 1) failed = 1;
+    if (events.approval_required != 2 || events.approval_denied != 2) failed = 1;
     cc_result_free(&rc);
     clear_tool_result(&result);
 
@@ -242,9 +220,11 @@ int main(void)
     rc = cc_tool_executor_execute(runtime, "ses_approval", &call, &result);
     if (rc.code != CC_OK) failed = 1;
     if (result.ok != 1) failed = 1;
-    if (!result.content || strcmp(result.content, "called") != 0) failed = 1;
+    if (!result.text || strcmp(result.text, "called") != 0) failed = 1;
     if (called != 1) failed = 1;
     if (approvals != 2) failed = 1;
+    if (events.approval_required != 3 || events.approval_approved != 1 ||
+        events.tool_finish != 1) failed = 1;
     cc_result_free(&rc);
     clear_tool_result(&result);
 
@@ -258,10 +238,12 @@ int main(void)
     if (result.ok != 0) failed = 1;
     if (!result.error || !strstr(result.error, "Tool not found: missing_tool")) failed = 1;
     if (called != 1) failed = 1;
+    if (events.tool_error < 1 || events.schema_payload_seen < 1) failed = 1;
     cc_result_free(&rc);
 
     cc_agent_runtime_destroy(runtime);
     clear_tool_result(&result);
+    cc_event_bus_destroy(bus);
     store.vtable->destroy(store.self);
     if (policy.vtable && policy.vtable->destroy) policy.vtable->destroy(policy.self);
     cc_tool_registry_destroy(registry);

@@ -1,41 +1,18 @@
-/**
- * 学习导读：cclaw/platforms/freertos/src/cc_freertos_path.c
- *
- * 所属层次：平台层。
- * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_freertos_path.c — FreeRTOS 路径操作实现
- *
- * 在整体架构中的角色和层次：
- *   本模块位于 Platform 层的 FreeRTOS 平台实现子层。
- *   Platform 层是整个系统的最底层，负责封装操作系统差异。
- *   本文件是 cc_path.h 端口接口在裸 FreeRTOS（无 VFS）环境的纯字符串实现。
- *   完全不依赖 realpath()、access() 等 POSIX 系统调用，所有操作仅进行
- *   字符串级别的路径拼接、规范化、前缀匹配和目录名计算。
- *
- * 纯字符串实现（无系统调用）：
- *   - cc_path_join：使用 '/' 分隔符拼接路径
- *   - cc_path_canonical：直接返回输入路径副本（无 realpath 可用）
- *   - cc_path_is_within：直接字符串前缀匹配（不先规范化），接受 '/' 边界检查
- *   - cc_path_dirname：查找最后一个 '/' 截取父目录
- *   - cc_path_exists：始终返回 0（裸 FreeRTOS 无文件存在性概念）
- *
- * 设计决策：
- *   裸 FreeRTOS 无文件系统，因此 cc_path_exists 恒返回 0，cc_path_canonical
- *   恒返回输入副本。路径操作仅作字符串处理——这意味着路径穿越检查
- *   （cc_path_is_within）仅在路径本身是规范形式时才有效，不解析符号链接
- *   或相对路径。上层需配合沙箱模块共同确保安全。
- */
+
+
 
 #include "cc/ports/cc_path.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
+#ifndef CC_FREERTOS_PATH_MAX
+#define CC_FREERTOS_PATH_MAX 256
+#endif
+
+/* FreeRTOS 裁剪环境可能没有 strdup，因此提供本文件私有复制函数。 */
 static char *cc_freertos_strdup(const char *text)
 {
     if (!text) return NULL;
@@ -45,6 +22,7 @@ static char *cc_freertos_strdup(const char *text)
     return copy;
 }
 
+/* 拼接 base/child，返回字符串由调用方释放。 */
 char *cc_path_join(const char *base, const char *child)
 {
     if (!base) return cc_freertos_strdup(child);
@@ -60,11 +38,52 @@ char *cc_path_join(const char *base, const char *child)
     return out;
 }
 
+/*
+ * FreeRTOS 词法 canonical。
+ *
+ * 没有依赖 realpath/getcwd，只处理路径中的 `.` 和 `..`；适合无 POSIX 文件系统的 MCU
+ * profile，但不能解析符号链接。
+ */
 char *cc_path_canonical(const char *path)
 {
-    return cc_freertos_strdup(path);
+    if (!path) return NULL;
+    char work[CC_FREERTOS_PATH_MAX];
+    snprintf(work, sizeof(work), "%s", path);
+    char *parts[CC_FREERTOS_PATH_MAX / 2];
+    size_t count = 0;
+    char *save = NULL;
+    char *token = strtok_r(work, "/", &save);
+    while (token) {
+        if (strcmp(token, ".") == 0 || token[0] == '\0') {
+        } else if (strcmp(token, "..") == 0) {
+            if (count > 0) count--;
+        } else if (count < sizeof(parts) / sizeof(parts[0])) {
+            parts[count++] = token;
+        }
+        token = strtok_r(NULL, "/", &save);
+    }
+
+    char out[CC_FREERTOS_PATH_MAX];
+    size_t pos = 0;
+    if (path[0] == '/') out[pos++] = '/';
+    for (size_t i = 0; i < count; i++) {
+        size_t len = strlen(parts[i]);
+        if (pos + len + 2 >= sizeof(out)) return NULL;
+        if (i > 0) out[pos++] = '/';
+        memcpy(out + pos, parts[i], len);
+        pos += len;
+    }
+    if (pos == 0) out[pos++] = '.';
+    out[pos] = '\0';
+    return cc_freertos_strdup(out);
 }
 
+/*
+ * 判断 path 是否位于 base_dir 下。
+ *
+ * 该实现是轻量 prefix 检查，假设调用方已经对路径做 canonical；在真实文件系统上要注意
+ * 符号链接和挂载点边界。
+ */
 int cc_path_is_within(const char *base_dir, const char *path)
 {
     if (!base_dir || !path) return 0;
@@ -72,6 +91,7 @@ int cc_path_is_within(const char *base_dir, const char *path)
     return strncmp(path, base_dir, n) == 0 && (path[n] == '/' || path[n] == '\0');
 }
 
+/* 返回父目录字符串；调用方负责 free。 */
 char *cc_path_dirname(const char *path)
 {
     if (!path) return NULL;
@@ -90,6 +110,11 @@ char *cc_path_dirname(const char *path)
     return copy;
 }
 
+/*
+ * FreeRTOS 默认无统一文件存在 API。
+ *
+ * 当前返回 0，具体产品可在 filesystem adapter 中接入 FATFS/LittleFS 后重写该能力。
+ */
 int cc_path_exists(const char *path)
 {
     (void)path;

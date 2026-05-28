@@ -1,8 +1,8 @@
-# 学习导读：cclaw/core/CMakeLists.txt
-# 所属层次：核心层。
-# 阅读重点：这里按 CMake feature 开关选择 core 源文件，重点看 SDK 能力如何随
-# profile 裁剪，避免 ESP 等设备 profile 编译无关实现。
-# 注释说明：如果注释与代码冲突，以代码行为和测试为准。
+
+
+
+
+
 set(C_CLAW_CORE_SOURCES
     vendor/cjson/cJSON.c
     src/core/cc_result.c
@@ -12,12 +12,15 @@ set(C_CLAW_CORE_SOURCES
     src/core/cc_media.c
     src/core/cc_tool_registry.c
     src/core/cc_event_bus.c
+    src/core/cc_observability.c
     src/core/cc_memory_entry.c
     src/core/cc_memory_store.c
     src/util/cc_string_builder.c
     src/util/cc_memory.c
     src/util/cc_json.c
     src/util/cc_config.c
+    src/util/cc_network_policy.c
+    src/util/cc_redaction.c
     src/util/cc_token_counter.c
     src/util/cc_logger.c
     src/app/cc_context_builder.c
@@ -69,8 +72,9 @@ endif()
 
 add_library(c_claw_core_headers INTERFACE)
 target_include_directories(c_claw_core_headers INTERFACE
-    "${CMAKE_CURRENT_LIST_DIR}/include"
-    "${CMAKE_CURRENT_LIST_DIR}/vendor/cjson"
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>"
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/vendor/cjson>"
+    "$<INSTALL_INTERFACE:include>"
 )
 
 add_library(c_claw_core_objects OBJECT ${C_CLAW_CORE_SOURCES})

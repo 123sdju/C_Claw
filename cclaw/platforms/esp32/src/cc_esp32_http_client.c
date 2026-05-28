@@ -1,42 +1,6 @@
-/**
- * 学习导读：cclaw/platforms/esp32/src/cc_esp32_http_client.c
- *
- * 所属层次：平台层。
- * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_esp32_http_client.c — 基于 ESP-IDF esp_http_client 的 HTTP 客户端实现
- *
- * 在整体架构中的角色和层次：
- *   本模块位于 Platform 层的 ESP32 平台实现子层。
- *   Platform 层是整个系统的最底层，负责封装操作系统差异。
- *   本文件是 cc_http_client.h 端口接口在 ESP32（ESP-IDF）平台的具体实现，
- *   基于 esp_http_client 库提供 HTTP/HTTPS 客户端能力。TLS 通过 esp_crt_bundle_attach
- *   绑定 Mozilla CA 证书包，无需手动管理证书文件。向上层（如 LLM provider、
- *   MCP transport 模块）提供统一的 cc_http_client_perform() / cc_http_response_free()
- *   接口，适合在内存受限的 IoT 设备上运行。
- *
- * 事件驱动回调架构：
- *   与 POSIX/libcurl 版本不同，ESP-IDF esp_http_client 通过单一事件处理函数分发数据：
- *     - HTTP_EVENT_ON_HEADER：逐对接收响应头键值对（evt->header_key/header_value）
- *     - HTTP_EVENT_ON_DATA：接收响应体分块，传递给 on_body 或累积到响应体
- *   cc_esp32_http_ctx_t 回调上下文集成了取消令牌检查、流式回调转发和错误累积。
- *
- * HTTP 方法支持：
- *   - GET / POST：原生支持（esp_http_client_set_method）
- *   - 其他方法：通过 X-HTTP-Method-Override header 兜底（POST + header）
- *
- * 与 POSIX/libcurl 版本的关键区别：
- *   - 使用 esp_http_client 事件回调而非 libcurl WRITEFUNCTION/HEADERFUNCTION
- *   - 事件处理函数返回 ESP_FAIL 中止传输（等价于 libcurl 返回 0）
- *   - 请求体通过 esp_http_client_set_post_field 设置（固定长度字符串）
- *   - 无进度回调（xferinfo），取消只在事件回调中检查
- *   - buffer_size 固定为 2048 字节（ESP32 内存受限环境）
- *   - response_header_append 直接从键值对拼接，无需解析 "Name: Value" 行
- */
+
+
 
 #ifdef ESP_PLATFORM
 #include "cc/ports/cc_http_client.h"
@@ -49,12 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/**
- * cc_esp32_http_ctx — ESP-IDF HTTP event 回调上下文。
+/*
+ * ESP32 HTTP 事件上下文。
  *
- * ESP HTTP client 通过事件分发 header/body chunk。这里沿用 port 层语义：
- * 非流式调用累积 body，流式调用把 chunk 交给 on_body；callback_error 用来把
- * 取消、SSE parser 错误或大小限制从事件回调带回 perform 调用点。
+ * esp_http_client 通过事件回调交付 header/body；ctx 保存 response、stream 回调、最大 body
+ * 限制和取消 token，并用 callback_error 把 SDK 错误从 ESP 回调带回主流程。
  */
 typedef struct cc_esp32_http_ctx {
     cc_http_response_t *response;
@@ -65,12 +28,10 @@ typedef struct cc_esp32_http_ctx {
     cc_result_t callback_error;
 } cc_esp32_http_ctx_t;
 
-/**
- * response_append — 在设备端累积非流式响应体。
+/*
+ * 追加响应 body。
  *
- * ESP profile 也需要普通 JSON response（例如 MCP HTTP JSON 或 real chat provider）。
- * 为了和 POSIX 行为一致，body 始终保持 '\0' 结尾；超过 max_response_bytes 时
- * 返回失败，让 perform 报出可读错误。
+ * max_response_bytes 用于 MCU RAM 保护；超过限制或 realloc 失败返回 0，事件回调会中止请求。
  */
 static int response_append(
     cc_http_response_t *response,
@@ -94,6 +55,11 @@ static int response_append(
     return 1;
 }
 
+/*
+ * 保存一个响应头。
+ *
+ * header name/value 都深拷贝到 response，供 provider 错误分类读取 Retry-After 等字段。
+ */
 static cc_result_t response_header_append(
     cc_http_response_t *response,
     const char *name,
@@ -120,10 +86,11 @@ static cc_result_t response_header_append(
     return cc_result_ok();
 }
 
-/**
- * http_event_handler — 处理 ESP-IDF HTTP client 事件，把响应片段追加到请求上下文。
+/*
+ * ESP-IDF HTTP event handler。
  *
- * @return 返回 esp_err_t 类型结果，供当前调用链继续判断。
+ * ON_HEADER 保存 header，ON_DATA 可走 stream 回调或 body 缓冲；每次事件都检查 cancel token，
+ * 让长请求可以被 runtime 取消。
  */
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
@@ -165,12 +132,11 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-/**
- * cc_http_client_perform — 执行一次平台 HTTP 请求，填充状态码和响应体或触发流式回调。
+/*
+ * 执行 ESP32 HTTP 请求。
  *
- * @param request 借用的对象；函数不释放该对象本身。
- * @param out_response 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 使用 esp_http_client 和证书 bundle；POST/GET 原生支持，其它 method 用
+ * X-HTTP-Method-Override 退化。成功后 out_response 由调用方 cc_http_response_free。
  */
 cc_result_t cc_http_client_perform(
     const cc_http_request_t *request,
@@ -252,11 +218,7 @@ cc_result_t cc_http_client_perform(
     return cc_result_ok();
 }
 
-/**
- * cc_http_response_free — 释放结果结构体内部由平台层分配的缓冲区，并把大小/指针复位。
- *
- * @param response 借用的对象；函数不释放该对象本身。
- */
+/* 释放 ESP32 HTTP response 的 headers/body。 */
 void cc_http_response_free(cc_http_response_t *response)
 {
     if (!response) return;

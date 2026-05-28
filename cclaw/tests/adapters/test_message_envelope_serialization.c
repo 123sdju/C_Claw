@@ -1,11 +1,4 @@
-/**
- * 学习导读：cclaw/tests/adapters/test_message_envelope_serialization.c
- *
- * 所属层次：测试层。
- * 阅读重点：这里用小型 Given/When/Then 场景固定行为，阅读时重点看每个断言防止哪类回归。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
+
 
 #include "cc/app/cc_agent_runtime.h"
 #include "cc/app/cc_context_builder.h"
@@ -16,42 +9,55 @@
 #include <stdlib.h>
 #include <string.h>
 
-/**
- * cc_memory_session_store_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
+
+/*
+ * 使用内存 session store 作为持久化 adapter，避免测试依赖文件系统或 SQLite。
  *
- * @param out_store 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 这里直接链接 adapter 创建函数，是为了验证 session store 保存后的消息 envelope
+ * 能被 context builder 正确还原，而不是验证 runtime builder 的工厂分发。
  */
 extern cc_result_t cc_memory_session_store_create(cc_session_store_t *out_store);
 
-/**
- * fake_chat — 测试桩函数，用最小行为替代真实依赖，帮助测试聚焦当前场景。
+
+/*
+ * 最小 fake LLM：只返回一个完整 assistant 文本。
  *
- * Given：测试先构造最小依赖、mock 或输入数据。
- * When：调用被验证的公开 API 或并发入口。
- * Then：通过断言确认行为、错误路径或资源释放没有回归。
+ * 本测试真正关注的是发起请求前的上下文构建结果，fake_chat 不读取 request；
+ * 它存在的意义是让 runtime create 通过 provider 依赖校验。
  */
 static cc_result_t fake_chat(void *self, const cc_llm_chat_request_t *request, cc_llm_response_t *out)
 {
     (void)self;
     (void)request;
-    memset(out, 0, sizeof(*out));
-    out->has_text = 1;
+    cc_llm_response_init(out);
+    cc_result_t rc = cc_llm_response_set_text(out, "ok");
+    if (rc.code != CC_OK) return rc;
     out->finished = 1;
-    out->text = strdup("ok");
     return cc_result_ok();
 }
 
+/*
+ * provider vtable 只实现同步 chat。
+ *
+ * 这体现了 C 语言 OOP 的最小实现方式：结构体保存函数指针，测试只填需要的能力，
+ * 其余能力保持 NULL，由 runtime/capability 校验决定是否可用。
+ */
 static cc_llm_provider_vtable_t fake_llm_vtable = {
     fake_chat,
     NULL,
     NULL
 };
 
-/**
- * main — 执行本文件的 Given/When/Then 回归测试，失败时以非零退出码暴露问题。
+
+/*
+ * 验证 tool_calls 和 reasoning_content 经过 store/context/json 三层后没有被二次转义。
  *
- * @return 0 通常表示成功完成，非 0 表示失败或应向进程层传播的状态。
+ * 测试流程：
+ * 1. 建立只含 fake LLM、空 tool registry 和内存 store 的 runtime。
+ * 2. 手工写入 assistant tool call 消息和 tool result 消息，模拟一次工具调用历史。
+ * 3. 通过 context builder 读取历史并序列化为 LLM messages JSON。
+ * 4. 断言 JSON 中存在结构化 tool_calls/reasoning_content，且没有出现被转义的
+ *    "\\\"tool_calls\\\""，避免 provider adapter 收到字符串套字符串。
  */
 int main(void)
 {
@@ -80,26 +86,37 @@ int main(void)
     if (cc_agent_runtime_create(&deps, &options, &runtime).code != CC_OK) return 1;
 
     cc_message_t *msg = NULL;
-    cc_message_create("m1", "ses_msg", CC_ROLE_ASSISTANT, NULL, "call_1", &msg);
-    cc_message_set_tool_calls_json(msg,
-        "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"file_read\",\"arguments\":\"{}\"}}]");
+    cc_message_create_text("m1", "ses_msg", CC_ROLE_ASSISTANT, NULL, NULL, &msg);
+    cc_tool_call_t call = {
+        .id = "call_1",
+        .name = "file_read",
+        .arguments_json = "{}"
+    };
+    cc_message_add_tool_call(msg, &call);
     cc_message_set_reasoning_content(msg, "thinking");
     store.vtable->append_message(store.self, msg);
     cc_message_destroy(msg);
 
-    cc_message_create("m2", "ses_msg", CC_ROLE_TOOL, "{\"ok\":true}", "call_1", &msg);
+    cc_message_create_text("m2", "ses_msg", CC_ROLE_TOOL, "{\"ok\":true}", "call_1", &msg);
     store.vtable->append_message(store.self, msg);
     cc_message_destroy(msg);
 
-    char *messages_json = NULL;
+    cc_message_t *messages = NULL;
+    size_t message_count = 0;
     cc_result_t rc = cc_context_builder_build_messages(
-        runtime, "ses_msg", "system", &messages_json);
-    if (rc.code != CC_OK || !messages_json) failed = 1;
-    if (messages_json && !strstr(messages_json, "\"tool_calls\"")) failed = 1;
-    if (messages_json && !strstr(messages_json, "\"reasoning_content\"")) failed = 1;
-    if (messages_json && strstr(messages_json, "\\\"tool_calls\\\"")) failed = 1;
+        runtime, "ses_msg", "system", &messages, &message_count);
+    char *messages_text = NULL;
+    if (rc.code == CC_OK) {
+        rc = cc_messages_to_json(messages, message_count, 1, &messages_text);
+    }
+    if (rc.code != CC_OK || !messages_text) failed = 1;
+    if (messages_text && !strstr(messages_text, "\"tool_calls\"")) failed = 1;
+    if (messages_text && !strstr(messages_text, "\"reasoning_content\"")) failed = 1;
+    if (messages_text && strstr(messages_text, "\\\"tool_calls\\\"")) failed = 1;
 
-    free(messages_json);
+    free(messages_text);
+    for (size_t i = 0; i < message_count; i++) cc_message_cleanup(&messages[i]);
+    free(messages);
     cc_result_free(&rc);
     cc_agent_runtime_destroy(runtime);
     store.vtable->destroy(store.self);

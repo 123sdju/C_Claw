@@ -1,43 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/storage/cc_inmem_memory_store.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/*
- * cc_inmem_memory_store.c — 纯内存记忆存储适配器（易失性）
- *
- * 模块说明：
- *   基于动态数组在进程堆内存中存储记忆条目。所有数据在进程退出后丢失，
- *   不依赖任何外部存储（无文件 I/O、无数据库）。
- *
- * 设计模式：Adapter（适配器）模式
- *   将内存数组操作适配为 cc_memory_store vtable 接口，
- *   与 JSON 文件存储和 SQLite 存储对外提供完全一致的 API。
- *
- * 实现接口：
- *   - cc_memory_store_vtable_t（7 个虚拟方法：set / get / search / list /
- *     delete_entry / delete_by_category / destroy）
- *
- * 核心数据结构：
- *   - entries 动态数组，初始容量 64，翻倍扩容
- *
- * 适用场景：
- *   - 单元测试（数据隔离、可重复）
- *   - 嵌入式环境（无文件系统支持）
- *   - 临时会话（不需要持久化）
- *
- * 线程安全性：
- *   - 所有读写操作均通过 cc_mutex_t 加锁保护
- *
- * 与 JSON 文件存储的关键差异：
- *   - 不进行文件 I/O，每次写操作不需要 save_to_file
- *   - 数据在进程退出后丢失（易失性存储）
- *   - 搜索使用 strstr 内存遍历（与 JSON 存储相同逻辑）
- */
+
+
 
 #include "cc/ports/cc_memory_store.h"
 #include "cc/ports/cc_thread.h"
@@ -47,13 +10,11 @@
 #define INITIAL_CAP 64
 
 /*
- * cc_inmem_memory_store_t — 内存记忆存储的内部数据结构
+ * 内存版 memory store 私有状态。
  *
- * 字段说明：
- *   entries — 记忆条目动态数组
- *   count   — 当前记忆条目数量
- *   cap     — 数组当前容量（从 64 起步，每次翻倍）
- *   mutex   — 互斥锁，保护并发访问
+ * entries 保存长期记忆条目，mutex 保护 set/get/search/list/delete 的并发访问。这个实现
+ * 不持久化，适合测试、demo profile 或 MCU/RTOS 原型；生产环境可以通过同一端口替换为
+ * SQLite、JSON 文件或向量数据库 adapter。
  */
 typedef struct {
     cc_memory_entry_t *entries;
@@ -63,18 +24,10 @@ typedef struct {
 } cc_inmem_memory_store_t;
 
 /*
- * inmem_set — vtable 方法：插入或更新一条记忆（覆盖写语义）
+ * 写入或更新一条记忆。
  *
- * 功能：先遍历查找是否存在同 key 的条目，
- *       - 存在 → 更新 value/category/updated_at（覆盖写）
- *       - 不存在 → 数组末尾追加，容量不足时翻倍扩容
- *
- * @param self      存储实例指针
- * @param key       记忆键名
- * @param value     记忆值
- * @param category  分类标签（可为 NULL）
- * @param session_id 所属会话 ID（可为 NULL）
- * @return cc_result_t
+ * key 已存在时只更新 value/category/updated_at，不改变 session_id；key 不存在时追加新
+ * entry 并深拷贝所有字符串。调用方传入的字符串只在调用期间借用。
  */
 static cc_result_t inmem_set(void *self, const char *key, const char *value,
                               const char *category, const char *session_id)
@@ -113,15 +66,10 @@ static cc_result_t inmem_set(void *self, const char *key, const char *value,
 }
 
 /*
- * inmem_get — vtable 方法：按 key 精确查找一条记忆
+ * 按 key 读取一条记忆。
  *
- * 功能：遍历 entries 数组，按 key 精确匹配（strcmp），
- *       找到后深拷贝所有字段到 out_entry。
- *
- * @param self      存储实例指针
- * @param key       要查找的记忆键名
- * @param out_entry 输出参数，找到时填充完整 entry（深拷贝）
- * @return cc_result_t，找到返回 OK，未找到返回 CC_ERR_NOT_FOUND
+ * out_entry 由调用方提供，成功后其中字符串为深拷贝，调用方需要 cc_memory_entry_free。
+ * 未找到返回 CC_ERR_NOT_FOUND，而不是空 entry，便于 memory tool 区分业务缺失。
  */
 static cc_result_t inmem_get(void *self, const char *key, cc_memory_entry_t *out_entry)
 {
@@ -147,15 +95,10 @@ static cc_result_t inmem_get(void *self, const char *key, cc_memory_entry_t *out
 }
 
 /*
- * matches_query — 判断记忆条目是否匹配搜索关键词
+ * 简单全文匹配。
  *
- * 功能：在条目的 key/value/category 三个字段中使用 strstr 进行 OR 匹配。
- *       - query 为 NULL 或空字符串 → 匹配所有条目（空查询返回全部）
- *       - 任一字段包含 query 子串 → 返回 1
- *
- * @param e     指向记忆条目的指针
- * @param query 搜索关键词
- * @return 匹配成功返回 1，否则返回 0
+ * 这是轻量 fallback，不做分词或向量检索；嵌入式场景可以先用这种 O(n) 扫描满足小数据量，
+ * 后续由 query port 接入更强的 embedding/vector adapter。
  */
 static int matches_query(const cc_memory_entry_t *e, const char *query)
 {
@@ -167,17 +110,70 @@ static int matches_query(const cc_memory_entry_t *e, const char *query)
 }
 
 /*
- * inmem_search — vtable 方法：模糊搜索记忆
+ * 判断 entry 是否满足结构化 query 的 category/session/query 过滤。
  *
- * 功能：遍历所有 entries，调用 matches_query 在每个条目的 key/value/category
- *       三个字段中进行 strstr 子串匹配（大小写敏感，OR 逻辑）。
+ * 过滤条件为空表示不限制；最后复用 matches_query 做文本匹配。
+ */
+static int matches_filters(const cc_memory_entry_t *e, const cc_memory_query_t *query)
+{
+    if (!query) return 1;
+    if (query->category && query->category[0] &&
+        (!e->category || strcmp(e->category, query->category) != 0)) {
+        return 0;
+    }
+    if (query->session_id && query->session_id[0] &&
+        (!e->session_id || strcmp(e->session_id, query->session_id) != 0)) {
+        return 0;
+    }
+    return matches_query(e, query->query);
+}
+
+/*
+ * 为 query 结果计算一个可解释的粗略分数。
  *
- * @param self         存储实例指针
- * @param query        搜索关键词（模糊匹配）
- * @param limit        最大返回条数（≤0 表示无限制）
- * @param out_entries  输出参数，结果数组
- * @param out_count    输出参数，实际条目数量
- * @return cc_result_t
+ * 完全匹配 key/value 分数最高，子串匹配次之。这个分数不是语义相关度，只是为统一
+ * cc_memory_search_result_t 契约提供轻量排序/展示信息。
+ */
+static double simple_score(const cc_memory_entry_t *e, const char *query)
+{
+    if (!query || !query[0]) return 1.0;
+    if (e->key && strcmp(e->key, query) == 0) return 1.0;
+    if (e->value && strcmp(e->value, query) == 0) return 0.95;
+    if (e->key && strstr(e->key, query)) return 0.8;
+    if (e->value && strstr(e->value, query)) return 0.7;
+    if (e->category && strstr(e->category, query)) return 0.5;
+    return 0.0;
+}
+
+/*
+ * 深拷贝 memory entry。
+ *
+ * query/search/list 返回的 entry 不能暴露内部数组指针；失败时释放已复制字段，保持
+ * dst 处于可安全 cleanup 的状态。
+ */
+static cc_result_t copy_entry(const cc_memory_entry_t *src, cc_memory_entry_t *dst)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->key = src->key ? strdup(src->key) : NULL;
+    dst->value = src->value ? strdup(src->value) : NULL;
+    dst->category = src->category ? strdup(src->category) : NULL;
+    dst->session_id = src->session_id ? strdup(src->session_id) : NULL;
+    dst->created_at = src->created_at;
+    dst->updated_at = src->updated_at;
+    if ((src->key && !dst->key) || (src->value && !dst->value) ||
+        (src->category && !dst->category) ||
+        (src->session_id && !dst->session_id)) {
+        cc_memory_entry_free(dst);
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to copy memory entry");
+    }
+    return cc_result_ok();
+}
+
+/*
+ * 旧版 search API：按 query 文本扫描并返回 entry 数组。
+ *
+ * 返回数组和每个 entry 字符串由调用方拥有。该接口不返回 score；新的结构化检索建议
+ * 使用 inmem_query 对应的 vtable 方法。
  */
 static cc_result_t inmem_search(void *self, const char *query, int limit,
                                  cc_memory_entry_t **out_entries, size_t *out_count)
@@ -211,18 +207,66 @@ static cc_result_t inmem_search(void *self, const char *query, int limit,
 }
 
 /*
- * inmem_list — vtable 方法：列出所有记忆（可按 category 过滤）
+ * 结构化 query API：支持 top-k、session/category 过滤和 score。
  *
- * 功能：遍历所有条目，根据 category 过滤：
- *       - category 为 NULL/空 → 返回全部
- *       - category 非空 → 仅返回 category 精确匹配的条目
+ * 这是核心 memory 检索端口的主要实现形态。当前内存 adapter 用简单文本分数填充 score，
+ * 但返回结构和所有权与未来向量 adapter 保持一致。
+ */
+static cc_result_t inmem_query(
+    void *self,
+    const cc_memory_query_t *query,
+    cc_memory_search_result_t **out_results,
+    size_t *out_count
+)
+{
+    cc_inmem_memory_store_t *s = (cc_inmem_memory_store_t *)self;
+    cc_mutex_lock(s->mutex);
+
+    size_t cap = 16;
+    cc_memory_search_result_t *results = calloc(cap, sizeof(*results));
+    if (!results) {
+        cc_mutex_unlock(s->mutex);
+        return cc_result_error(CC_ERR_OUT_OF_MEMORY, "OOM");
+    }
+
+    size_t count = 0;
+    int limit = query ? query->limit : 0;
+    for (size_t i = 0; i < s->count && (limit <= 0 || count < (size_t)limit); i++) {
+        if (!matches_filters(&s->entries[i], query)) continue;
+        if (count >= cap) {
+            size_t new_cap = cap * 2;
+            cc_memory_search_result_t *new_results =
+                realloc(results, new_cap * sizeof(*results));
+            if (!new_results) {
+                cc_memory_search_result_free_array(results, count);
+                cc_mutex_unlock(s->mutex);
+                return cc_result_error(CC_ERR_OUT_OF_MEMORY, "OOM");
+            }
+            memset(new_results + cap, 0, (new_cap - cap) * sizeof(*new_results));
+            results = new_results;
+            cap = new_cap;
+        }
+        cc_result_t rc = copy_entry(&s->entries[i], &results[count].entry);
+        if (rc.code != CC_OK) {
+            cc_memory_search_result_free_array(results, count);
+            cc_mutex_unlock(s->mutex);
+            return rc;
+        }
+        results[count].size = sizeof(results[count]);
+        results[count].score = simple_score(&s->entries[i], query ? query->query : NULL);
+        count++;
+    }
+
+    cc_mutex_unlock(s->mutex);
+    *out_results = results;
+    *out_count = count;
+    return cc_result_ok();
+}
+
+/*
+ * 按 category 列举记忆。
  *
- * @param self         存储实例指针
- * @param category     过滤分类
- * @param limit        最大返回条数（≤0 表示无限制）
- * @param out_entries  输出参数
- * @param out_count    输出参数
- * @return cc_result_t
+ * category 为空表示列举所有；limit <= 0 表示不限。返回 entry 数组由调用方释放。
  */
 static cc_result_t inmem_list(void *self, const char *category, int limit,
                                cc_memory_entry_t **out_entries, size_t *out_count)
@@ -257,14 +301,10 @@ static cc_result_t inmem_list(void *self, const char *category, int limit,
 }
 
 /*
- * inmem_delete_entry — vtable 方法：按 key 删除一条记忆
+ * 删除指定 key 的记忆。
  *
- * 功能：遍历查找目标 key，找到后释放条目资源，
- *       使用 memmove 将后续元素前移，紧凑化数组，count 减 1。
- *
- * @param self 存储实例指针
- * @param key  要删除的记忆键名
- * @return cc_result_t，找到并删除返回 OK，未找到返回 CC_ERR_NOT_FOUND
+ * 命中后释放 entry 并用 memmove 压缩数组；未命中返回 CC_ERR_NOT_FOUND，方便上层工具
+ * 生成“未找到”类可恢复提示。
  */
 static cc_result_t inmem_delete_entry(void *self, const char *key)
 {
@@ -287,16 +327,9 @@ static cc_result_t inmem_delete_entry(void *self, const char *key)
 }
 
 /*
- * inmem_delete_by_category — vtable 方法：按分类批量删除记忆
+ * 删除某个 category 下的所有记忆。
  *
- * 功能：使用双指针压缩法（读指针 i / 写指针 write）：
- *       - 匹配 category → 释放资源，不保留
- *       - 不匹配 category → 复制到 write++ 位置
- *       最后将 count 更新为 write。
- *
- * @param self     存储实例指针
- * @param category 要删除的分类标签
- * @return cc_result_t
+ * 使用 write/read 双指针压缩数组；被删除 entry 先释放，保留 entry 通过结构体赋值前移。
  */
 static cc_result_t inmem_delete_by_category(void *self, const char *category)
 {
@@ -319,15 +352,9 @@ static cc_result_t inmem_delete_by_category(void *self, const char *category)
 }
 
 /*
- * inmem_destroy — vtable 方法：销毁存储实例，释放所有资源
+ * 销毁内存 memory store。
  *
- * 功能：
- *   1. 遍历所有 entries 释放字符串字段
- *   2. 释放 entries 数组内存
- *   3. 销毁互斥锁
- *   4. 释放结构体自身
- *
- * @param self 存储实例指针
+ * 调用方必须保证没有并发操作仍在进行；函数释放全部 entry、数组、mutex 和私有对象。
  */
 static void inmem_destroy(void *self)
 {
@@ -339,31 +366,24 @@ static void inmem_destroy(void *self)
     free(s);
 }
 
-/*
- * inmem_vtable — 内存记忆存储的虚函数表
- *
- * 说明：将全部 7 个 vtable 函数指针绑定到对应的纯内存实现。
- *       不涉及任何 I/O 操作，所有逻辑均为内存遍历。
- */
+/* 内存 memory store vtable，把本文件实现绑定到 cc_memory_store_t 端口。 */
 static cc_memory_store_vtable_t inmem_vtable = {
     inmem_set, inmem_get, inmem_search, inmem_list,
-    inmem_delete_entry, inmem_delete_by_category, inmem_destroy
+    inmem_delete_entry, inmem_delete_by_category, inmem_destroy, inmem_query
 };
 
 /*
- * cc_memory_store_create_inmem — 创建内存记忆存储实例（工厂函数）
+ * 创建内存 memory store。
  *
- * 执行流程：
- *   1. 分配 cc_inmem_memory_store_t 结构体
- *   2. 分配初始容量为 INITIAL_CAP(64) 的 entries 数组
- *   3. 创建互斥锁
- *   4. 绑定 vtable 并返回
- *
- * @param out_store 输出参数
- * @return cc_result_t
+ * 成功后 out_store 拥有 self/vtable，销毁时通过 cc_memory_store_destroy 或 vtable->destroy。
+ * 该实现不落盘，重启后数据丢失，但线程安全、依赖少，适合作为最小 SDK profile。
  */
 cc_result_t cc_memory_store_create_inmem(cc_memory_store_t *out_store)
 {
+    if (!out_store) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null in-memory store output");
+    }
+    memset(out_store, 0, sizeof(*out_store));
     cc_inmem_memory_store_t *s = calloc(1, sizeof(cc_inmem_memory_store_t));
     if (!s) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to allocate inmem memory store");
     s->cap = INITIAL_CAP;

@@ -1,123 +1,6 @@
-/**
- * 学习导读：cclaw/core/src/app/cc_run_queue.c
- *
- * 所属层次：核心层。
- * 阅读重点：这里是 SDK 的统一并发调度器，重点看 session 串行语义、lane
- *          并行度控制、协作式取消（cancel token）和 worker 线程池调度。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_run_queue.c — 跨平台 Agent run 并发调度队列
- *
- * 本模块在整体架构中的角色：
- * ─────────────────────────────
- * 位于核心 SDK 层，是 SDK 的多线程 job queue。它对上提供
- * submit/collect/run 三种提交模式，对内管理 worker 线程池、4 条 lane 的
- * 并发限制以及最多 128 个活跃 session 的状态追踪。所有平台（POSIX、Windows、
- * ESP32）复用同一套实现，不依赖平台特定 API。
- *
- * 上游调用方：
- *   - cc_agent_manager.c —— 将每次 handle_message 提交到 run queue，
- *     通过 submit_with_token 让 task 感知 cancel token
- *   - 高层应用 —— 直接使用 submit + collect 或同步 run 接口
- *
- * 下游依赖模块：
- *   - cc_thread.c / cc_mutex / cc_cond —— 线程、互斥锁、条件变量原语
- *   - cc_cancel_token.c —— 协作式取消，worker 在执行前后检查 cancel token
- *
- * ─── 数据结构 ───────────────────────────────────────────────────────
- *
- *   cc_run_queue_job_t：
- *     单个异步 job。持有唯一 id、session_key、归属 lane、action 语义、
- *     task 函数指针（含 with_token 版本）、user_data、cancel_source、
- *     执行结果和状态（PENDING/RUNNING/COMPLETED）。通过单向链表串联。
- *
- *   cc_run_queue_session_state_t：
- *     追踪某个 session_key 的飞行中 job 数量和 generation 号。generation
- *     在每次 interrupt 时递增，供 pending job 识别过期输入。
- *
- *   cc_run_queue（主结构体）：
- *     包含配置、4 条 lane 的飞行计数、最多 128 个 session 状态槽、全局
- *     飞行/等待计数器、next_run_id 自增编号、shutting_down 标记、jobs
- *     链表头、worker 线程数组及 mutex/cond 同步原语。
- *
- * ─── 四条 Lane 的并发模型 ───────────────────────────────────────────
- *
- *   CC_RUN_QUEUE_LANE_MAIN（默认并发 4）：
- *     主 agent 交互 turn，cc_agent_manager 提交的消息 run。
- *
- *   CC_RUN_QUEUE_LANE_SUBAGENT（默认并发 8）：
- *     子 agent 委托调用，并发度更高以允许并行子任务。
- *
- *   CC_RUN_QUEUE_LANE_PLUGIN（默认并发 4）：
- *     plugin 工具调用。
- *
- *   CC_RUN_QUEUE_LANE_MCP（默认并发 4）：
- *     MCP 工具调用。
- *
- *   每条 lane 独立维护 in_flight 计数，worker 在 find_runnable_job 中
- *   检查 lane 并发上限和 session 并发上限（默认 per_session_concurrency=1，
- *   即同一 session 串行），都满足时才会取出 job 执行。
- *
- * ─── Action 语义 ────────────────────────────────────────────────────
- *
- *   STEER：提交时取消同 session 的所有 pending 和 running job（通过 cancel
- *          source），然后追加新 job。适用于用户发起新一轮交互输入。
- *
- *   FOLLOWUP：追加 job，不取消已有任务。适用于工具回调等补充任务。
- *
- *   COLLECT：取消同 session 的 pending job，但不中断正在运行的 job。
- *            适用于只等待结果而不希望被后续输入打断的场景。
- *
- *   INTERRUPT：仅取消（同 STEER），不追加新 job。适用于端侧中断请求。
- *
- * ─── Worker 调度流程 ────────────────────────────────────────────────
- *
- *   1. worker 在 cond 上等待，被 submit 或 release 唤醒
- *   2. 持锁调用 find_runnable_job_locked：
- *      a. 遍历 jobs 链表找首个 PENDING job
- *      b. 查 lane_index，无效 lane 则标记完成并跳过
- *      c. 查 session 槽，不存在则创建（最多 128 个活跃 session）
- *      d. 检查 session.in_flight < per_session_concurrency 且
- *         lane_in_flight[lane] < lane_concurrency
- *      e. 满足条件则递增计数、置状态为 RUNNING、返回该 job
- *   3. worker 释放锁，在锁外执行 task
- *   4. 执行完毕，持锁调用 finish_running_job_locked：
- *      a. 递减 lane_in_flight 和 session.in_flight
- *      b. 清理空闲 session 槽（in_flight==0 的 session）
- *      c. 置状态为 COMPLETED
- *   5. broadcast cond，唤醒其他 worker 或 collect 等待者
- *
- * ─── 设计决策 ───────────────────────────────────────────────────────
- *
- *   为什么 worker 在锁外执行 task？
- *     worker 取到 job 后立即释放 mutex 再执行 task。这样长时间运行的
- *     task 不会阻塞其他 session 的 submit/collect 操作，也不会阻塞其他
- *     worker 从链表取新 job。task 内部通过 cancel_token 实现协作取消。
- *
- *   为什么 worker_count = 各 lane 并发之和（上限 32）？
- *     每个 lane 的并发限制由 lane_in_flight 独立执行，但 worker 线程池
- *     大小等于所有 lane 并发之和，确保每条 lane 达到上限时都有足够的
- *     worker 可用。上限 32 避免配置错误创建过多线程，也保护受限设备 profile。
- *
- *   为什么 session 数组是固定大小 CC_RUN_QUEUE_MAX_ACTIVE_SESSIONS=128？
- *     session 数组是线性查找的静态槽池。128 足够覆盖同时活跃的 session
- *     数，超出时创建失败并取消 job。空闲 session 在 in_flight 归零时
- *     立即清理，用 swap-with-last 减少内存移动。
- *
- *   为什么任务取消是协作式的？
- *     队列通过 cancel_source_cancel 标记取消，worker 在执行前后检查
- *     token。队列不强制 kill 线程——plugin worker、MCP transport、shell
- *     子进程各自在安全点释放资源。这是"请求取消"而非"强制终止"语义。
- *
- *   为什么 submit_with_token 的 user_data 默认只借用？
- *     user_data 生命周期由调用方管理。cc_run_queue_submit（不带 token
- *     版本）内部包装了一个 owns_user_data 标记，在 job 取消未执行时由
- *     队列负责清理；带 token 版本的调用方需要自行保证 user_data 在
- *     collect 前有效。
- */
+
+
 
 #include "cc/app/cc_run_queue.h"
 #include "cc/ports/cc_thread.h"
@@ -125,31 +8,36 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*
- * Run queue 是 SDK 层的真实 job queue。它只依赖 cc_thread/cc_mutex/cc_cond，
- * 所以 POSIX、Windows 和 ESP32 复用同一套 session/lane 语义。
- *
- * 锁约定：
- *   - queue->mutex 保护 jobs 链表、session in-flight、lane in-flight 和计数器。
- *   - worker 取到可运行 job 后在锁外执行 task，避免长时间持锁阻塞其它 session。
- *   - cancel source 属于 job；interrupt 只标记取消，具体 task 在安全点观察 token。
- */
+
 #define CC_RUN_QUEUE_LANE_COUNT 4
 #define CC_RUN_QUEUE_MAX_ACTIVE_SESSIONS 128
 
+/* run job 状态机：等待、运行、完成。collect 只会取走 COMPLETED job。 */
 typedef enum cc_run_job_state {
     CC_RUN_JOB_PENDING = 0,
     CC_RUN_JOB_RUNNING = 1,
     CC_RUN_JOB_COMPLETED = 2
 } cc_run_job_state_t;
 
+/*
+ * 单个 session 的并发状态。
+ *
+ * key 是 agent/session 组合键；in_flight 记录该 session 正在运行的任务数；generation
+ * 预留给中断/热切换时识别旧任务。
+ */
 typedef struct cc_run_queue_session_state {
     char *key;
     int in_flight;
-    /* 每次 steer/interrupt 都递增 generation，用于让 pending job 识别过期输入。 */
+
     unsigned long generation;
 } cc_run_queue_session_state_t;
 
+/*
+ * 队列中的一个 run job。
+ *
+ * task 与 task_with_token 二选一；cancel_source 由 job 拥有；result 在 worker 完成后
+ * 由 collect 转移给调用方。
+ */
 typedef struct cc_run_queue_job {
     cc_run_id_t id;
     char *session_key;
@@ -165,6 +53,12 @@ typedef struct cc_run_queue_job {
     struct cc_run_queue_job *next;
 } cc_run_queue_job_t;
 
+/*
+ * run queue 内部状态。
+ *
+ * jobs 是待处理/运行/已完成 job 链表；lane_in_flight 和 sessions 共同限制全局 lane 并发
+ * 与同 session 并发。mutex/cond 保护所有共享状态。
+ */
 struct cc_run_queue {
     cc_run_queue_config_t config;
     int lane_in_flight[CC_RUN_QUEUE_LANE_COUNT];
@@ -181,18 +75,18 @@ struct cc_run_queue {
     cc_cond_t cond;
 };
 
+/* 构造取消结果，统一 CC_ERR_CANCELLED 的消息。 */
 static cc_result_t cancelled_result(const char *message)
 {
     return cc_result_error(CC_ERR_CANCELLED, message ? message : "Run cancelled");
 }
 
+/* 释放 job 及其拥有的 session_key、result、cancel_source 和可选 user_data。 */
 static void free_job(cc_run_queue_job_t *job)
 {
     if (!job) return;
-    /*
-     * job 持有 session_key、cancel_source 和 result 错误消息。user_data 默认只借用；
-     * 少数内部路径可以设置 owns_user_data，让队列在取消未执行 job 时清理 task 对象。
-     */
+
+
     free(job->session_key);
     cc_result_free(&job->result);
     cc_cancel_source_destroy(job->cancel_source);
@@ -200,6 +94,7 @@ static void free_job(cc_run_queue_job_t *job)
     free(job);
 }
 
+/* 返回默认队列配置。 */
 cc_run_queue_config_t cc_run_queue_default_config(void)
 {
     cc_run_queue_config_t config;
@@ -212,11 +107,13 @@ cc_run_queue_config_t cc_run_queue_default_config(void)
     return config;
 }
 
+/* 将非法并发值归一化为 1，防止配置导致 lane 永远不可运行。 */
 static int normalized_limit(int value)
 {
     return value <= 0 ? 1 : value;
 }
 
+/* lane enum 到数组索引的映射。 */
 static int lane_index(cc_run_queue_lane_t lane)
 {
     switch (lane) {
@@ -228,6 +125,7 @@ static int lane_index(cc_run_queue_lane_t lane)
     }
 }
 
+/* 获取指定 lane 的并发上限。 */
 static int lane_limit(const cc_run_queue_t *queue, int lane)
 {
     switch (lane) {
@@ -239,11 +137,17 @@ static int lane_limit(const cc_run_queue_t *queue, int lane)
     }
 }
 
+/* 获取同 session 并发上限。 */
 static int session_limit(const cc_run_queue_t *queue)
 {
     return normalized_limit(queue->config.per_session_concurrency);
 }
 
+/*
+ * 根据 lane 并发推导 worker 数。
+ *
+ * worker 总数不会无限增长，最大限制为 32，避免桌面配置误填导致线程爆炸。
+ */
 static size_t desired_worker_count(const cc_run_queue_config_t *config)
 {
     int main_limit = normalized_limit(config->main_concurrency);
@@ -252,14 +156,13 @@ static size_t desired_worker_count(const cc_run_queue_config_t *config)
     int mcp_limit = normalized_limit(config->mcp_concurrency);
     int total = main_limit + subagent_limit + plugin_limit + mcp_limit;
     if (total < 1) total = 1;
-    /*
-     * 上限避免配置错误创建过多线程，也让受限设备 profile 即使误开较大并发时
-     * 仍有一个保守保护。lane 并发限制仍由 lane_in_flight 单独执行。
-     */
+
+
     if (total > 32) total = 32;
     return (size_t)total;
 }
 
+/* 在持锁状态下查找 session 状态。 */
 static int find_session_locked(const cc_run_queue_t *queue, const char *session_key)
 {
     for (size_t i = 0; i < queue->session_count; i++) {
@@ -270,6 +173,7 @@ static int find_session_locked(const cc_run_queue_t *queue, const char *session_
     return -1;
 }
 
+/* 在持锁状态下创建 session 状态；达到固定上限时失败。 */
 static int create_session_locked(cc_run_queue_t *queue, const char *session_key)
 {
     if (queue->session_count >= CC_RUN_QUEUE_MAX_ACTIVE_SESSIONS) return -1;
@@ -282,6 +186,7 @@ static int create_session_locked(cc_run_queue_t *queue, const char *session_key)
     return (int)(queue->session_count - 1);
 }
 
+/* 删除没有 in-flight 任务的 session 状态，保持 session 表紧凑。 */
 static void remove_idle_session_locked(cc_run_queue_t *queue, int index)
 {
     if (index < 0 || (size_t)index >= queue->session_count) return;
@@ -295,6 +200,7 @@ static void remove_idle_session_locked(cc_run_queue_t *queue, int index)
     queue->session_count--;
 }
 
+/* 统计某个 session 的 pending job 数，用于 max_pending_per_session 背压。 */
 static size_t pending_count_for_session_locked(
     const cc_run_queue_t *queue,
     const char *session_key
@@ -311,6 +217,11 @@ static size_t pending_count_for_session_locked(
     return count;
 }
 
+/*
+ * 把 pending job 标记为已取消完成。
+ *
+ * 这种 job 尚未被 worker 取走，因此可以直接写入取消 result 并减少 pending 计数。
+ */
 static void complete_pending_job_locked(cc_run_queue_t *queue, cc_run_queue_job_t *job, const char *message)
 {
     if (!job || job->state != CC_RUN_JOB_PENDING) return;
@@ -320,6 +231,12 @@ static void complete_pending_job_locked(cc_run_queue_t *queue, cc_run_queue_job_
     if (queue->total_pending > 0) queue->total_pending--;
 }
 
+/*
+ * 应用提交 action 对旧任务的影响。
+ *
+ * STEER/INTERRUPT 会取消运行中任务，STEER/COLLECT/INTERRUPT 会取消 pending 任务；FOLLOWUP
+ * 保留旧任务并排队。
+ */
 static void apply_submit_action_locked(
     cc_run_queue_t *queue,
     const cc_run_queue_request_t *request
@@ -342,6 +259,7 @@ static void apply_submit_action_locked(
     }
 }
 
+/* 在持锁状态下按 run_id 查找 job。 */
 static cc_run_queue_job_t *find_job_locked(cc_run_queue_t *queue, cc_run_id_t run_id)
 {
     for (cc_run_queue_job_t *job = queue->jobs; job; job = job->next) {
@@ -350,6 +268,7 @@ static cc_run_queue_job_t *find_job_locked(cc_run_queue_t *queue, cc_run_id_t ru
     return NULL;
 }
 
+/* 在持锁状态下从链表摘除 job，所有权转移给调用方。 */
 static cc_run_queue_job_t *take_job_locked(cc_run_queue_t *queue, cc_run_id_t run_id)
 {
     cc_run_queue_job_t *prev = NULL;
@@ -367,6 +286,12 @@ static cc_run_queue_job_t *take_job_locked(cc_run_queue_t *queue, cc_run_id_t ru
     return NULL;
 }
 
+/*
+ * 查找当前可运行 job。
+ *
+ * 只有同时满足 lane 并发和 session 并发限制的 pending job 才会进入 RUNNING。无效 lane
+ * 或无法创建 session 状态的 job 会直接转成取消完成。
+ */
 static cc_run_queue_job_t *find_runnable_job_locked(cc_run_queue_t *queue)
 {
     for (cc_run_queue_job_t *job = queue->jobs; job; job = job->next) {
@@ -398,6 +323,11 @@ static cc_run_queue_job_t *find_runnable_job_locked(cc_run_queue_t *queue)
     return NULL;
 }
 
+/*
+ * 完成运行中 job 的资源计数回收。
+ *
+ * 减少 lane/session/total in-flight，必要时移除 idle session，并把 job 标记 COMPLETED。
+ */
 static void finish_running_job_locked(cc_run_queue_t *queue, cc_run_queue_job_t *job)
 {
     int lane = lane_index(job->lane);
@@ -415,6 +345,12 @@ static void finish_running_job_locked(cc_run_queue_t *queue, cc_run_queue_job_t 
     job->state = CC_RUN_JOB_COMPLETED;
 }
 
+/*
+ * worker 主循环。
+ *
+ * worker 在条件变量上等待 runnable job；取到 job 后释放锁执行用户任务，避免任务执行时
+ * 阻塞提交/中断/collect。完成后重新加锁更新状态并唤醒等待者。
+ */
 static void *worker_main(void *arg)
 {
     cc_run_queue_t *queue = (cc_run_queue_t *)arg;
@@ -450,6 +386,12 @@ static void *worker_main(void *arg)
     }
 }
 
+/*
+ * 创建 run queue。
+ *
+ * 初始化 mutex/cond/worker 数组并启动 worker。任一 worker 启动失败都会设置 shutdown、
+ * join 已启动线程并释放所有资源。
+ */
 cc_result_t cc_run_queue_create(
     const cc_run_queue_config_t *config,
     cc_run_queue_t **out_queue
@@ -502,6 +444,12 @@ cc_result_t cc_run_queue_create(
     return cc_result_ok();
 }
 
+/*
+ * 销毁 run queue。
+ *
+ * 先设置 shutting_down 并取消未完成 job，再 join worker，最后释放 job/session/同步原语。
+ * 调用方应停止提交新任务后再销毁。
+ */
 void cc_run_queue_destroy(cc_run_queue_t *queue)
 {
     if (!queue) return;
@@ -537,6 +485,12 @@ void cc_run_queue_destroy(cc_run_queue_t *queue)
     free(queue);
 }
 
+/*
+ * 提交带 cancel token 的任务。
+ *
+ * 创建 job 和 cancel source，在锁内检查 shutdown、pending 上限、应用 action，然后追加到
+ * FIFO 链表并唤醒 worker。
+ */
 cc_result_t cc_run_queue_submit_with_token(
     cc_run_queue_t *queue,
     const cc_run_queue_request_t *request,
@@ -602,11 +556,13 @@ cc_result_t cc_run_queue_submit_with_token(
     return cc_result_ok();
 }
 
+/* 普通 task 的包装结构，用于复用带 token 提交流程。 */
 typedef struct cc_run_queue_plain_task {
     cc_run_queue_task_fn task;
     void *user_data;
 } cc_run_queue_plain_task_t;
 
+/* 忽略 cancel token 执行普通 task。 */
 static cc_result_t run_plain_task_with_token(void *user_data, cc_cancel_token_t *cancel_token)
 {
     (void)cancel_token;
@@ -614,6 +570,12 @@ static cc_result_t run_plain_task_with_token(void *user_data, cc_cancel_token_t 
     return plain->task(plain->user_data);
 }
 
+/*
+ * 提交不接收 cancel token 的任务。
+ *
+ * 通过小 wrapper 适配到 submit_with_token；提交成功后 job owns_user_data=1，由 free_job
+ * 释放 wrapper。
+ */
 cc_result_t cc_run_queue_submit(
     cc_run_queue_t *queue,
     const cc_run_queue_request_t *request,
@@ -644,6 +606,12 @@ cc_result_t cc_run_queue_submit(
     return rc;
 }
 
+/*
+ * 等待并收集 run 结果。
+ *
+ * collect 会阻塞到 job COMPLETED，然后从链表摘除 job，把 result 按值返回给调用方，并
+ * 清空 job->result 避免 free_job 重复释放。
+ */
 cc_result_t cc_run_queue_collect(
     cc_run_queue_t *queue,
     cc_run_id_t run_id
@@ -671,6 +639,7 @@ cc_result_t cc_run_queue_collect(
     return result;
 }
 
+/* 同步运行任务：submit 后立即 collect。 */
 cc_result_t cc_run_queue_run(
     cc_run_queue_t *queue,
     const cc_run_queue_request_t *request,
@@ -684,6 +653,12 @@ cc_result_t cc_run_queue_run(
     return cc_run_queue_collect(queue, run_id);
 }
 
+/*
+ * 中断整个 session 的任务。
+ *
+ * pending job 转成取消完成，running job 触发 cancel_source；真正退出取决于任务是否检查
+ * cancel token。
+ */
 cc_result_t cc_run_queue_interrupt_session(
     cc_run_queue_t *queue,
     const char *session_key
@@ -708,6 +683,7 @@ cc_result_t cc_run_queue_interrupt_session(
     return cc_result_ok();
 }
 
+/* 中断指定 run_id 的任务。 */
 cc_result_t cc_run_queue_interrupt_run(
     cc_run_queue_t *queue,
     cc_run_id_t run_id
@@ -732,6 +708,7 @@ cc_result_t cc_run_queue_interrupt_run(
     return cc_result_ok();
 }
 
+/* 读取当前 in-flight 总数。 */
 size_t cc_run_queue_in_flight(cc_run_queue_t *queue)
 {
     if (!queue) return 0;
@@ -741,6 +718,7 @@ size_t cc_run_queue_in_flight(cc_run_queue_t *queue)
     return value;
 }
 
+/* 读取当前 pending 总数。 */
 size_t cc_run_queue_pending(cc_run_queue_t *queue)
 {
     if (!queue) return 0;

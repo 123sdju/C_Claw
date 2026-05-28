@@ -1,153 +1,111 @@
-/**
- * 学习导读：cclaw/core/include/cc/core/cc_result.h
- *
- * 所属层次：核心层。
- * 阅读重点：这里定义统一错误返回模型，重点看 cc_result_t 的 message 所有权、
- *           错误码枚举和调用方释放约定。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_result.h — 统一错误传递模块
- *
- * @file    cc/core/cc_result.h
- * @brief   定义整个 c-claw 项目中使用的统一结果和错误码类型。
- *
- * 本项目约定几乎所有函数都返回 cc_result_t，而不是通过 errno、
- * 全局变量或异常来传递错误。这种"值语义"的错误处理方式使
- * 调用方必须显式检查返回值，避免遗漏错误处理。
- *
- * ─── 接口契约 ─────────────────────────────────────────────────────────
- *
- *   - 每个可能失败的函数返回 cc_result_t
- *   - CC_OK（code == 0）表示成功
- *   - 非零 code 表示错误，可通过 cc_error_string() 获取可读描述
- *   - 调用方必须在不再需要时调用 cc_result_free() 释放动态资源
- *
- * ─── 使用模式 ─────────────────────────────────────────────────────────
- *
- *   cc_result_t rc = some_function(...);
- *   if (rc.code != CC_OK) {
- *       fprintf(stderr, "Error: %s\n", rc.message);
- *       cc_result_free(&rc);
- *       return;
- *   }
- *   // 成功路径
- *   cc_result_free(&rc);
- *
- * ─── 依赖 ─────────────────────────────────────────────────────────────
- *
- *   仅依赖 <stddef.h>（size_t 定义）。不依赖任何内部模块。
- *   这是整个项目中依赖最少的模块，被所有其他模块引入。
- */
+
+
 
 #ifndef CC_RESULT_H
 #define CC_RESULT_H
 
 #include <stddef.h>
 
-/**
- * cc_error_code_t — 错误码枚举
+
+/*
+ * SDK 统一错误码。
  *
- * 定义项目中所有可能的错误类型。按语义分类，便于上层按类别处理。
- * CC_OK（值为 0）是唯一的成功码。
+ * 这些错误码是跨模块、跨平台的稳定分类；调用方应优先根据 code 做控制流判断，
+ * 再把 message 用于日志或用户提示。嵌入式场景中建议避免解析 message 文本。
  */
 typedef enum cc_error_code {
-    CC_OK = 0,               /**< 操作成功完成，无错误 */
+    CC_OK = 0,
 
-    /* ── 通用错误 ────────────────────────────────────────────── */
-    CC_ERR_UNKNOWN,           /**< 未知错误：无法归类的异常情况 */
-    CC_ERR_INVALID_ARGUMENT,  /**< 无效参数：传入的参数不符合预期（NULL、越界、
-                               *   格式不正确等） */
-    CC_ERR_OUT_OF_MEMORY,     /**< 内存不足：malloc/realloc 返回 NULL */
-    CC_ERR_NOT_FOUND,         /**< 未找到：查找的资源不存在（文件、会话、键值等） */
 
-    /* ── 权限与安全 ──────────────────────────────────────────── */
-    CC_ERR_PERMISSION_DENIED, /**< 权限拒绝：操作被策略引擎或系统权限阻止 */
+    CC_ERR_UNKNOWN,
+    CC_ERR_INVALID_ARGUMENT,
 
-    /* ── I/O 与网络 ──────────────────────────────────────────── */
-    CC_ERR_IO,                /**< IO 错误：文件读写失败 */
-    CC_ERR_NETWORK,           /**< 网络错误：HTTP 请求失败、连接超时等 */
-    CC_ERR_JSON,              /**< JSON 错误：解析或序列化 JSON 失败 */
-    CC_ERR_TIMEOUT,           /**< 超时：操作在指定时间内未完成 */
+    CC_ERR_OUT_OF_MEMORY,
+    CC_ERR_NOT_FOUND,
 
-    /* ── 领域相关 ────────────────────────────────────────────── */
-    CC_ERR_CANCELLED,         /**< 已取消：操作被用户或系统提前终止 */
-    CC_ERR_MODEL,             /**< 模型错误：LLM 返回了无法理解或格式异常的响应 */
-    CC_ERR_TOOL,              /**< 工具错误：工具执行失败或返回异常结果 */
-    CC_ERR_STORAGE,           /**< 存储错误：数据持久化失败（文件损坏、DB 故障等） */
-    CC_ERR_PLATFORM           /**< 平台错误：操作系统 API 调用失败（fork、exec 等） */
+
+    CC_ERR_PERMISSION_DENIED,
+
+
+    CC_ERR_IO,
+    CC_ERR_NETWORK,
+    CC_ERR_JSON,
+    CC_ERR_TIMEOUT,
+    CC_ERR_RATE_LIMIT,
+
+
+    CC_ERR_CANCELLED,
+    CC_ERR_MODEL,
+    CC_ERR_TOOL,
+    CC_ERR_STORAGE,
+    CC_ERR_UNSUPPORTED,
+    CC_ERR_PLATFORM,
+    CC_ERR_LIMIT_EXCEEDED
 } cc_error_code_t;
 
-/**
- * cc_result_t — 统一结果结构体
+/*
+ * 结构化错误细节。
  *
- * 封装操作结果：成功时为 CC_OK 且 message 为空；
- * 失败时包含非零的错误码和人类可读的错误描述。
- * message 字段由内部 malloc 分配，必须通过 cc_result_free() 释放。
+ * size 用于后续 ABI 扩展；调用方创建该结构时应使用 {0} 初始化并设置 size。
+ * 字符串字段由结构体拥有，复制到 cc_result_t 后由 cc_result_free() 释放。
+ * HTTP provider 会用 http_status、retry_after_ms、recoverable 和 raw_redacted_body
+ * 向上层暴露恢复语义，但 SDK 不在内部自动 retry。
+ */
+typedef struct cc_error_detail {
+    size_t size;
+    long http_status;
+    int retry_after_ms;
+    int recoverable;
+    char *error_code;
+    char *provider_error_code;
+    char *raw_redacted_body;
+} cc_error_detail_t;
+
+/*
+ * SDK 函数统一返回值。
+ *
+ * code == CC_OK 表示成功；message 和 detail 仅在错误或需要补充信息时存在。
+ * 调用方收到非临时结果后应调用 cc_result_free()，即使当前 message/detail 为空也安全。
  */
 typedef struct cc_result {
-    cc_error_code_t code; /**< 错误码，CC_OK（0）表示成功 */
-    char *message;        /**< 人类可读的错误描述，成功时为 NULL。
-                           *   使用 cc_result_errf() 创建时可包含格式化信息。
-                           *   调用 cc_result_free() 时一同释放。 */
+    size_t size;
+    cc_error_code_t code;
+    char *message;
+    cc_error_detail_t *detail;
 } cc_result_t;
 
-/**
- * cc_result_ok — 创建表示成功的 cc_result_t
- *
- * 返回一个 code=CC_OK, message=NULL 的空结果。
- * 无需调用 cc_result_free()（但调用也是安全的）。
- *
- * @return  成功的空结果
- */
+/* 构造成功结果；返回值仍可安全传给 cc_result_free()。 */
 cc_result_t cc_result_ok(void);
 
-/**
- * cc_result_error — 创建表示错误的 cc_result_t
- *
- * 根据错误码和消息文本创建结果。message 会被内部拷贝。
- *
- * @param code     错误码（不可为 CC_OK）
- * @param message  错误描述文本（不可为 NULL）
- * @return         包含错误信息的 cc_result_t，调用方需 cc_result_free()
- */
+/* 构造普通错误；message 会被深拷贝，调用方仍拥有传入字符串。 */
 cc_result_t cc_result_error(cc_error_code_t code, const char *message);
 
-/**
- * cc_result_errf — 创建带格式化消息的错误 cc_result_t
- *
- * 类似于 printf，将格式化文本作为错误消息。适用于需要将
- * 动态信息（如文件名、行号）嵌入错误描述的场合。
- *
- * @param code  错误码（不可为 CC_OK）
- * @param fmt   格式化字符串（printf 风格）
- * @param ...   变长参数列表
- * @return      包含格式化错误信息的 cc_result_t，调用方需 cc_result_free()
- */
+/* 按 printf 风格构造错误 message；失败时 message 可能为空，但 code 保持传入值。 */
 cc_result_t cc_result_errf(cc_error_code_t code, const char *fmt, ...);
 
-/**
- * cc_result_free — 释放 cc_result_t 中的动态资源
+/*
+ * 构造带结构化 detail 的错误。
  *
- * 释放 message 字符串（如果是动态分配的）。不释放 result 指针本身。
- * 传入 code=CC_OK 的 result 是安全的（无操作）。
- * 对同一个 result 多次调用是安全的（内部会将 message 置 NULL）。
- *
- * @param result  要释放的结果指针
+ * detail 会被深拷贝，调用方可在返回后立即清理自己的 detail。适合 provider、HTTP、
+ * storage 等需要把机器可读元数据交给上层恢复策略的场景。
  */
+cc_result_t cc_result_with_detail(
+    cc_error_code_t code,
+    const char *message,
+    const cc_error_detail_t *detail
+);
+
+/* 释放 result 内部拥有的 message/detail，并把指针字段清空；不会释放 result 本身。 */
 void cc_result_free(cc_result_t *result);
 
-/**
- * cc_error_string — 将错误码转换为静态描述字符串
- *
- * 返回错误码的人类可读英文名称，便于日志和调试输出。
- * 该字符串是静态常量，不需要释放。
- *
- * @param code  错误码枚举值
- * @return      对应的错误码名称（如 "CC_ERR_NOT_FOUND"）
- */
+/* 释放 detail 内部拥有的字符串字段；不会释放 detail 本身。 */
+void cc_error_detail_cleanup(cc_error_detail_t *detail);
+
+/* 返回适合展示的错误描述，字符串为静态常量，调用方不要 free。 */
 const char *cc_error_string(cc_error_code_t code);
+
+/* 返回稳定错误码名字，适合 observability、日志和机器解析。 */
+const char *cc_error_code_name(cc_error_code_t code);
 
 #endif

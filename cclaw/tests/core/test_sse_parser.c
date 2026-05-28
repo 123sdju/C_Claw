@@ -8,6 +8,7 @@ typedef struct event_list {
     int count;
 } event_list_t;
 
+/* 收集 parser 输出的 data payload，验证跨 chunk 拼接结果。 */
 static cc_result_t collect_event(const char *data, void *user_data)
 {
     event_list_t *events = (event_list_t *)user_data;
@@ -18,6 +19,12 @@ static cc_result_t collect_event(const char *data, void *user_data)
     return cc_result_ok();
 }
 
+/*
+ * 验证 SSE parser 的核心契约。
+ *
+ * 覆盖注释行忽略、单个 data 被多次 feed 切开、多行 data 用换行合并、[DONE] 事件以及
+ * finish 时尾部处理。
+ */
 int main(void)
 {
     cc_sse_parser_t *parser = NULL;

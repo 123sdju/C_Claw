@@ -15,18 +15,150 @@
         "CC_PROFILE": "core-minimal",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
+    },
+    {
+      "name": "multimodal-full",
+      "displayName": "C-Claw SDK Multimodal Full",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/sdk/multimodal-full",
+      "cacheVariables": {
+        "CC_PROFILE": "multimodal-full",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "desktop-agent",
+      "displayName": "C-Claw SDK Desktop Agent",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/sdk/desktop-agent",
+      "cacheVariables": {
+        "CC_PROFILE": "desktop-agent",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "mcu-text",
+      "displayName": "C-Claw SDK MCU Text",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/sdk/mcu-text",
+      "cacheVariables": {
+        "CC_PROFILE": "mcu-text",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "mcu-mm-lite",
+      "displayName": "C-Claw SDK MCU Multimodal Lite",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/sdk/mcu-mm-lite",
+      "cacheVariables": {
+        "CC_PROFILE": "mcu-mm-lite",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "core-minimal-sanitizers",
+      "displayName": "C-Claw SDK Core Minimal Sanitizers",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/sdk/core-minimal-sanitizers",
+      "cacheVariables": {
+        "CC_PROFILE": "core-minimal",
+        "CC_ENABLE_SANITIZERS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "core-minimal-shared",
+      "displayName": "C-Claw SDK Core Minimal Shared",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/sdk/core-minimal-shared",
+      "cacheVariables": {
+        "CC_PROFILE": "core-minimal",
+        "CC_BUILD_SHARED": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "core-minimal",
       "configurePreset": "core-minimal"
+    },
+    {
+      "name": "multimodal-full",
+      "configurePreset": "multimodal-full"
+    },
+    {
+      "name": "desktop-agent",
+      "configurePreset": "desktop-agent"
+    },
+    {
+      "name": "mcu-text",
+      "configurePreset": "mcu-text"
+    },
+    {
+      "name": "mcu-mm-lite",
+      "configurePreset": "mcu-mm-lite"
+    },
+    {
+      "name": "core-minimal-sanitizers",
+      "configurePreset": "core-minimal-sanitizers"
+    },
+    {
+      "name": "core-minimal-shared",
+      "configurePreset": "core-minimal-shared"
     }
   ],
   "testPresets": [
     {
       "name": "core-minimal",
       "configurePreset": "core-minimal",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "multimodal-full",
+      "configurePreset": "multimodal-full",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "desktop-agent",
+      "configurePreset": "desktop-agent",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "mcu-text",
+      "configurePreset": "mcu-text",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "mcu-mm-lite",
+      "configurePreset": "mcu-mm-lite",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "core-minimal-sanitizers",
+      "configurePreset": "core-minimal-sanitizers",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "LSAN_OPTIONS": "detect_leaks=0"
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "core-minimal-shared",
+      "configurePreset": "core-minimal-shared",
       "output": {
         "outputOnFailure": true
       }

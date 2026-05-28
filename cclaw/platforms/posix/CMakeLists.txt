@@ -1,7 +1,7 @@
-# 学习导读：cclaw/platforms/posix/CMakeLists.txt
-# 所属层次：平台层。
-# 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
-# 注释说明：如果注释与代码冲突，以代码行为和测试为准。
+
+
+
+
 add_library(c_claw_platform_posix_objects OBJECT
     src/cc_posix_filesystem.c
     src/cc_posix_path.c

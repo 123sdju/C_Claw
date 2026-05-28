@@ -1,13 +1,4 @@
-/**
- * cc_cancel_token.h — core SDK 统一取消令牌。
- *
- * 所属层次：核心 SDK。
- *
- * cancel token 用来把“用户 interrupt、队列替换、timeout、shutdown”统一成
- * 一个可查询的状态。SDK 只提供协作式取消：它不会强杀线程，也不会直接关闭
- * POSIX/Windows 进程。具体工具、plugin worker、MCP transport 在安全检查点
- * 调用 cc_cancel_token_is_cancelled()，再决定如何释放自己的平台资源。
- */
+
 
 #ifndef CC_CANCEL_TOKEN_H
 #define CC_CANCEL_TOKEN_H
@@ -18,32 +9,30 @@
 extern "C" {
 #endif
 
+/*
+ * 取消源拥有取消状态和 token。
+ *
+ * 调用方持有 source，用它发出取消；被调用模块只拿 token 查询状态。这个拆分类似
+ * C# CancellationTokenSource/CancellationToken，能避免下游模块随意触发取消。
+ */
 typedef struct cc_cancel_source cc_cancel_source_t;
+
+/* 只读取消 token；由 source 拥有，不能单独 destroy。 */
 typedef struct cc_cancel_token cc_cancel_token_t;
 
-/**
- * 创建一个取消源。source 拥有 token 的生命周期。
- */
+/* 创建取消源；成功后调用方用 cc_cancel_source_destroy() 释放。 */
 cc_result_t cc_cancel_source_create(cc_cancel_source_t **out_source);
 
-/**
- * 销毁取消源。调用方必须保证没有线程继续持有 source/token 借用指针。
- */
+/* 销毁取消源和内部 token；调用前应保证没有线程继续使用 token。 */
 void cc_cancel_source_destroy(cc_cancel_source_t *source);
 
-/**
- * 请求取消。该函数线程安全且幂等，重复调用保持 cancelled=1。
- */
+/* 标记取消；该操作线程安全，重复调用保持取消状态。 */
 void cc_cancel_source_cancel(cc_cancel_source_t *source);
 
-/**
- * 获取 source 内部 token 的借用指针。
- */
+/* 获取 source 拥有的 token；返回指针生命周期不超过 source。 */
 cc_cancel_token_t *cc_cancel_source_token(cc_cancel_source_t *source);
 
-/**
- * 查询 token 是否已经取消。NULL token 视为未取消，方便裁剪 profile 使用。
- */
+/* 查询 token 是否已取消；NULL token 视为未取消，便于可选取消参数。 */
 int cc_cancel_token_is_cancelled(cc_cancel_token_t *token);
 
 #ifdef __cplusplus

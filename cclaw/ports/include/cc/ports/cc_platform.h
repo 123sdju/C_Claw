@@ -1,28 +1,26 @@
-/**
- * 学习导读：cclaw/ports/include/cc/ports/cc_platform.h
- *
- * 所属层次：端口层。
- * 阅读重点：这里定义可替换接口，阅读时重点看 struct + vtable + void *self 如何表达多态和依赖注入。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_platform.h — platform selection and capability defaults.
- *
- * Platform implementations live under cclaw/platforms/<platform>. This header only
- * exposes the selected platform id and conservative capability defaults. Build
- * profiles may override feature macros through compile definitions.
- */
+
+
 
 #ifndef CC_PLATFORM_H
 #define CC_PLATFORM_H
 
+/*
+ * 编译期平台枚举。
+ *
+ * C-Claw 用宏而不是运行时判断来裁剪能力，便于 MCU/RTOS 构建把不可用模块直接排除。
+ */
 #define CC_PLATFORM_POSIX   100
 #define CC_PLATFORM_WINDOWS 200
 #define CC_PLATFORM_ESP32   300
 #define CC_PLATFORM_FREERTOS 400
 
+/*
+ * 自动识别当前平台。
+ *
+ * 应用或 CMake profile 可以预先定义 CC_PLATFORM 覆盖自动识别；这对交叉编译很重要，
+ * 因为构建机宏不一定等于目标机能力。
+ */
 #ifndef CC_PLATFORM
 #  if defined(__XTENSA__) || defined(ESP_PLATFORM)
 #    define CC_PLATFORM CC_PLATFORM_ESP32
@@ -35,6 +33,12 @@
 #  endif
 #endif
 
+/*
+ * POSIX 默认能力矩阵。
+ *
+ * Linux/macOS 类平台默认具备线程、进程、管道、realpath、dirent、curl 和网络能力，
+ * 因此适合完整 desktop-agent profile。各 CC_HAS_* 宏仍允许在 CMake profile 中收紧。
+ */
 #if CC_PLATFORM == CC_PLATFORM_POSIX
 #  ifndef CC_HAS_FORK
 #    define CC_HAS_FORK 1
@@ -86,6 +90,12 @@
 #  define CC_LIMIT_STACK_SIZE_KB 1024
 #  define CC_LIMIT_HTTP_RESP_MAX 0
 #  define CC_LIMIT_SESSION_HISTORY 100
+/*
+ * Windows 默认能力矩阵。
+ *
+ * Windows 有线程、进程、管道和网络，但 fork/dirent/realpath 语义不同，所以默认关闭
+ * 对应 POSIX 能力，由 Windows port 提供替代实现。
+ */
 #elif CC_PLATFORM == CC_PLATFORM_WINDOWS
 #  ifndef CC_HAS_FORK
 #    define CC_HAS_FORK 0
@@ -137,6 +147,12 @@
 #  define CC_LIMIT_STACK_SIZE_KB 1024
 #  define CC_LIMIT_HTTP_RESP_MAX 0
 #  define CC_LIMIT_SESSION_HISTORY 100
+/*
+ * ESP32 默认能力矩阵。
+ *
+ * ESP32 具备 FreeRTOS 线程和网络，但没有 fork/pipe/dlopen；默认限制路径、堆、栈和
+ * HTTP 响应大小，体现嵌入式设备资源预算。
+ */
 #elif CC_PLATFORM == CC_PLATFORM_ESP32
 #  ifndef CC_HAS_FORK
 #    define CC_HAS_FORK 0
@@ -188,6 +204,12 @@
 #  define CC_LIMIT_STACK_SIZE_KB 16
 #  define CC_LIMIT_HTTP_RESP_MAX 32768
 #  define CC_LIMIT_SESSION_HISTORY 10
+/*
+ * 通用 FreeRTOS 默认能力矩阵。
+ *
+ * 默认假设没有网络、文件系统目录遍历、进程和动态加载；下游 BSP 可以按实际能力打开
+ * 对应宏并提供 port 实现。
+ */
 #elif CC_PLATFORM == CC_PLATFORM_FREERTOS
 #  ifndef CC_HAS_FORK
 #    define CC_HAS_FORK 0
@@ -243,6 +265,12 @@
 #  error "Unknown CC_PLATFORM value"
 #endif
 
+/*
+ * SDK 功能裁剪开关。
+ *
+ * 默认保持核心 SDK 定位：shell/http/plugin/外部 provider 默认关闭，文件读写和基础存储
+ * 默认开启。gateway CLI/UART 明确为 0，表示不把产品入口放进核心 SDK。
+ */
 #ifndef CC_TOOL_SHELL_RUN
 #  define CC_TOOL_SHELL_RUN 0
 #endif
@@ -292,6 +320,7 @@
 #  define CC_GATEWAY_UART 0
 #endif
 
+/* 编译期一致性检查集中放在单独头文件，避免无效 profile 静默通过。 */
 #include "cc/ports/cc_platform_check.h"
 
 #endif

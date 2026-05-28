@@ -1,13 +1,4 @@
-/**
- * cc_skill_catalog.h — AgentSkills 风格 SKILL.md 目录索引。
- *
- * 所属层次：核心 SDK。
- *
- * catalog 只负责“把一组目录里的 SKILL.md 读成可注入 prompt 的快照”：
- *   - 不启动 watcher，不访问平台专用 API，因此 ESP 可以裁剪 watcher 后保留静态 skills。
- *   - 同名 skill 后加载覆盖先加载，用确定性顺序表达优先级。
- *   - prompt 构建时可以传 allowlist，让每个 agent 只看到自己允许的 skill。
- */
+
 
 #ifndef CC_SKILL_CATALOG_H
 #define CC_SKILL_CATALOG_H
@@ -21,24 +12,35 @@
 extern "C" {
 #endif
 
+/*
+ * skill catalog 不透明句柄。
+ *
+ * catalog 保存从配置/文件系统加载的 skill 描述，并可生成 system prompt 片段。它只负责
+ * SDK 内部提示词拼装，不提供外部 skill marketplace 或业务分发。
+ */
 typedef struct cc_skill_catalog cc_skill_catalog_t;
 
+/* 创建空 skill catalog；成功后调用方 destroy。 */
 cc_result_t cc_skill_catalog_create(cc_skill_catalog_t **out_catalog);
 
+/* 销毁 catalog 和已加载 skill 元数据。 */
 void cc_skill_catalog_destroy(cc_skill_catalog_t *catalog);
 
+/* 根据 config 和 filesystem 加载 skill 描述；filesystem 只在调用期间借用。 */
 cc_result_t cc_skill_catalog_load_from_config(
     cc_skill_catalog_t *catalog,
     cc_filesystem_t *filesystem,
     const cc_config_t *config
 );
 
+/* 构建可注入 system prompt 的 skill 文本；allowlist 为 NULL 时由实现决定默认策略。 */
 cc_result_t cc_skill_catalog_build_prompt(
     cc_skill_catalog_t *catalog,
     const cc_config_string_list_t *allowlist,
     char **out_prompt
 );
 
+/* 列出已加载 skill 名称；返回数组和字符串由调用方释放。 */
 cc_result_t cc_skill_catalog_list_names(
     cc_skill_catalog_t *catalog,
     char ***out_names,

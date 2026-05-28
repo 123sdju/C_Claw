@@ -1,84 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/llm/cc_openai_provider.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_openai_provider.c — OpenAI Chat Completions API 协议策略模块
- *
- * 本模块在整体架构中的角色：
- * ─────────────────────────────
- * 位于适配器层，是 LLM provider 两层策略中的**协议层**。只实现
- * cc_llm_protocol_t vtable 的四个回调，负责 OpenAI Chat Completions API
- * 特有的 JSON 格式转换。HTTP 传输细节完全由 cc_http_llm_provider 处理。
- *
- * 本模块不持有任何私有状态（self 始终为 NULL），因此不需要 destroy 回调。
- *
- * 上游调用方：
- *   - cc_http_llm_provider.c — 通过 cc_llm_protocol_t vtable 委托调用
- *     build_request / parse_response / parse_stream_event
- *
- * 下游依赖模块：
- *   - cc_json.c — JSON 对象构造与解析
- *   - cc_string_builder.c — URL 拼接、Authorization header 拼接
- *   - cc_http_llm_provider.h — cc_llm_http_request_t 结构体、cc_llm_stream_kind
- *
- * ─── build_request — 构造 OpenAI HTTP 请求 ──────────────────────────────
- *
- *   终端点：  POST {base_url}/v1/chat/completions
- *   认证方式：Authorization: Bearer {api_key}（api_key 为空则跳过）
- *   Content-Type：application/json
- *   流格式：  SSE（CC_LLM_STREAM_SSE）
- *
- *   请求体 JSON 字段：
- *     - model       —— 优先用 request->model，回退到 default_model
- *     - messages    —— request->messages_json 直接解析为 JSON 数组透传
- *     - stream      —— 布尔值，控制是否启用流式
- *     - max_tokens  —— request->max_tokens
- *     - temperature —— request->temperature
- *     - tools       —— request->tools_json 解析后透传（非空数组时）
- *     - tool_choice —— "auto"（仅在有 tools 时设置）
- *
- *   messages_json 已经是 OpenAI 原生格式（role/content 数组），无需格式转换，
- *   直接解析为 cc_json_value_t 后嵌入请求体。若解析失败则回退为空数组。
- *
- * ─── parse_response — 解析非流式响应 ────────────────────────────────────
- *
- *   响应 JSON 结构（OpenAI Chat Completions API）：
- *     error.message                          —— API 错误消息
- *     choices[0].message.content             —— 文本回复（→ out_response.text）
- *     choices[0].message.reasoning_content   —— 推理链内容（→ reasoning_content）
- *     choices[0].message.tool_calls[0]       —— 工具调用（→ tool_call）
- *       .id / .function.name / .function.arguments
- *     choices[0].finish_reason               —— "stop" 表示正常结束
- *
- *   只取 choices[0]（第一个候选项），适用于非流式单候选场景。
- *
- * ─── parse_stream_event — 解析流式 SSE 事件 ─────────────────────────────
- *
- *   每条 SSE data 是一个 JSON 对象，包含一个 delta 增量：
- *     choices[0].delta.content               —— 文本增量 → CC_STREAM_CHUNK_TEXT
- *     choices[0].delta.reasoning_content     —— 推理增量 → CC_STREAM_CHUNK_THINKING
- *     choices[0].delta.tool_calls[i]         —— 工具调用增量：
- *       .function.name    → CC_STREAM_CHUNK_TOOL_START（首次出现时）
- *       .function.arguments → CC_STREAM_CHUNK_TOOL_DELTA（增量拼接）
- *     choices[0].finish_reason = "tool_calls" → CC_STREAM_CHUNK_TOOL_END
- *     choices[0].finish_reason = "stop"       → out_finished = 1
- *
- *   流式 tool_call 采用增量模式：每段 arguments JSON 以 CC_STREAM_CHUNK_TOOL_DELTA
- *   发出，上层负责将所有片段拼接为完整 arguments。
- *
- * ─── 默认值与创建 ────────────────────────────────────────────────────────
- *
- *   cc_openai_provider_create() 将 protocol.self 设为 NULL，委托
- *   cc_http_llm_provider_create() 组合传输层与协议层：
- *     - 默认 base_url：https://api.openai.com
- *     - 默认 model：   gpt-4o-mini
- */
+
+
 
 #include "cc/adapters/cc_llm_providers.h"
 #include "cc/adapters/cc_http_llm_provider.h"
@@ -88,13 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/**
- * add_header — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+/*
+ * 向协议请求追加 HTTP header。
  *
- * @param request 借用的对象；函数不释放该对象本身。
- * @param name 借用的只读字符串；函数不会释放该指针。
- * @param value 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * request 拥有 headers 数组和其中的 name/value 字符串；失败时调用方会通过
+ * cc_llm_http_request_cleanup 释放已经添加的字段。
  */
 static cc_result_t add_header(
     cc_llm_http_request_t *request,
@@ -116,12 +36,10 @@ static cc_result_t add_header(
     return cc_result_ok();
 }
 
-/**
- * add_bearer_header — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+/*
+ * 添加 OpenAI Bearer Authorization header。
  *
- * @param request 借用的对象；函数不释放该对象本身。
- * @param api_key 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * api_key 为空时允许构造无鉴权请求，便于本地代理或测试；真实云服务通常会返回 401。
  */
 static cc_result_t add_bearer_header(cc_llm_http_request_t *request, const char *api_key)
 {
@@ -141,18 +59,19 @@ static cc_result_t add_bearer_header(cc_llm_http_request_t *request, const char 
     return rc;
 }
 
-/**
- * openai_name — 返回端口、工具或协议的静态名称字符串，用于注册和日志。
- *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @return 返回借用或静态只读字符串；调用方不得释放。
- */
+/* 返回协议名称，通用 HTTP provider 用它推断多模态 capability。 */
 static const char *openai_name(void *self)
 {
     (void)self;
     return "openai";
 }
 
+/*
+ * 通过序列化/反序列化克隆 JSON 节点。
+ *
+ * cc_json 没有通用 clone API 时使用这个保守方法，避免把原始 messages AST 的节点所有权
+ * 转移给 OpenAI body。
+ */
 static cc_json_value_t *json_clone_value(const cc_json_value_t *value)
 {
     char *json = cc_json_stringify_unformatted(value);
@@ -163,12 +82,14 @@ static cc_json_value_t *json_clone_value(const cc_json_value_t *value)
     return copy;
 }
 
+/* 读取 content part 的 mime 字段，缺失时返回 provider 需要的默认 MIME。 */
 static const char *part_mime_or_default(const cc_json_value_t *part, const char *fallback)
 {
     const char *mime = cc_json_string_value(cc_json_object_get(part, "mime"));
     return (mime && *mime) ? mime : fallback;
 }
 
+/* 将 MIME 映射成 OpenAI input_audio 支持的 format 字段。 */
 static const char *audio_format_from_mime(const char *mime)
 {
     if (!mime) return "wav";
@@ -177,6 +98,12 @@ static const char *audio_format_from_mime(const char *mime)
     return "wav";
 }
 
+/*
+ * 为 OpenAI 不支持直传的多模态 part 生成文本 fallback。
+ *
+ * 这样即使 artifact 只有 path/metadata 没有 inline base64，模型仍能看到资源描述，而不是
+ * 静默丢失上下文。
+ */
 static char *describe_unsupported_part(const char *provider, const cc_json_value_t *part)
 {
     const char *type = cc_json_string_value(cc_json_object_get(part, "type"));
@@ -202,6 +129,7 @@ static char *describe_unsupported_part(const char *provider, const cc_json_value
     return cc_string_builder_take(&sb);
 }
 
+/* 追加 OpenAI content 数组中的 text part。 */
 static void openai_append_text_part(cc_json_value_t *arr, const char *text)
 {
     cc_json_value_t *part = cc_json_create_object();
@@ -210,6 +138,12 @@ static void openai_append_text_part(cc_json_value_t *arr, const char *text)
     cc_json_array_append(arr, part);
 }
 
+/*
+ * 将 SDK content parts 转成 OpenAI content 数组。
+ *
+ * text 直接映射；inline image 变成 image_url data URL；inline audio 变成 input_audio；
+ * 其它或非 inline 资源降级成文本描述。
+ */
 static cc_json_value_t *openai_transform_content_parts(const cc_json_value_t *parts)
 {
     cc_json_value_t *out = cc_json_create_array();
@@ -268,6 +202,12 @@ static cc_json_value_t *openai_transform_content_parts(const cc_json_value_t *pa
     return out;
 }
 
+/*
+ * 转换单条 SDK message。
+ *
+ * role、content、tool_call_id、reasoning_content、tool_calls 都按 OpenAI schema 复制；
+ * content 数组会额外做多模态 part 转换。
+ */
 static cc_json_value_t *openai_transform_message(const cc_json_value_t *msg)
 {
     cc_json_value_t *out = cc_json_create_object();
@@ -294,6 +234,7 @@ static cc_json_value_t *openai_transform_message(const cc_json_value_t *msg)
     return out;
 }
 
+/* 转换完整 messages 数组；输入非法时返回空数组，避免请求构造失败扩大化。 */
 static cc_json_value_t *openai_transform_messages(cc_json_value_t *messages)
 {
     if (!messages || !cc_json_is_array(messages)) return cc_json_create_array();
@@ -305,17 +246,11 @@ static cc_json_value_t *openai_transform_messages(cc_json_value_t *messages)
     return out;
 }
 
-/**
- * openai_build_request — 把统一 chat request 转换为该 provider 的 HTTP URL、header 和 JSON body。
+/*
+ * 构造 OpenAI Chat Completions HTTP 请求。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param base_url 借用的只读字符串；函数不会释放该指针。
- * @param api_key 借用的只读字符串；函数不会释放该指针。
- * @param default_model 借用的只读字符串；函数不会释放该指针。
- * @param request 借用的对象；函数不释放该对象本身。
- * @param stream 按值传入，用于控制本次操作。
- * @param out_request 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 该函数只生成 url/header/body 和 stream_kind，不执行网络请求。工具 schema 直接透传到
+ * tools 字段，stream 模式使用 SSE framing。
  */
 static cc_result_t openai_build_request(
     void *self,
@@ -357,8 +292,17 @@ static cc_result_t openai_build_request(
     cc_json_object_set(body, "model", cc_json_create_string(
         request->model ? request->model : default_model));
 
+    char *messages_text = NULL;
+    rc = cc_messages_to_json(
+        request->messages,
+        request->message_count,
+        request->thinking_mode,
+        &messages_text);
     cc_json_value_t *messages = NULL;
-    rc = cc_json_parse(request->messages_json, &messages);
+    if (rc.code == CC_OK && messages_text) {
+        rc = cc_json_parse(messages_text, &messages);
+    }
+    free(messages_text);
     if (rc.code == CC_OK && messages) {
         cc_json_value_t *converted = openai_transform_messages(messages);
         cc_json_destroy(messages);
@@ -393,13 +337,11 @@ static cc_result_t openai_build_request(
     return cc_result_ok();
 }
 
-/**
- * openai_parse_response — 解析 provider 的完整响应 JSON，填充统一 LLM response。
+/*
+ * 解析 OpenAI 同步响应。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param response_json 借用的只读字符串；函数不会释放该指针。
- * @param out_response 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 提取 choices[0].message.content、reasoning_content 和 tool_calls，填入 SDK 统一
+ * cc_llm_response_t。API error object 会转换成 CC_ERR_MODEL。
  */
 static cc_result_t openai_parse_response(
     void *self,
@@ -408,7 +350,7 @@ static cc_result_t openai_parse_response(
 )
 {
     (void)self;
-    memset(out_response, 0, sizeof(*out_response));
+    cc_llm_response_init(out_response);
 
     cc_json_value_t *root = NULL;
     cc_result_t rc = cc_json_parse(response_json, &root);
@@ -432,8 +374,7 @@ static cc_result_t openai_parse_response(
         if (message) {
             const char *content = cc_json_string_value(cc_json_object_get(message, "content"));
             if (content) {
-                out_response->has_text = 1;
-                out_response->text = cc_strdup(content);
+                cc_llm_response_set_text(out_response, content);
             }
 
             const char *reasoning = cc_json_string_value(cc_json_object_get(message, "reasoning_content"));
@@ -441,18 +382,16 @@ static cc_result_t openai_parse_response(
 
             cc_json_value_t *tool_calls = cc_json_object_get(message, "tool_calls");
             if (tool_calls && cc_json_is_array(tool_calls) && cc_json_array_size(tool_calls) > 0) {
-                cc_json_value_t *tc = cc_json_array_get(tool_calls, 0);
-                cc_json_value_t *func = cc_json_object_get(tc, "function");
-                out_response->has_tool_call = 1;
-                out_response->tool_call.id = cc_strdup(
-                    cc_json_string_value(cc_json_object_get(tc, "id")) ?
-                    cc_json_string_value(cc_json_object_get(tc, "id")) : "");
-                out_response->tool_call.name = cc_strdup(
-                    cc_json_string_value(cc_json_object_get(func, "name")) ?
-                    cc_json_string_value(cc_json_object_get(func, "name")) : "");
-                out_response->tool_call.arguments_json = cc_strdup(
-                    cc_json_string_value(cc_json_object_get(func, "arguments")) ?
-                    cc_json_string_value(cc_json_object_get(func, "arguments")) : "{}");
+                int n = cc_json_array_size(tool_calls);
+                for (int i = 0; i < n; i++) {
+                    cc_json_value_t *tc = cc_json_array_get(tool_calls, i);
+                    cc_json_value_t *func = cc_json_object_get(tc, "function");
+                    cc_llm_response_add_tool_call(
+                        out_response,
+                        cc_json_string_value(cc_json_object_get(tc, "id")),
+                        cc_json_string_value(cc_json_object_get(func, "name")),
+                        cc_json_string_value(cc_json_object_get(func, "arguments")));
+                }
             }
         }
 
@@ -464,15 +403,11 @@ static cc_result_t openai_parse_response(
     return cc_result_ok();
 }
 
-/**
- * openai_parse_stream_event — 解析 provider 的一段流式事件，并通过统一 chunk 回调交给 runtime。
+/*
+ * 解析 OpenAI SSE data 事件。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param event_json 借用的只读字符串；函数不会释放该指针。
- * @param on_chunk 按值传入，用于控制本次操作。
- * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * @param out_finished 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * delta.content 映射 TEXT，delta.reasoning_content 映射 THINKING，delta.tool_calls 会按
+ * TOOL_START/TOOL_DELTA/TOOL_END 输出。函数不拥有 chunk 字符串，它们只在回调期间有效。
  */
 static cc_result_t openai_parse_stream_event(
     void *self,
@@ -555,6 +490,7 @@ static cc_result_t openai_parse_stream_event(
     return cc_result_ok();
 }
 
+/* OpenAI 协议 vtable；destroy 为 NULL，因为该协议没有私有状态。 */
 static cc_llm_protocol_vtable_t openai_protocol_vtable = {
     openai_name,
     openai_build_request,
@@ -563,14 +499,11 @@ static cc_llm_protocol_vtable_t openai_protocol_vtable = {
     NULL
 };
 
-/**
- * cc_openai_provider_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
+/*
+ * 创建 OpenAI provider。
  *
- * @param base_url 借用的只读字符串；函数不会释放该指针。
- * @param api_key 借用的只读字符串；函数不会释放该指针。
- * @param model 借用的只读字符串；函数不会释放该指针。
- * @param out_provider 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 这里把 OpenAI protocol 注入通用 HTTP provider；默认 base_url/model 只是 SDK 默认值，
+ * 下游可通过配置覆盖。
  */
 cc_result_t cc_openai_provider_create(
     const char *base_url,

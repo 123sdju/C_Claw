@@ -1,38 +1,6 @@
-/**
- * 学习导读：cclaw/platforms/esp32/src/cc_esp32_filesystem.c
- *
- * 所属层次：平台层。
- * 阅读重点：这里隐藏 POSIX、Windows、ESP32 的系统 API 差异，阅读时重点看同名端口函数如何按平台实现。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_esp32_filesystem.c — ESP32 文件系统操作实现
- *
- * 在整体架构中的角色和层次：
- *   本模块位于 Platform 层的 ESP32 平台实现子层。
- *   Platform 层是整个系统的最底层，负责封装操作系统差异。
- *   本文件是 cc_filesystem.h 端口接口在 ESP32（ESP-IDF）平台的具体实现，
- *   通过虚表（vtable）模式向上层提供多态的文件系统操作。
- *   底层依赖 ESP-IDF VFS/FATFS/SPIFFS，但通过标准 POSIX 风格 API
- *   （fopen/fread/fwrite/opendir/readdir/mkdir/remove/access）操作，
- *   与 POSIX 版本共享几乎相同的实现逻辑。
- *
- * 与 POSIX 版本的一致性：
- *   ESP32 的 ESP-IDF 内置了 VFS 层，提供兼容 POSIX 的文件 I/O API，
- *   因此本模块的实现与 cc_posix_filesystem.c 几乎可以互换。
- *   主要区别在于：
- *     - 本文件严格限定在 ESP_PLATFORM 条件下编译
- *     - 目录创建（esp32_make_dir）自动逐级创建，处理 EEXIST
- *     - 使用 cc_strdup 代替标准 strdup（项目内部封装）
- *
- * 虚表多态设计：
- *   cc_filesystem_vtable_t 定义了一组函数指针（读/写/存在性检查/目录遍历/
- *   创建目录/删除/销毁），本文件中的 esp32_vtable 静态变量将这些函数指针
- *   绑定到 ESP32 版本的实现。cc_filesystem_get_default() 作为工厂函数，
- *   分配实例并绑定虚表；cc_filesystem_get_posix() 别名指向同一个实现。
- */
+
+
 
 #include "cc/ports/cc_filesystem.h"
 
@@ -45,23 +13,20 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/**
- * cc_esp32_filesystem — filesystem 端口私有实现对象，当前多数平台无需额外状态但仍保留 self 位置。
+/*
+ * ESP32 filesystem 私有状态。
  *
- * 当前实现不持有动态资源；真实文件系统状态由 ESP-IDF VFS/FATFS 管理。dummy 只是让
- * 私有对象保持非空，destroy 时只需要释放这个轻量 wrapper。
+ * 当前通过 ESP-IDF VFS 的 stdio/dirent 接口实现，因此不需要额外状态；保留 self 是为了
+ * 满足统一 filesystem vtable。
  */
 typedef struct cc_esp32_filesystem {
     int dummy;
 } cc_esp32_filesystem_t;
 
-/**
- * esp32_read_text — 执行文件系统操作，并把平台错误转换为统一结果。
+/*
+ * 读取整个文本文件。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param path 借用的只读字符串；函数不会释放该指针。
- * @param out_text 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 适合小配置/上下文文件；大文件读取应由上层 limits 限制，避免 MCU RAM 被一次性占满。
  */
 static cc_result_t esp32_read_text(void *self, const char *path, char **out_text)
 {
@@ -84,14 +49,7 @@ static cc_result_t esp32_read_text(void *self, const char *path, char **out_text
     return cc_result_ok();
 }
 
-/**
- * esp32_write_text — 执行文件系统操作，并把平台错误转换为统一结果。
- *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param path 借用的只读字符串；函数不会释放该指针。
- * @param text 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
- */
+/* 覆盖写入文本文件；路径安全检查由工具层完成，平台层只负责 VFS I/O。 */
 static cc_result_t esp32_write_text(void *self, const char *path, const char *text)
 {
     (void)self;
@@ -104,14 +62,7 @@ static cc_result_t esp32_write_text(void *self, const char *path, const char *te
     return cc_result_ok();
 }
 
-/**
- * esp32_exists — 执行文件系统操作，并把平台错误转换为统一结果。
- *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param path 借用的只读字符串；函数不会释放该指针。
- * @param out_exists 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
- */
+/* 判断路径是否存在，底层使用 ESP-IDF VFS access。 */
 static cc_result_t esp32_exists(void *self, const char *path, int *out_exists)
 {
     (void)self;
@@ -119,14 +70,10 @@ static cc_result_t esp32_exists(void *self, const char *path, int *out_exists)
     return cc_result_ok();
 }
 
-/**
- * esp32_list_dir — 执行文件系统操作，并把平台错误转换为统一结果。
+/*
+ * 列举目录项。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param path 借用的只读字符串；函数不会释放该指针。
- * @param out_items 输出参数；调用方传入有效指针，成功后接收结果。
- * @param out_count 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 返回数组由调用方逐项 free 后释放数组；容量从 8 开始，控制 MCU 上的初始内存占用。
  */
 static cc_result_t esp32_list_dir(void *self, const char *path, char ***out_items, size_t *out_count)
 {
@@ -171,12 +118,10 @@ static cc_result_t esp32_list_dir(void *self, const char *path, char ***out_item
     return cc_result_ok();
 }
 
-/**
- * esp32_make_dir — 执行文件系统操作，并把平台错误转换为统一结果。
+/*
+ * 递归创建目录。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param path 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * ESP32 文件系统可能是 SPIFFS/FATFS/VFS，逐级 mkdir 并把 EEXIST 视为成功。
  */
 static cc_result_t esp32_make_dir(void *self, const char *path)
 {
@@ -205,13 +150,7 @@ static cc_result_t esp32_make_dir(void *self, const char *path)
     return cc_result_ok();
 }
 
-/**
- * esp32_remove — 执行文件系统操作，并把平台错误转换为统一结果。
- *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param path 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
- */
+/* 删除文件或空目录；高风险删除策略不在平台层处理。 */
 static cc_result_t esp32_remove(void *self, const char *path)
 {
     (void)self;
@@ -220,16 +159,13 @@ static cc_result_t esp32_remove(void *self, const char *path)
     return cc_result_ok();
 }
 
-/**
- * esp32_destroy — 释放、停止或复位该组件拥有的资源，防止失败路径泄漏。
- *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- */
+/* 销毁 ESP32 filesystem 私有对象。 */
 static void esp32_destroy(void *self)
 {
     free(self);
 }
 
+/* ESP32 filesystem vtable。 */
 static cc_filesystem_vtable_t esp32_vtable = {
     esp32_read_text,
     esp32_write_text,
@@ -240,14 +176,17 @@ static cc_filesystem_vtable_t esp32_vtable = {
     esp32_destroy
 };
 
-/**
- * cc_filesystem_get_default — 执行文件系统操作，并把平台错误转换为统一结果。
+/*
+ * 创建 ESP32 默认 filesystem 端口。
  *
- * @param out_fs 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 成功后 out_fs 持有 self/vtable；VFS 挂载应由应用或平台初始化代码提前完成。
  */
 cc_result_t cc_filesystem_get_default(cc_filesystem_t *out_fs)
 {
+    if (!out_fs) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null filesystem output");
+    }
+    memset(out_fs, 0, sizeof(*out_fs));
     cc_esp32_filesystem_t *self = calloc(1, sizeof(cc_esp32_filesystem_t));
     if (!self) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create ESP32 filesystem");
     out_fs->self = self;
@@ -255,12 +194,7 @@ cc_result_t cc_filesystem_get_default(cc_filesystem_t *out_fs)
     return cc_result_ok();
 }
 
-/**
- * cc_filesystem_get_posix — 执行文件系统操作，并把平台错误转换为统一结果。
- *
- * @param out_fs 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
- */
+/* 兼容 POSIX 命名入口，在 ESP32 profile 中返回同一个默认 filesystem。 */
 cc_result_t cc_filesystem_get_posix(cc_filesystem_t *out_fs)
 {
     return cc_filesystem_get_default(out_fs);

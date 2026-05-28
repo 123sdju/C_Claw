@@ -1,12 +1,4 @@
-/**
- * 学习导读：cclaw/core/include/cc/app/cc_runtime_features.h
- *
- * 所属层次：核心层。
- * 阅读重点：这里定义 runtime feature descriptor，重点看工厂函数如何表达借用、
- *           转交和 app 层私有 state 的销毁责任。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
+
 
 #ifndef CC_RUNTIME_FEATURES_H
 #define CC_RUNTIME_FEATURES_H
@@ -25,33 +17,41 @@
 #include <stdio.h>
 #include <string.h>
 
+/* runtime builder 最多记录的诊断条数；超过后设置 truncated，避免动态扩容。 */
 #define CC_RUNTIME_DIAGNOSTICS_MAX 32
 
+/*
+ * 单条 runtime 构建诊断。
+ *
+ * 使用固定长度数组是为了让配置加载失败时不再依赖额外堆内存；kind/id/message 用于
+ * 说明哪个 provider/tool/plugin 缺失或不可用。
+ */
 typedef struct cc_runtime_diagnostic {
     char kind[24];
     char id[80];
     char message[192];
 } cc_runtime_diagnostic_t;
 
-/**
- * cc_runtime_diagnostics_t — 启动/reload 期间的非致命能力诊断列表。
- *
- * 该结构不分配内存，方便 gateway 和 reload report 直接按值复制。它只用于
- * “外部 tool/plugin/MCP 无法启动但 runtime 可以继续服务”的场景；配置解析、
- * 内存分配或基础 runtime 创建失败仍然通过 cc_result_t 阻止启动。
- */
+/* runtime 构建诊断集合；由 builder 填充，调用方只读。 */
 typedef struct cc_runtime_diagnostics {
     cc_runtime_diagnostic_t items[CC_RUNTIME_DIAGNOSTICS_MAX];
     size_t count;
     int truncated;
 } cc_runtime_diagnostics_t;
 
+/* 清空诊断集合；inline 是为了 public header 中轻量复用。 */
 static inline void cc_runtime_diagnostics_reset(cc_runtime_diagnostics_t *diagnostics)
 {
     if (!diagnostics) return;
     memset(diagnostics, 0, sizeof(*diagnostics));
 }
 
+/*
+ * 添加一条诊断。
+ *
+ * 超出固定容量时只设置 truncated，不分配更多内存。这是嵌入式友好的失败报告方式：
+ * 保留前几条关键信息，同时不让错误报告本身造成 OOM。
+ */
 static inline void cc_runtime_diagnostics_add(
     cc_runtime_diagnostics_t *diagnostics,
     const char *kind,
@@ -70,125 +70,65 @@ static inline void cc_runtime_diagnostics_add(
     snprintf(item->message, sizeof(item->message), "%s", message ? message : "unavailable");
 }
 
-/**
- * cc_runtime_llm_create_fn — LLM provider 工厂函数类型。
- *
- * 工厂从配置中读取 provider 所需的 base_url、api_key、model 等字段，
- * 成功后把可按值拷贝的 cc_llm_provider_t 写入 out_provider。调用方后续
- * 通过 provider.vtable->destroy(provider.self) 释放实现私有状态。
- *
- * @param config 只读配置；工厂只借用该指针，不保存配置对象本身。
- * @param out_provider 输出参数；成功时获得 provider 值对象。
- * @return CC_OK 表示创建成功；否则返回具体错误码，out_provider 不可使用。
- */
+
+/* LLM provider factory；config 借用，out_provider 成功后由 runtime 管理。 */
 typedef cc_result_t (*cc_runtime_llm_create_fn)(
     const cc_config_t *config,
     cc_llm_provider_t *out_provider
 );
 
-/**
- * cc_runtime_session_store_create_fn — 会话存储工厂函数类型。
- *
- * 会话存储负责保存 session 元数据、用户/助手消息以及工具调用结果。
- * 成功后 out_store 持有 store.self，runtime_builder 在销毁阶段调用 vtable
- * 的 destroy 释放该实现。
- *
- * @param config 只读配置，常用于选择 data_dir 或 SQLite/JSON 文件路径。
- * @param out_store 输出参数；成功时写入可用的会话存储端口。
- * @return CC_OK 表示创建成功；否则返回错误码和错误消息。
- */
+/* session store factory；根据配置选择 JSON/SQLite/memory 等后端。 */
 typedef cc_result_t (*cc_runtime_session_store_create_fn)(
     const cc_config_t *config,
     cc_session_store_t *out_store
 );
 
-/**
- * cc_runtime_memory_store_create_fn — 长期记忆存储工厂函数类型。
- *
- * memory store 是可选能力，创建失败时某些 profile 会降级为无长期记忆。
- * 成功写入的 out_store 由 runtime_builder 拥有并负责销毁。
- *
- * @param config 只读配置，提供 data_dir、profile 等存储选择信息。
- * @param out_store 输出参数；成功时写入 memory store 端口值。
- * @return CC_OK 表示可用；失败返回错误码，调用方可决定是否降级。
- */
+/* memory store factory；可由下游替换为向量库/嵌入式 KV 存储。 */
 typedef cc_result_t (*cc_runtime_memory_store_create_fn)(
     const cc_config_t *config,
     cc_memory_store_t *out_store
 );
 
-/**
- * cc_runtime_policy_create_fn — 工具调用策略引擎工厂函数类型。
- *
- * policy engine 在工具执行前判断是否允许、拒绝或需要人工审批。
- * 成功后的 policy.self 由 runtime_builder 持有到销毁阶段。
- *
- * @param config 只读配置，包含安全策略和审批模式。
- * @param out_policy 输出参数；成功时写入策略端口值。
- * @return CC_OK 表示创建成功；否则 runtime_builder 会中止启动。
- */
+/* policy engine factory；默认策略之外可以接入产品审批系统。 */
 typedef cc_result_t (*cc_runtime_policy_create_fn)(
     const cc_config_t *config,
     cc_policy_engine_t *out_policy
 );
 
-/**
- * cc_runtime_sandbox_create_fn — sandbox 工厂函数类型。
- *
- * sandbox 用于隔离 shell/file 等高风险工具。它既可作为 runtime 的默认
- * sandbox，也可由工具工厂按需创建独立实例。
- *
- * @param config 只读配置，描述 sandbox 后端与工作目录限制。
- * @param out_sandbox 输出参数；成功时写入 sandbox 端口值。
- * @return CC_OK 表示创建成功；失败返回错误码，调用方决定是否中止。
- */
+/* sandbox factory；在支持进程的平台创建本地 sandbox，不支持时可返回 unsupported。 */
 typedef cc_result_t (*cc_runtime_sandbox_create_fn)(
     const cc_config_t *config,
     cc_sandbox_t *out_sandbox
 );
 
-/**
- * cc_runtime_tool_factory_ctx — 工具工厂上下文，向 tool create 回调传递配置、文件系统、沙箱和服务依赖。
+/*
+ * tool factory 上下文。
  *
- * 该结构体本身不拥有任何依赖。runtime_builder 在调用工具工厂时临时构造它，
- * 工具可以复制需要长期保存的字符串或端口值，但不能保存 ctx 指针本身。
+ * config/filesystem/memory_store/create_sandbox 都由 runtime builder 提供；工具 factory
+ * 只在创建期间借用它们，不能把 ctx 指针保存到工具实例外部。
  */
 typedef struct cc_runtime_tool_factory_ctx {
-    /** 借用的只读配置；工具工厂可读取工具参数、工作目录和 profile 信息。 */
+
     const cc_config_t *config;
-    /** 文件系统端口值的浅拷贝；底层 self 仍由 runtime_builder 统一销毁。 */
+
     cc_filesystem_t filesystem;
-    /** 可选长期记忆存储；为 NULL 表示当前 profile 未启用 memory store。 */
+
     cc_memory_store_t *memory_store;
-    /** 可选 sandbox 工厂；工具需要独立 sandbox 时调用，创建出的实例由工具负责释放。 */
+
     cc_runtime_sandbox_create_fn create_sandbox;
 } cc_runtime_tool_factory_ctx_t;
 
-/**
- * cc_runtime_tool_create_fn — 内建工具工厂函数类型。
- *
- * 工厂根据 ctx 创建一个 cc_tool_t 值对象。创建成功后 runtime_builder 会把该
- * tool 转交给 registry；注册失败时 builder 会调用 tool 的 destroy 清理临时对象。
- *
- * @param ctx 借用的工具工厂上下文；不能保存该指针。
- * @param out_tool 输出参数；成功时写入工具端口值。
- * @return CC_OK 表示创建成功；失败返回错误码，out_tool 不应注册。
- */
+/* tool factory；成功后 out_tool 通常注册到 registry 并由 registry 管理 self。 */
 typedef cc_result_t (*cc_runtime_tool_create_fn)(
     const cc_runtime_tool_factory_ctx_t *ctx,
     cc_tool_t *out_tool
 );
 
-/**
- * cc_runtime_plugin_load_fn — profile 的插件加载入口。
+/*
+ * plugin load 扩展点。
  *
- * 该回调把外部插件进程暴露的工具注册到 registry。若需要保存插件管理器状态，
- * 可通过 out_state 返回不透明指针，后续由 destroy_plugins 回调释放。
- *
- * @param config 借用的只读配置，包含插件路径和启用列表。
- * @param registry 借用的工具注册表；回调可向其中添加工具。
- * @param out_state 输出插件状态；无状态实现可写入 NULL。
- * @return CC_OK 表示插件加载完成；失败会阻止 runtime 启动。
+ * SDK 核心不内置业务 plugin，只提供加载扩展点。out_state 由 loader 返回，runtime 销毁
+ * 时交给 destroy_plugins；diagnostics 用于记录加载失败但可继续运行的原因。
  */
 typedef cc_result_t (*cc_runtime_plugin_load_fn)(
     const cc_config_t *config,
@@ -197,21 +137,10 @@ typedef cc_result_t (*cc_runtime_plugin_load_fn)(
     cc_runtime_diagnostics_t *diagnostics
 );
 
-/**
- * cc_runtime_plugin_destroy_fn — 释放 load_plugins 返回的不透明插件状态。
- *
- * @param state load_plugins 写入的状态指针；无状态或未加载插件时可能为 NULL。
- */
+/* 销毁 plugin loader 返回的 state。 */
 typedef void (*cc_runtime_plugin_destroy_fn)(void *state);
 
-/**
- * cc_runtime_mcp_load_fn — profile 的 MCP transport 注入入口。
- *
- * MCP 协议状态机、TTL、tool bridge 位于 core SDK 的 cc_mcp_runtime_manager。
- * app 层回调只创建当前平台支持的 transport factory，并把 MCP server 暴露的
- * tools 注册到 registry。POSIX/Windows 通常提供 stdio、HTTP、SSE、
- * streamable HTTP；ESP profile 默认不注册该回调。
- */
+/* MCP load 扩展点；语义同 plugin，但面向 MCP server/tool 注册。 */
 typedef cc_result_t (*cc_runtime_mcp_load_fn)(
     const cc_config_t *config,
     cc_tool_registry_t *registry,
@@ -219,74 +148,75 @@ typedef cc_result_t (*cc_runtime_mcp_load_fn)(
     cc_runtime_diagnostics_t *diagnostics
 );
 
-/**
- * cc_runtime_mcp_destroy_fn — 释放 load_mcp 返回的 MCP manager/transport 状态。
- */
+/* 销毁 MCP loader 返回的 state。 */
 typedef void (*cc_runtime_mcp_destroy_fn)(void *state);
 
-/**
- * cc_llm_provider_descriptor — 注册描述符，把名称和工厂函数配对，供 runtime_builder 统一枚举和创建。
+/*
+ * provider 描述符。
  *
- * 描述符数组通常是应用层的静态常量表，runtime_builder 只借用其中的字符串和函数指针。
+ * compiled 标识该 provider 是否进入当前 profile；create 为 NULL 或 compiled=0 时 builder
+ * 应给出诊断而不是运行时崩溃。
  */
 typedef struct cc_llm_provider_descriptor {
-    /** 配置文件中的 provider 名称，例如 "qwen"、"openai"、"anthropic"、"ollama"。 */
+
     const char *name;
-    /** 编译期开关结果；0 表示该 provider 在当前 profile 中不可用。 */
+
     int compiled;
-    /** 创建该 provider 的工厂函数；compiled 为 1 时应非 NULL。 */
+
     cc_runtime_llm_create_fn create;
 } cc_llm_provider_descriptor_t;
 
-/**
- * cc_tool_descriptor — 注册描述符，把名称和工厂函数配对，供 runtime_builder 统一枚举和创建。
+/*
+ * tool 描述符。
  *
- * name 和 alias 都是静态借用字符串，用于匹配 config.enabled_tools。
+ * name 是配置中使用的稳定名，alias 允许兼容简写；compiled 标识当前 profile 是否包含
+ * 该工具实现。
  */
 typedef struct cc_tool_descriptor {
-    /** 工具正式名称，通常等于 registry 中暴露给 LLM 的工具名。 */
+
     const char *name;
-    /** 兼容配置用的短别名；可为 NULL。 */
+
     const char *alias;
-    /** 编译期开关结果；0 表示当前 profile 不注册该工具。 */
+
     int compiled;
-    /** 工具工厂；成功创建的工具由 registry 接管所有权。 */
+
     cc_runtime_tool_create_fn create;
 } cc_tool_descriptor_t;
 
-/**
- * cc_runtime_feature_set — 应用 profile 的能力描述表，runtime_builder 通过它创建 LLM、store、sandbox 和 tools。
+/*
+ * runtime feature set。
  *
- * 这是应用层和核心 runtime_builder 之间的组合边界：核心层不直接知道
- * 具体 app/profile 编译了哪些 provider、tool 或插件能力，只读取这张表。
+ * 该结构把“当前构建包含哪些 provider/tool/storage/policy/plugin/MCP 扩展点”集中交给
+ * runtime builder。它是 extension-only 边界：SDK 提供 core ports 和可选 adapter，
+ * 不把产品 gateway 或业务工具塞进核心。
  */
 typedef struct cc_runtime_feature_set {
-    /** 静态 LLM provider 描述符数组；长度由 llm_provider_count 给出。 */
+
     const cc_llm_provider_descriptor_t *llm_providers;
-    /** llm_providers 的元素数量。 */
+
     size_t llm_provider_count;
 
-    /** 静态工具描述符数组；runtime_builder 会过滤 compiled 和 enabled_tools。 */
+
     const cc_tool_descriptor_t *tools;
-    /** tools 的元素数量。 */
+
     size_t tool_count;
 
-    /** 必需：创建会话存储；缺失时 runtime_builder_create 直接失败。 */
+
     cc_runtime_session_store_create_fn create_session_store;
-    /** 可选：创建长期记忆存储；失败或缺失时可降级为无记忆能力。 */
+
     cc_runtime_memory_store_create_fn create_memory_store;
-    /** 必需：创建工具策略引擎；控制工具调用的允许/拒绝/审批。 */
+
     cc_runtime_policy_create_fn create_policy_engine;
-    /** 可选：创建 sandbox；没有 sandbox 的 profile 应确保工具自身安全。 */
+
     cc_runtime_sandbox_create_fn create_sandbox;
 
-    /** 可选：加载插件工具；通常由应用层实现。 */
+
     cc_runtime_plugin_load_fn load_plugins;
-    /** 可选：释放 load_plugins 返回的 plugin_state。 */
+
     cc_runtime_plugin_destroy_fn destroy_plugins;
-    /** 可选：加载 MCP server 暴露的工具；stdio/HTTP/SSE/streamable HTTP transport 由应用层实现。 */
+
     cc_runtime_mcp_load_fn load_mcp;
-    /** 可选：释放 load_mcp 返回的 MCP runtime/cache 状态。 */
+
     cc_runtime_mcp_destroy_fn destroy_mcp;
 } cc_runtime_feature_set_t;
 

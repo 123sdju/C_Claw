@@ -1,7 +1,7 @@
-# 学习导读：cclaw/platforms/freertos/CMakeLists.txt
-# 所属层次：平台层。
-# 阅读重点：通用 FreeRTOS 端口只依赖 FreeRTOS Kernel 头文件和基础 C 库，供 STM32/QEMU 等裸机应用复用。
-# 注释说明：如果注释与代码冲突，以代码行为和测试为准。
+
+
+
+
 add_library(c_claw_platform_freertos_objects OBJECT
     src/cc_freertos_thread.c
     src/cc_freertos_filesystem.c

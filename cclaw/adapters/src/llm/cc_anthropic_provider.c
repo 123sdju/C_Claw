@@ -1,128 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/llm/cc_anthropic_provider.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_anthropic_provider.c — Anthropic Messages API 协议策略模块
- *
- * 本模块在整体架构中的角色：
- * ─────────────────────────────
- * 位于适配器层，是 LLM provider 两层策略中的**协议层**。只实现
- * cc_llm_protocol_t vtable 的四个回调，负责 Anthropic Messages API 特有的
- * JSON 格式转换。这是四个协议实现中**格式转换最复杂**的模块，因为 Anthropic
- * API 的消息结构、工具定义格式与 OpenAI 原生格式差异最大。
- *
- * 本模块不持有任何私有状态（self 始终为 NULL），因此不需要 destroy 回调。
- *
- * 上游调用方：
- *   - cc_http_llm_provider.c — 通过 cc_llm_protocol_t vtable 委托调用
- *     build_request / parse_response / parse_stream_event
- *
- * 下游依赖模块：
- *   - cc_json.c — JSON 对象构造与解析
- *   - cc_string_builder.c — URL 拼接、system prompt 拼接、tool result 格式化
- *   - cc_http_llm_provider.h — cc_llm_http_request_t 结构体
- *
- * ─── 消息格式转换（OpenAI 格式 → Anthropic 格式）──────────────────────
- *
- *   Anthropic Messages API 与 OpenAI Chat Completions API 的消息结构不同：
- *
- *   1. System 消息提升为顶层字段：
- *      OpenAI 的 system role 消息在 messages 数组中；Anthropic 要求 system
- *      是请求体的顶层字符串字段。本模块遍历所有 system role 消息，将 content
- *      用换行符拼接，设为 body.system；这些消息不再出现在 messages 数组中。
- *
- *   2. Tool role 消息转为 User role：
- *      OpenAI 有独立的 tool role 用于工具调用结果；Anthropic 没有 tool role，
- *      需要用 user role 发送格式化的工具返回文本：
- *        "Tool result {tool_call_id}: {content}"
- *
- *   3. Assistant 消息保留：role 不变，只取 content 字段。
- *
- *   4. 其他 role（user 等）：保留 role，取 content 字段。
- *
- * ─── 工具格式转换（OpenAI function 格式 → Anthropic tool 格式）─────────
- *
- *   OpenAI 工具定义：
- *     { type: "function", function: { name, description, parameters } }
- *
- *   Anthropic 工具定义：
- *     { name, description, input_schema }
- *
- *   parameters 对象被序列化后重新解析为 input_schema，实现格式平铺。
- *   空工具数组不会被设置到请求体中。
- *
- * ─── build_request — 构造 Anthropic HTTP 请求 ──────────────────────────
- *
- *   终端点：  POST {base_url}/v1/messages
- *   认证方式：x-api-key: {api_key}（必需）
- *   版本头：  anthropic-version: 2023-06-01
- *   Content-Type：application/json
- *   流格式：  SSE（CC_LLM_STREAM_SSE）
- *
- *   请求体 JSON 字段：
- *     - model       —— 优先用 request->model，回退到 default_model
- *     - max_tokens  —— request->max_tokens（Anthropic 必需字段）
- *     - temperature —— request->temperature
- *     - stream      —— 布尔值
- *     - system      —— 拼接后的 system prompt（顶层字符串）
- *     - messages    —— 格式转换后的消息数组
- *     - tools       —— 格式转换后的工具数组
- *
- * ─── parse_response — 解析非流式响应 ───────────────────────────────────
- *
- *   响应 JSON 结构（Anthropic Messages API）：
- *     error.message                       —— API 错误消息
- *     content[]                           —— 内容块数组：
- *       { type: "text", text: "..." }      —— 文本块，拼接所有文本块内容
- *       { type: "tool_use", id, name, input } —— 工具调用块，只取第一个
- *     stop_reason                         —— "end_turn" 表示正常结束
- *
- *   与 OpenAI 的关键差异：
- *     - content 是数组而非字符串，需要遍历拼接所有 text 类型的块
- *     - 工具调用结构不同：id/name/input 是 content 块的直接子字段
- *     - arguments 在 Anthropic 中名为 input
- *
- * ─── parse_stream_event — 解析流式 SSE 事件 ────────────────────────────
- *
- *   Anthropic 流式事件使用 type 字段区分事件类型，与 OpenAI 的 choices/delta
- *   结构完全不同：
- *
- *   content_block_start：
- *     content_block.type = "tool_use" → CC_STREAM_CHUNK_TOOL_START
- *     （携带 name 和 id）
- *
- *   content_block_delta：
- *     delta.type = "text_delta"       → CC_STREAM_CHUNK_TEXT
- *     delta.type = "thinking_delta"   → CC_STREAM_CHUNK_THINKING
- *     delta.type = "input_json_delta" → CC_STREAM_CHUNK_TOOL_DELTA
- *     （携带 partial_json 增量）
- *
- *   message_delta：
- *     delta.stop_reason = "tool_use"  → CC_STREAM_CHUNK_TOOL_END
- *     delta.stop_reason = "end_turn"  → out_finished = 1
- *
- *   message_stop：
- *     → out_finished = 1
- *
- *   与 OpenAI 流式的关键差异：
- *     - 事件按 type 路由而非遍历 choices 数组
- *     - 工具调用 delta 是 partial_json 字符串（增量 JSON 片段）
- *     - 有专门的 thinking_delta 事件类型用于推理链
- *     - 结束信号可能是 message_delta.stop_reason 或 message_stop
- *
- * ─── 默认值与创建 ────────────────────────────────────────────────────────
- *
- *   cc_anthropic_provider_create() 将 protocol.self 设为 NULL，委托
- *   cc_http_llm_provider_create() 组合传输层与协议层：
- *     - 默认 base_url：https://api.anthropic.com
- *     - 默认 model：   claude-3-5-haiku-latest
- */
+
+
 
 #include "cc/adapters/cc_llm_providers.h"
 #include "cc/adapters/cc_http_llm_provider.h"
@@ -131,13 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/**
- * add_header — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+/*
+ * 向 Anthropic HTTP 请求追加 header。
  *
- * @param request 借用的对象；函数不释放该对象本身。
- * @param name 借用的只读字符串；函数不会释放该指针。
- * @param value 借用的只读字符串；函数不会释放该指针。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * request 拥有 headers 数组和 name/value 字符串；失败时外层会调用
+ * cc_llm_http_request_cleanup 释放已经成功追加的 header。
  */
 static cc_result_t add_header(cc_llm_http_request_t *request, const char *name, const char *value)
 {
@@ -155,25 +31,14 @@ static cc_result_t add_header(cc_llm_http_request_t *request, const char *name, 
     return cc_result_ok();
 }
 
-/**
- * anthropic_name — 返回端口、工具或协议的静态名称字符串，用于注册和日志。
- *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @return 返回借用或静态只读字符串；调用方不得释放。
- */
+/* 返回协议名，通用 HTTP provider 用它推断 capability。 */
 static const char *anthropic_name(void *self)
 {
     (void)self;
     return "anthropic";
 }
 
-/**
- * anthropic_text_message — 处理消息对象的创建、复制、字段更新或序列化。
- *
- * @param role 借用的只读字符串；函数不会释放该指针。
- * @param content 借用的只读字符串；函数不会释放该指针。
- * @return 返回借用对象指针；NULL 表示未注入、未找到或当前对象无效。
- */
+/* 构造 Anthropic 简单文本 message；content 是纯字符串形式。 */
 static cc_json_value_t *anthropic_text_message(const char *role, const char *content)
 {
     cc_json_value_t *message = cc_json_create_object();
@@ -182,6 +47,7 @@ static cc_json_value_t *anthropic_text_message(const char *role, const char *con
     return message;
 }
 
+/* 构造 Anthropic block message；content 数组的所有权转移给返回的 message。 */
 static cc_json_value_t *anthropic_block_message(const char *role, cc_json_value_t *content)
 {
     cc_json_value_t *message = cc_json_create_object();
@@ -190,6 +56,12 @@ static cc_json_value_t *anthropic_block_message(const char *role, cc_json_value_
     return message;
 }
 
+/*
+ * 把不支持直接上传的多模态 part 描述成文本。
+ *
+ * Anthropic 只原生支持部分 image base64；其它文件、音频或非 inline 资源用结构化文本
+ * 保留 id/mime/path/尺寸等信息，避免上下文静默丢失。
+ */
 static char *anthropic_describe_part(const cc_json_value_t *part)
 {
     const char *type = cc_json_string_value(cc_json_object_get(part, "type"));
@@ -215,6 +87,7 @@ static char *anthropic_describe_part(const cc_json_value_t *part)
     return cc_string_builder_take(&sb);
 }
 
+/* 追加 Anthropic content block 中的 text 块；空文本不追加。 */
 static void anthropic_append_text_block(cc_json_value_t *blocks, const char *text)
 {
     if (!text || !*text) return;
@@ -224,6 +97,12 @@ static void anthropic_append_text_block(cc_json_value_t *blocks, const char *tex
     cc_json_array_append(blocks, block);
 }
 
+/*
+ * 将 SDK content parts 转成 Anthropic content blocks。
+ *
+ * text 映射 text block，inline image 映射 image/source/base64，其它 part 转成 fallback 文本。
+ * 如果最终没有 block，补一个空 text，避免 Anthropic message content 为空数组。
+ */
 static cc_json_value_t *anthropic_content_blocks_from_parts(const cc_json_value_t *parts)
 {
     cc_json_value_t *blocks = cc_json_create_array();
@@ -264,6 +143,12 @@ static cc_json_value_t *anthropic_content_blocks_from_parts(const cc_json_value_
     return blocks;
 }
 
+/*
+ * 将 SDK content parts 压平成文本。
+ *
+ * 该 helper 用于 system、assistant、tool result 等 Anthropic 不适合携带多模态 block 的
+ * 场景；非文本 part 仍用 fallback 描述保留关键信息。
+ */
 static char *anthropic_text_from_parts(const cc_json_value_t *parts)
 {
     cc_string_builder_t sb;
@@ -289,18 +174,19 @@ static char *anthropic_text_from_parts(const cc_json_value_t *parts)
     return cc_string_builder_take(&sb);
 }
 
-/**
- * append_anthropic_messages — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+/*
+ * 把 SDK messages JSON 转成 Anthropic messages/system 字段。
  *
- * @param messages_json 借用的只读字符串；函数不会释放该指针。
+ * system role 会合并进 body.system；tool role 会改写成 user 文本消息；user 消息可保留
+ * image block。这样 core 不需要了解 Anthropic 特有的消息形态。
  */
 static void append_anthropic_messages(
     cc_json_value_t *body,
-    const char *messages_json
+    const char *messages_text
 )
 {
     cc_json_value_t *src = NULL;
-    cc_result_t rc = cc_json_parse(messages_json, &src);
+    cc_result_t rc = cc_json_parse(messages_text, &src);
     if (rc.code != CC_OK || !src || !cc_json_is_array(src)) {
         cc_result_free(&rc);
         if (src) cc_json_destroy(src);
@@ -377,10 +263,11 @@ static void append_anthropic_messages(
     cc_json_object_set(body, "messages", messages);
 }
 
-/**
- * append_anthropic_tools — 向动态数组、字符串缓冲或结果集合追加内容，必要时扩容。
+/*
+ * 将 OpenAI 风格工具 schema 转换成 Anthropic tools schema。
  *
- * @param tools_json 借用的只读字符串；函数不会释放该指针。
+ * core/tool registry 输出的是统一 tools_json，这里提取 function.name/description/parameters
+ * 并改名为 Anthropic 的 name/description/input_schema。
  */
 static void append_anthropic_tools(cc_json_value_t *body, const char *tools_json)
 {
@@ -430,17 +317,11 @@ static void append_anthropic_tools(cc_json_value_t *body, const char *tools_json
     cc_json_destroy(src);
 }
 
-/**
- * anthropic_build_request — 把统一 chat request 转换为该 provider 的 HTTP URL、header 和 JSON body。
+/*
+ * 构造 Anthropic Messages API HTTP 请求。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param base_url 借用的只读字符串；函数不会释放该指针。
- * @param api_key 借用的只读字符串；函数不会释放该指针。
- * @param default_model 借用的只读字符串；函数不会释放该指针。
- * @param request 借用的对象；函数不释放该对象本身。
- * @param stream 按值传入，用于控制本次操作。
- * @param out_request 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 该函数设置 x-api-key、anthropic-version、messages/tools/system 和 stream 字段；stream
+ * 使用 SSE framing，由通用 HTTP provider 负责传输。
  */
 static cc_result_t anthropic_build_request(
     void *self,
@@ -485,7 +366,19 @@ static cc_result_t anthropic_build_request(
     cc_json_object_set(body, "max_tokens", cc_json_create_number(request->max_tokens));
     cc_json_object_set(body, "temperature", cc_json_create_number(request->temperature));
     cc_json_object_set(body, "stream", cc_json_create_bool(stream));
-    append_anthropic_messages(body, request->messages_json);
+    char *messages_text = NULL;
+    cc_result_t msg_rc = cc_messages_to_json(
+        request->messages,
+        request->message_count,
+        request->thinking_mode,
+        &messages_text);
+    if (msg_rc.code == CC_OK) {
+        append_anthropic_messages(body, messages_text);
+    } else {
+        cc_result_free(&msg_rc);
+        append_anthropic_messages(body, "[]");
+    }
+    free(messages_text);
     append_anthropic_tools(body, request->tools_json);
 
     out_request->body_json = cc_json_stringify_unformatted(body);
@@ -498,13 +391,11 @@ static cc_result_t anthropic_build_request(
     return cc_result_ok();
 }
 
-/**
- * anthropic_parse_response — 解析 provider 的完整响应 JSON，填充统一 LLM response。
+/*
+ * 解析 Anthropic 同步响应。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param response_json 借用的只读字符串；函数不会释放该指针。
- * @param out_response 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * content 中 text block 聚合为 assistant 文本；tool_use block 转成 SDK tool call；
+ * error object 映射 CC_ERR_MODEL。
  */
 static cc_result_t anthropic_parse_response(
     void *self,
@@ -513,7 +404,7 @@ static cc_result_t anthropic_parse_response(
 )
 {
     (void)self;
-    memset(out_response, 0, sizeof(*out_response));
+    cc_llm_response_init(out_response);
 
     cc_json_value_t *root = NULL;
     cc_result_t rc = cc_json_parse(response_json, &root);
@@ -541,20 +432,19 @@ static cc_result_t anthropic_parse_response(
             if (type && strcmp(type, "text") == 0) {
                 const char *block_text = cc_json_string_value(cc_json_object_get(block, "text"));
                 if (block_text) cc_string_builder_append(&text, block_text);
-            } else if (type && strcmp(type, "tool_use") == 0 && !out_response->has_tool_call) {
-                out_response->has_tool_call = 1;
+            } else if (type && strcmp(type, "tool_use") == 0) {
                 const char *id = cc_json_string_value(cc_json_object_get(block, "id"));
                 const char *name = cc_json_string_value(cc_json_object_get(block, "name"));
-                out_response->tool_call.id = strdup(id ? id : "");
-                out_response->tool_call.name = strdup(name ? name : "");
                 cc_json_value_t *input = cc_json_object_get(block, "input");
-                out_response->tool_call.arguments_json =
-                    input ? cc_json_stringify_unformatted(input) : strdup("{}");
+                char *args = input ? cc_json_stringify_unformatted(input) : strdup("{}");
+                cc_llm_response_add_tool_call(out_response, id, name, args ? args : "{}");
+                free(args);
             }
         }
         if (text.length > 0) {
-            out_response->has_text = 1;
-            out_response->text = cc_string_builder_take(&text);
+            char *taken = cc_string_builder_take(&text);
+            cc_llm_response_set_text(out_response, taken);
+            free(taken);
         } else {
             cc_string_builder_deinit(&text);
         }
@@ -566,15 +456,12 @@ static cc_result_t anthropic_parse_response(
     return cc_result_ok();
 }
 
-/**
- * anthropic_parse_stream_event — 解析 provider 的一段流式事件，并通过统一 chunk 回调交给 runtime。
+/*
+ * 解析 Anthropic stream event。
  *
- * @param self vtable 私有上下文；生命周期由创建该端口的实现管理。
- * @param event_json 借用的只读字符串；函数不会释放该指针。
- * @param on_chunk 按值传入，用于控制本次操作。
- * @param user_data 回调上下文；函数只透传或临时读取，不取得所有权。
- * @param out_finished 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * content_block_start/tool_use 映射 TOOL_START，text_delta 映射 TEXT，thinking_delta 映射
+ * THINKING，input_json_delta 映射 TOOL_DELTA，message_delta/message_stop 控制 tool_end
+ * 和 finished。
  */
 static cc_result_t anthropic_parse_stream_event(
     void *self,
@@ -656,6 +543,7 @@ static cc_result_t anthropic_parse_stream_event(
     return cc_result_ok();
 }
 
+/* Anthropic 协议 vtable；无私有状态，因此 destroy 为 NULL。 */
 static cc_llm_protocol_vtable_t anthropic_protocol_vtable = {
     anthropic_name,
     anthropic_build_request,
@@ -664,14 +552,10 @@ static cc_llm_protocol_vtable_t anthropic_protocol_vtable = {
     NULL
 };
 
-/**
- * cc_anthropic_provider_create — 完成对应初始化步骤，失败时返回 cc_result_t 错误。
+/*
+ * 创建 Anthropic provider。
  *
- * @param base_url 借用的只读字符串；函数不会释放该指针。
- * @param api_key 借用的只读字符串；函数不会释放该指针。
- * @param model 借用的只读字符串；函数不会释放该指针。
- * @param out_provider 输出参数；调用方传入有效指针，成功后接收结果。
- * @return CC_OK 表示成功；失败返回具体错误码，错误消息按 cc_result_t 约定释放。
+ * 将 Anthropic protocol 注入通用 HTTP provider；默认 base_url/model 可由配置覆盖。
  */
 cc_result_t cc_anthropic_provider_create(
     const char *base_url,

@@ -1,7 +1,7 @@
-# 学习导读：cclaw/tests/CMakeLists.txt
-# 所属层次：测试层。
-# 阅读重点：这里用小型 Given/When/Then 场景固定行为，阅读时重点看每个断言防止哪类回归。
-# 注释说明：如果注释与代码冲突，以代码行为和测试为准。
+
+
+
+
 function(cc_add_sdk_test test_name source_path)
     add_executable(${test_name} "${source_path}")
     target_link_libraries(${test_name} PRIVATE c_claw_runtime)
@@ -23,6 +23,13 @@ set(C_CLAW_CORE_TESTS
     test_cancel_token
     test_plugin_protocol_envelope
     test_sse_parser
+    test_runtime_stream_callback
+    test_memory_query_port
+    test_path_security
+    test_result_detail
+    test_observability_schema
+    test_observability_no_legacy_events
+    test_redaction
 )
 
 foreach(test_name IN LISTS C_CLAW_CORE_TESTS)
@@ -52,7 +59,12 @@ set(C_CLAW_ADAPTER_TESTS
     test_tool_executor_policy_approval
     test_message_envelope_serialization
     test_multimodal_content_parts
+    test_tool_schema_validation
 )
+
+if(CC_ENABLE_HTTP_TOOL)
+    list(APPEND C_CLAW_ADAPTER_TESTS test_http_allowlist)
+endif()
 
 foreach(test_name IN LISTS C_CLAW_ADAPTER_TESTS)
     cc_add_sdk_test(${test_name} "adapters/${test_name}.c")
@@ -65,3 +77,10 @@ if(CC_TARGET_PLATFORM_RESOLVED STREQUAL "posix" AND CC_ENABLE_SHELL)
     set_tests_properties(process_capture_large_output PROPERTIES
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
+
+add_test(NAME packaging_consumer_install
+    COMMAND "${CMAKE_COMMAND}"
+        "-DCCLAW_BUILD_DIR=${CMAKE_BINARY_DIR}"
+        "-DCCLAW_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DCCLAW_TEST_WORK_DIR=${CMAKE_BINARY_DIR}/packaging-consumer"
+        -P "${CMAKE_CURRENT_LIST_DIR}/packaging/test_consumer_install.cmake")

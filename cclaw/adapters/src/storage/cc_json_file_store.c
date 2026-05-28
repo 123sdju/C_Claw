@@ -1,37 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/storage/cc_json_file_store.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * @file cc_json_file_store.c
- * @brief JSON 文件会话存储适配器
- *
- * 基于单个 JSON 文件实现会话状态的持久化存储。所有数据以 JSON 对象组织，
- * 包含 sessions、messages、tool_calls、tool_results 四个顶层数组。
- *
- * 完整实现 cc_session_store_vtable 中的全部 8 个虚函数：
- *   create_session / append_message / load_messages / append_tool_call /
- *   append_tool_result / list_sessions / destroy
- *
- * 工作流程：
- *   - 每次写操作前从磁盘加载 JSON（load_store），操作后写回磁盘（save_store）
- *   - 文件不存在时自动创建带初始化结构的空 JSON 文件
- *   - append_tool_result 会写入 tool_results 数组，便于审计和恢复
- *
- * 适用场景：
- *   - 轻量级部署，不依赖数据库
- *   - 会话数据量较小（< 千条级别）
- *   - 需要直接查看/编辑存储内容的调试场景
- *
- * 安全注意：
- *   - JSON 解析/序列化由 cc_json 库处理，不受用户输入影响
- *   - 文件 I/O 路径由工厂函数固定，不接收外部拼接
- */
+
+
 
 #include "cc/ports/cc_session_store.h"
 #include "cc/ports/cc_thread.h"
@@ -49,11 +18,11 @@
 #define CC_DEFAULT_STORAGE_PATH "runtime/data/sessions.json"
 #endif
 
-/**
- * @brief JSON 文件存储的私有数据结构
+/*
+ * JSON 文件 session store 私有状态。
  *
- * @field file_path JSON 存储文件的完整路径
- * @field root      JSON 文档的根对象，包含 sessions、messages、tool_calls、tool_results 四个数组
+ * file_path 是深拷贝路径，root 是当前加载的 JSON AST，mutex 保护 load/modify/save 的完整
+ * 临界区。这个 adapter 适合桌面/嵌入式 Linux 小规模持久化，不适合高并发大数据量。
  */
 typedef struct {
     char *file_path;
@@ -61,15 +30,11 @@ typedef struct {
     cc_mutex_t mutex;
 } cc_json_file_store_t;
 
-/**
- * @brief 确保 JSON 存储文件存在
+/*
+ * 确保 JSON store 文件存在。
  *
- * 先尝试以只读模式打开文件，若成功则文件已存在，直接关闭返回 OK。
- * 若文件不存在，则创建新文件并写入初始化 JSON 结构：
- *   {"sessions":[],"messages":[],"tool_calls":[],"tool_results":[]}
- *
- * @param file_path JSON 文件路径
- * @return cc_result_t 成功返回 OK，文件创建失败返回 IO 错误
+ * 文件不存在时写入最小 schema，包含 sessions/messages/tool_calls/tool_results 四个数组。
+ * 这里不创建父目录，父目录应由 builder/filesystem 初始化阶段准备。
  */
 static cc_result_t ensure_file_exists(const char *file_path)
 {
@@ -87,15 +52,11 @@ static cc_result_t ensure_file_exists(const char *file_path)
     return cc_result_ok();
 }
 
-/**
- * @brief 从磁盘加载 JSON 存储到内存
+/*
+ * 从磁盘加载 JSON store。
  *
- * 解析 JSON 文件并将根对象存入 store->root。如果根对象无效或缺失必要的数组字段，
- * 则自动创建新对象并初始化 sessions、messages、tool_calls、tool_results 四个空数组。
- * 调用前会自动销毁旧的 root 对象以防止内存泄漏。
- *
- * @param store JSON 文件存储实例
- * @return cc_result_t 成功返回 OK，解析失败返回对应错误码
+ * 每次写操作前重新读取文件，保证进程内 root 与磁盘状态同步；如果文件内容不是对象，
+ * 会重建最小结构，避免后续 array 访问崩溃。
  */
 static cc_result_t load_store(cc_json_file_store_t *store)
 {
@@ -131,14 +92,10 @@ static cc_result_t load_store(cc_json_file_store_t *store)
     return cc_result_ok();
 }
 
-/**
- * @brief 将内存中的 JSON 存储写回磁盘
+/*
+ * 将当前 root 保存到磁盘。
  *
- * 使用 cc_json_stringify() 将根对象序列化为 JSON 文本，然后以覆盖模式写入文件。
- * root 为 NULL 时视为空存储，直接返回 OK 不做任何操作。
- *
- * @param store JSON 文件存储实例
- * @return cc_result_t 成功返回 OK，序列化失败或 I/O 错误返回对应错误码
+ * 调用方必须已经持有 mutex；函数把 JSON AST 序列化成文本后覆盖写入 file_path。
  */
 static cc_result_t save_store(cc_json_file_store_t *store)
 {
@@ -159,17 +116,11 @@ static cc_result_t save_store(cc_json_file_store_t *store)
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：创建新会话
+/*
+ * 创建 session 记录。
  *
- * 遍历 sessions 数组检查会话是否已存在（按 id 匹配），若已存在则直接返回 OK。
- * 否则创建包含 id、workspace_dir、status 三个字段的 JSON 对象并追加到 sessions 数组。
- * 操作流程：load_store → 查重/追加 → save_store
- *
- * @param self          存储实例指针
- * @param session_id    新会话的唯一标识符
- * @param workspace_dir 工作目录路径，NULL 时默认 profile workspace path
- * @return cc_result_t  成功返回 OK，I/O 或 JSON 操作失败返回相应错误码
+ * 已存在同名 session 时直接成功；新 session 会保存 workspace_dir，供后续文件工具和 UI
+ * 读取。函数持锁覆盖 load/append/save 全流程。
  */
 static cc_result_t json_file_create_session(
     void *self,
@@ -216,18 +167,11 @@ static cc_result_t json_file_create_session(
     return rc;
 }
 
-/**
- * @brief vtable 函数：追加消息到 messages 数组
+/*
+ * 追加消息到 JSON 文件。
  *
- * 将 cc_message_t 的字段映射为 JSON 对象：
- *   id → "id", session_id → "session_id", role → "role",
- *   content → "content", tool_call_id → "tool_call_id"（仅当非 NULL 时）
- *
- * 操作流程：load_store → 追加到 messages 数组 → save_store
- *
- * @param self    存储实例指针
- * @param message 要追加的消息对象
- * @return cc_result_t 成功返回 OK，失败返回相应错误码
+ * message 的 content parts 和 tool calls 先序列化为 JSON 字符串字段，保持文件 schema
+ * 简单；读取时再解析回来。调用方返回后可立即销毁原 message。
  */
 static cc_result_t json_file_append_message(
     void *self,
@@ -253,15 +197,14 @@ static cc_result_t json_file_append_message(
     cc_json_object_set(msg, "id", cc_json_create_string(message->id ? message->id : ""));
     cc_json_object_set(msg, "session_id", cc_json_create_string(message->session_id ? message->session_id : ""));
     cc_json_object_set(msg, "role", cc_json_create_string(cc_message_role_string(message->role)));
-    cc_json_object_set(msg, "content", cc_json_create_string(message->content ? message->content : ""));
-    if (message->content_parts_json) {
-        cc_json_object_set(msg, "content_parts_json",
-            cc_json_create_string(message->content_parts_json));
-    }
-    if (message->tool_calls_json) {
-        cc_json_object_set(msg, "tool_calls_json",
-            cc_json_create_string(message->tool_calls_json));
-    }
+    char *content_parts = NULL;
+    cc_content_parts_to_json(&message->content, &content_parts);
+    cc_json_object_set(msg, "content_parts", cc_json_create_string(content_parts ? content_parts : "[]"));
+    free(content_parts);
+    char *tool_calls = NULL;
+    cc_tool_call_list_to_json(&message->tool_calls, &tool_calls);
+    cc_json_object_set(msg, "tool_calls", cc_json_create_string(tool_calls ? tool_calls : "[]"));
+    free(tool_calls);
     if (message->reasoning_content) {
         cc_json_object_set(msg, "reasoning_content",
             cc_json_create_string(message->reasoning_content));
@@ -277,22 +220,11 @@ static cc_result_t json_file_append_message(
     return rc;
 }
 
-/**
- * @brief vtable 函数：加载指定会话的消息列表
+/*
+ * 从 JSON 文件加载某个 session 的消息。
  *
- * 遍历 messages 数组，筛选出 session_id 匹配的消息，并按加载顺序返回
- * （JSON 数组天然保持插入顺序，等价于 SQLite 版本的 ORDER BY created_at ASC）。
- * 受 limit 参数限制，最多返回 limit 条消息。
- *
- * 角色字符串（system/user/assistant/tool）将转换为 cc_message_role 枚举。
- * load_store 失败时不视为致命错误——返回空列表而非报错。
- *
- * @param self         存储实例指针
- * @param session_id   目标会话ID
- * @param limit        最大返回消息数
- * @param out_messages 输出参数，指向结果消息数组的指针
- * @param out_count    输出参数，实际返回的消息数量
- * @return cc_result_t 成功返回 OK
+ * 返回数组由调用方拥有，需要逐条 cc_message_cleanup 后 free。load 失败时该实现返回空
+ * 列表而不是中断 agent，这是一种“历史不可用但当前 run 继续”的降级策略。
  */
 static cc_result_t json_file_load_messages(
     void *self,
@@ -354,16 +286,23 @@ static cc_result_t json_file_load_messages(
         cc_json_value_t *v = cc_json_object_get(msg, "id");
         m->id = strdup(cc_json_string_value(v) ? cc_json_string_value(v) : "");
 
-        v = cc_json_object_get(msg, "content");
-        m->content = strdup(cc_json_string_value(v) ? cc_json_string_value(v) : "");
+        cc_content_parts_init(&m->content);
+        cc_tool_call_list_init(&m->tool_calls);
 
-        v = cc_json_object_get(msg, "content_parts_json");
+        v = cc_json_object_get(msg, "content_parts");
         const char *cpj = cc_json_string_value(v);
-        m->content_parts_json = cpj ? strdup(cpj) : NULL;
+        if (cpj) {
+            cc_content_parts_from_json(cpj, &m->content);
+        } else {
+            v = cc_json_object_get(msg, "content");
+            cc_content_parts_append_text(&m->content,
+                cc_json_string_value(v) ? cc_json_string_value(v) : "",
+                CC_CONTENT_PART_INPUT);
+        }
 
-        v = cc_json_object_get(msg, "tool_calls_json");
+        v = cc_json_object_get(msg, "tool_calls");
         const char *tcj = cc_json_string_value(v);
-        m->tool_calls_json = tcj ? strdup(tcj) : NULL;
+        if (tcj) cc_tool_call_list_from_json(tcj, &m->tool_calls);
 
         v = cc_json_object_get(msg, "reasoning_content");
         const char *reasoning = cc_json_string_value(v);
@@ -393,19 +332,11 @@ static cc_result_t json_file_load_messages(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：记录工具调用
+/*
+ * 追加 tool call 审计记录。
  *
- * 将 cc_tool_call_t 字段映射为 JSON 对象并追加到 tool_calls 数组：
- *   id → "id", session_id → "session_id", name → "name",
- *   arguments_json → "arguments_json", status 固定为 "completed"
- *
- * 操作流程：load_store → 追加到 tool_calls 数组 → save_store
- *
- * @param self       存储实例指针
- * @param session_id 关联的会话ID
- * @param call       工具调用对象
- * @return cc_result_t 成功返回 OK，失败返回相应错误码
+ * tool call 和普通 assistant message 分开持久化，便于调试 UI 直接查看工具名称、参数和
+ * 状态，不需要解析消息内容。
  */
 static cc_result_t json_file_append_tool_call(
     void *self,
@@ -442,17 +373,11 @@ static cc_result_t json_file_append_tool_call(
     return rc;
 }
 
-/**
- * @brief vtable 函数：记录工具调用结果
+/*
+ * 追加 tool result 审计记录。
  *
- * 将 cc_tool_result_t 字段映射为 JSON 对象并追加到 tool_results 数组。
- * 结果与 tool_call_id 关联，同时保留 session_id 方便直接检索和审计。
- *
- * @param self         存储实例指针
- * @param session_id   关联的会话ID
- * @param tool_call_id 关联的工具调用ID
- * @param result       工具调用结果对象
- * @return cc_result_t 成功返回 OK，失败返回相应错误码
+ * result 中的 artifacts 序列化成 JSON 字符串字段；ok/text/error/metadata 作为独立字段，
+ * 便于后续日志或调试界面按结果状态筛选。
  */
 static cc_result_t json_file_append_tool_result(
     void *self,
@@ -485,10 +410,13 @@ static cc_result_t json_file_append_tool_result(
     cc_json_object_set(tr, "session_id", cc_json_create_string(session_id ? session_id : ""));
     cc_json_object_set(tr, "tool_call_id", cc_json_create_string(tool_call_id ? tool_call_id : ""));
     cc_json_object_set(tr, "ok", cc_json_create_bool(result && result->ok));
-    cc_json_object_set(tr, "content", cc_json_create_string(result && result->content ? result->content : ""));
+    cc_json_object_set(tr, "text", cc_json_create_string(result && result->text ? result->text : ""));
     cc_json_object_set(tr, "error", cc_json_create_string(result && result->error ? result->error : ""));
-    cc_json_object_set(tr, "metadata_json", cc_json_create_string(result && result->metadata_json ? result->metadata_json : ""));
-    cc_json_object_set(tr, "artifacts_json", cc_json_create_string(result && result->artifacts_json ? result->artifacts_json : ""));
+    cc_json_object_set(tr, "metadata", cc_json_create_string(result && result->metadata ? result->metadata : ""));
+    char *artifacts = NULL;
+    if (result) cc_media_artifact_list_to_json(&result->artifacts, &artifacts);
+    cc_json_object_set(tr, "artifacts", cc_json_create_string(artifacts ? artifacts : "[]"));
+    free(artifacts);
 
     cc_json_array_append(tool_results, tr);
 
@@ -497,16 +425,11 @@ static cc_result_t json_file_append_tool_result(
     return rc;
 }
 
-/**
- * @brief vtable 函数：列出所有会话
+/*
+ * 列举 JSON 文件中的 session。
  *
- * 遍历 sessions 数组，提取每个会话的 id、workspace_dir、name 字段。
- * name 字段复用 workspace_dir 的值（JSON 文件存储格式中未显式存储 "name" 字段）。
- *
- * @param self          存储实例指针
- * @param out_sessions  输出参数，指向结果会话数组的指针
- * @param out_count     输出参数，实际返回的会话数量
- * @return cc_result_t  成功返回 OK，失败返回相应错误码
+ * 返回数组和字符串由调用方拥有。这里只还原 id/workspace/name 等基础字段，状态字段未来
+ * 可按 session schema 扩展。
  */
 static cc_result_t json_file_list_sessions(
     void *self,
@@ -561,12 +484,19 @@ static cc_result_t json_file_list_sessions(
     return cc_result_ok();
 }
 
+/*
+ * 从一个 JSON object 拷贝 string 字段到另一个 object。
+ *
+ * clear session 需要重建数组，不能把旧 root 里的节点直接移动到新数组，否则销毁旧数组时
+ * 会出现所有权混乱；因此 clone helper 都通过 create_string 新建节点。
+ */
 static void json_copy_string_field(cc_json_value_t *dst, cc_json_value_t *src, const char *key)
 {
     const char *value = cc_json_string_value(cc_json_object_get(src, key));
     if (value) cc_json_object_set(dst, key, cc_json_create_string(value));
 }
 
+/* 克隆一条 message 记录，只复制当前 JSON file schema 使用的字段。 */
 static cc_json_value_t *json_clone_message_record(cc_json_value_t *src)
 {
     cc_json_value_t *dst = cc_json_create_object();
@@ -574,14 +504,14 @@ static cc_json_value_t *json_clone_message_record(cc_json_value_t *src)
     json_copy_string_field(dst, src, "id");
     json_copy_string_field(dst, src, "session_id");
     json_copy_string_field(dst, src, "role");
-    json_copy_string_field(dst, src, "content");
-    json_copy_string_field(dst, src, "content_parts_json");
-    json_copy_string_field(dst, src, "tool_calls_json");
+    json_copy_string_field(dst, src, "content_parts");
+    json_copy_string_field(dst, src, "tool_calls");
     json_copy_string_field(dst, src, "reasoning_content");
     json_copy_string_field(dst, src, "tool_call_id");
     return dst;
 }
 
+/* 克隆一条 tool call 记录，用于 clear_session 过滤非目标会话记录。 */
 static cc_json_value_t *json_clone_tool_call_record(cc_json_value_t *src)
 {
     cc_json_value_t *dst = cc_json_create_object();
@@ -594,6 +524,7 @@ static cc_json_value_t *json_clone_tool_call_record(cc_json_value_t *src)
     return dst;
 }
 
+/* 克隆一条 tool result 记录，包括 bool ok 和字符串化 artifacts。 */
 static cc_json_value_t *json_clone_tool_result_record(cc_json_value_t *src)
 {
     cc_json_value_t *dst = cc_json_create_object();
@@ -603,13 +534,19 @@ static cc_json_value_t *json_clone_tool_result_record(cc_json_value_t *src)
     json_copy_string_field(dst, src, "tool_call_id");
     cc_json_object_set(dst, "ok",
         cc_json_create_bool(cc_json_bool_value(cc_json_object_get(src, "ok"))));
-    json_copy_string_field(dst, src, "content");
+    json_copy_string_field(dst, src, "text");
     json_copy_string_field(dst, src, "error");
-    json_copy_string_field(dst, src, "metadata_json");
-    json_copy_string_field(dst, src, "artifacts_json");
+    json_copy_string_field(dst, src, "metadata");
+    json_copy_string_field(dst, src, "artifacts");
     return dst;
 }
 
+/*
+ * 过滤某个 session 的记录数组。
+ *
+ * 函数创建一个新数组，只克隆 session_id 不匹配的记录，然后替换 root[array_key]。这种
+ * “重建数组”比原地删除 JSON 节点更简单，也更容易保证节点所有权清晰。
+ */
 static cc_result_t json_filter_session_array(
     cc_json_value_t *root,
     const char *array_key,
@@ -641,12 +578,11 @@ static cc_result_t json_filter_session_array(
     return cc_result_ok();
 }
 
-/**
- * json_file_clear_session — 清理某个 session 的历史数组。
+/*
+ * 清空某个 session 的消息和工具审计记录。
  *
- * JSON 封装层没有暴露 cJSON 的 detach/remove API，因此这里按“过滤后重建数组”
- * 的方式实现。由于 cc_json_object_set 已经具备替换语义，新的数组发布后旧数组
- * 会随 root 的字段替换被释放，避免悬挂引用和重复释放。
+ * 该操作不会删除 sessions 数组中的 session 元数据，只清除上下文历史和工具记录；适合
+ * reset 会话而保留 workspace/id。
  */
 static cc_result_t json_file_clear_session(void *self, const char *session_id)
 {
@@ -675,16 +611,15 @@ static cc_result_t json_file_clear_session(void *self, const char *session_id)
     return rc;
 }
 
-/**
- * @brief vtable 函数：销毁存储实例
+/*
+ * 销毁 JSON 文件 session store。
  *
- * 依次释放 JSON 根对象（递归销毁全部子节点）、文件路径字符串、存储结构体自身。
- *
- * @param self 存储实例指针
+ * 调用方必须保证没有并发操作仍在进行；函数释放 root/file_path/mutex 和私有对象。
  */
 static void json_file_destroy(void *self)
 {
     cc_json_file_store_t *store = (cc_json_file_store_t *)self;
+    if (!store) return;
     cc_mutex_lock(store->mutex);
     cc_json_destroy(store->root);
     free(store->file_path);
@@ -693,11 +628,7 @@ static void json_file_destroy(void *self)
     free(store);
 }
 
-/**
- * @brief JSON 文件存储的虚函数表
- *
- * 将全部 8 个 vtable 函数绑定到对应的 JSON 文件实现。
- */
+/* JSON 文件 session store vtable，把持久化实现绑定到 cc_session_store_t 端口。 */
 static cc_session_store_vtable_t json_file_vtable = {
     json_file_create_session,
     json_file_append_message,
@@ -709,21 +640,18 @@ static cc_session_store_vtable_t json_file_vtable = {
     json_file_destroy
 };
 
-/**
- * @brief 创建 JSON 文件存储实例（公共工厂函数）
+/*
+ * 创建 JSON 文件 session store。
  *
- * 执行流程：
- *   1. 分配 cc_json_file_store_t 结构体
- *   2. 保存文件路径（用户指定则复制，否则默认 profile storage path）
- *   3. 调用 ensure_file_exists 确保文件存在
- *   4. 填充 out_store 的 self 和 vtable
- *
- * @param file_path  JSON 文件路径，可为 NULL 使用默认路径
- * @param out_store  输出参数，填充创建好的存储实例
- * @return cc_result_t 成功返回 OK，失败返回相应错误码
+ * file_path 为空时使用默认路径；成功后 out_store 获得 self/vtable。该函数会确保文件
+ * 存在但不负责创建父目录，父目录创建属于平台/filesystem 初始化职责。
  */
 cc_result_t cc_json_file_store_create(const char *file_path, cc_session_store_t *out_store)
 {
+    if (!out_store) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null JSON file store output");
+    }
+    memset(out_store, 0, sizeof(*out_store));
     cc_json_file_store_t *self = calloc(1, sizeof(cc_json_file_store_t));
     if (!self) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create JSON file store");
 

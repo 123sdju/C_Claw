@@ -1,34 +1,6 @@
-/**
- * 学习导读：cclaw/adapters/src/storage/cc_sqlite_session_store.c
- *
- * 所属层次：适配器层。
- * 阅读重点：这里把端口接口落到具体后端，阅读时重点看协议转换、资源释放和失败降级。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * @file cc_sqlite_session_store.c
- * @brief SQLite 会话存储适配器
- *
- * 基于 SQLite3 实现会话状态持久化存储。使用参数化查询防止 SQL 注入，
- * 默认启用 WAL（Write-Ahead Logging）模式以提高并发读写性能。
- *
- * 数据库包含四张表：
- *   - sessions：会话元信息（ID、工作目录、模型、状态等）
- *   - messages：对话消息记录（关联会话、角色、内容、工具调用ID）
- *   - tool_calls：工具调用记录（名称、参数JSON、状态、时间戳）
- *   - tool_results：工具调用结果（成功标志、内容、错误信息、元数据JSON）
- *
- * 完整实现 cc_session_store_vtable 中的全部 8 个虚函数：
- *   create_session / append_message / load_messages / append_tool_call /
- *   append_tool_result / list_sessions / destroy
- *
- * 安全注意：
- *   - 所有 SQL 操作均使用 sqlite3_prepare_v2 + sqlite3_bind_* 参数化查询
- *   - 从不拼接用户输入到 SQL 字符串中
- *   - 数据库文件路径由 build_db_path() 统一构建
- */
+
+
 
 #include "cc/ports/cc_session_store.h"
 #include "cc/ports/cc_thread.h"
@@ -46,11 +18,11 @@
 #define CC_DEFAULT_WORKSPACE_PATH "runtime/workspace"
 #endif
 
-/**
- * @brief SQLite 会话存储的私有数据结构
+/*
+ * SQLite session store 私有状态。
  *
- * @field db        打开的 SQLite3 数据库句柄，由 sqlite3_open_v2 创建
- * @field use_wal   是否启用 WAL 日志模式（1=WAL, 0=传统回滚日志）
+ * db 是 sqlite3 连接，mutex 在 SDK 层串行化访问，use_wal 记录预期 journaling 策略。
+ * 即使 SQLite 以 FULLMUTEX 打开，外层 mutex 仍让 vtable 操作的事务边界更容易推理。
  */
 typedef struct {
     sqlite3 *db;
@@ -58,13 +30,10 @@ typedef struct {
     cc_mutex_t mutex;
 } cc_sqlite_session_store_t;
 
-/**
- * @brief 获取当前 UTC 时间的 ISO 8601 格式字符串
+/*
+ * 生成 ISO-like 当前时间字符串。
  *
- * 内部使用 localtime_r（POSIX）或 localtime_s（Windows）获取线程安全的本地时间，
- * 并以 "%Y-%m-%dT%H:%M:%S" 格式输出。结果通过 strdup 分配，调用者负责释放。
- *
- * @return 堆上新分配的 ISO 8601 时间字符串，调用者须用 free() 释放；失败返回 NULL
+ * 返回值由调用方 free；使用 localtime_r/localtime_s 避免静态 tm 缓冲导致的线程安全问题。
  */
 static char *now_string(void)
 {
@@ -82,36 +51,17 @@ static char *now_string(void)
     return strdup(buf);
 }
 
-/**
- * @brief 构建 SQLite 数据库文件的完整路径
- *
- * 如果 db_path 为 NULL，则使用当前工作目录下的 "data/c-claw.db" 作为默认路径。
- * 跨平台处理 Windows（反斜杠分隔符）和 Unix/Linux（正斜杠分隔符）路径。
- *
- * @param db_path 用户指定的数据库路径，可为 NULL 以使用默认路径
- * @return 堆上新分配的路径字符串，调用者须用 free() 释放
- */
+/* 解析数据库路径；传入 NULL 时使用 SDK 默认 SQLite 路径。返回字符串由调用方释放。 */
 static char *build_db_path(const char *db_path)
 {
     return strdup(db_path ? db_path : CC_DEFAULT_STORAGE_PATH);
 }
 
-/**
- * @brief 设置 SQLite 数据库性能与安全相关的编译指示（PRAGMA）
+/*
+ * 设置 SQLite pragma。
  *
- * 依次设置以下编译指示：
- *   - journal_mode=WAL：默认启用 Write-Ahead Logging，提高并发读写性能
- *   - foreign_keys=ON：启用外键约束检查，确保数据引用完整性
- *   - busy_timeout=5000：当数据库被锁时等待 5 秒再报错，而非立即失败
- *   - synchronous=NORMAL：在 WAL 模式下平衡安全性与写入性能
- *   - cache_size=-8000：分配约 8MB 的页面缓存（负值表示 KB 为单位）
- *
- * 如果 use_wal 为 0（调用者要求不使用 WAL），则在末尾将 journal_mode 回退为 DELETE。
- *
- * 安全注意：PRAGMA 命令不接收用户输入，均为硬编码的安全配置值。
- *
- * @param db      已打开的 SQLite3 数据库句柄
- * @param use_wal 是否启用 WAL 模式（非零启用，零禁用）
+ * WAL 提升并发读写体验，foreign_keys 保证 tool_results/tool_calls 关联，busy_timeout 避免
+ * 短暂锁竞争直接失败。use_wal 为假时回退 DELETE journal，适配不支持 WAL 的文件系统。
  */
 static void setup_pragmas(sqlite3 *db, int use_wal)
 {
@@ -125,19 +75,11 @@ static void setup_pragmas(sqlite3 *db, int use_wal)
     }
 }
 
-/**
- * @brief 数据库初始化 SQL 脚本
+/*
+ * SQLite 初始化 SQL。
  *
- * 创建四张核心表和三条索引：
- *   - sessions：会话表，以 id 为主键，存储名称、工作目录、模型、状态和时间戳
- *   - messages：消息表，关联 session_id 外键，存储角色、内容、工具调用ID和时间戳
- *   - tool_calls：工具调用表，关联 session_id 外键，存储名称、参数JSON、状态和时间戳
- *   - tool_results：工具结果表，关联 tool_call_id 外键，存储成功标志、内容、错误和元数据
- *
- * 索引：
- *   - idx_messages_session：按会话+时间排序加速消息查询
- *   - idx_tool_calls_session：按会话+时间排序加速工具调用查询
- *   - idx_tool_results_tool_call：按工具调用ID加速结果查找
+ * session/message/tool_call/tool_result 分表存储，messages 同时保存 text summary 和
+ * content_parts/tool_calls JSON，兼顾旧文本上下文和多模态/工具调用恢复。
  */
 static const char *init_sql =
     "CREATE TABLE IF NOT EXISTS sessions ("
@@ -153,9 +95,9 @@ static const char *init_sql =
     "  id TEXT PRIMARY KEY,"
     "  session_id TEXT NOT NULL,"
     "  role TEXT NOT NULL,"
-    "  content TEXT,"
-    "  content_parts_json TEXT,"
-    "  tool_calls_json TEXT,"
+    "  text TEXT,"
+    "  content_parts TEXT,"
+    "  tool_calls TEXT,"
     "  reasoning_content TEXT,"
     "  tool_call_id TEXT,"
     "  created_at TEXT,"
@@ -175,10 +117,10 @@ static const char *init_sql =
     "  id TEXT PRIMARY KEY,"
     "  tool_call_id TEXT NOT NULL,"
     "  ok INTEGER,"
-    "  content TEXT,"
+    "  text TEXT,"
     "  error TEXT,"
-    "  metadata_json TEXT,"
-    "  artifacts_json TEXT,"
+    "  metadata TEXT,"
+    "  artifacts TEXT,"
     "  created_at TEXT,"
     "  FOREIGN KEY(tool_call_id) REFERENCES tool_calls(id)"
     ");"
@@ -186,6 +128,11 @@ static const char *init_sql =
     "CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, created_at);"
     "CREATE INDEX IF NOT EXISTS idx_tool_results_tool_call ON tool_results(tool_call_id);";
 
+/*
+ * 执行兼容性 ALTER。
+ *
+ * 已存在列会被视为成功，便于旧数据库重复启动。其它 SQLite 错误映射为 CC_ERR_STORAGE。
+ */
 static cc_result_t sqlite_exec_compatible_alter(sqlite3 *db, const char *sql)
 {
     char *errmsg = NULL;
@@ -203,30 +150,26 @@ static cc_result_t sqlite_exec_compatible_alter(sqlite3 *db, const char *sql)
     return result;
 }
 
+/*
+ * 运行轻量 schema 迁移。
+ *
+ * 只做向后兼容新增列，不做破坏性迁移；这符合 SDK adapter 的保守边界，复杂迁移应由
+ * 下游产品数据库版本管理负责。
+ */
 static cc_result_t sqlite_run_compat_migrations(sqlite3 *db)
 {
     cc_result_t rc = sqlite_exec_compatible_alter(
-        db, "ALTER TABLE messages ADD COLUMN content_parts_json TEXT");
+        db, "ALTER TABLE messages ADD COLUMN content_parts TEXT");
     if (rc.code != CC_OK) return rc;
     return sqlite_exec_compatible_alter(
-        db, "ALTER TABLE tool_results ADD COLUMN artifacts_json TEXT");
+        db, "ALTER TABLE tool_results ADD COLUMN artifacts TEXT");
 }
 
-/**
- * @brief vtable 函数：创建新会话
+/*
+ * 创建或确保 session 存在。
  *
- * 使用 INSERT OR IGNORE 语义——如果 session_id 已存在则静默跳过，不会报错。
- * SQL 语句：
- *   INSERT OR IGNORE INTO sessions (id, workspace_dir, status, created_at, updated_at)
- *   VALUES (?1, ?2, 'active', ?3, ?3)
- * 新会话默认 status='active'，created_at 和 updated_at 均设为当前时间。
- *
- * 安全注意：全部使用 sqlite3_bind_text 参数绑定，不存在 SQL 注入风险。
- *
- * @param self          存储实例指针
- * @param session_id    新会话的唯一标识符
- * @param workspace_dir 工作目录路径，如果为 NULL 则使用 profile workspace path
- * @return cc_result_t  成功返回 OK，失败返回含错误信息的 STORAGE 错误
+ * 使用 INSERT OR IGNORE 保证重复 create_session 幂等；workspace_dir 会持久化，后续文件
+ * 工具和 UI 可从 session 元数据恢复工作区边界。
  */
 static cc_result_t sqlite_create_session(
     void *self,
@@ -268,20 +211,11 @@ static cc_result_t sqlite_create_session(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：追加消息到指定会话
+/*
+ * 追加消息记录。
  *
- * SQL 语句：
- *   INSERT INTO messages (id, session_id, role, content, tool_call_id, created_at)
- *   VALUES (?1, ?2, ?3, ?4, ?5, ?6)
- * 消息角色通过 cc_message_role_string() 转换为字符串存储，
- * tool_call_id 为可选字段（例如普通 user/assistant 消息可为空字符串）。
- *
- * 安全注意：所有字段均使用参数绑定；strdup 分配的 now 字符串在函数结束时释放。
- *
- * @param self    存储实例指针
- * @param message 要追加的消息对象，包含 id、session_id、role、content、tool_call_id
- * @return cc_result_t 成功返回 OK，失败返回 STORAGE 错误
+ * 消息文本摘要、content_parts JSON、tool_calls JSON 同时写入，既兼容简单文本上下文，也
+ * 支持多模态和工具调用历史恢复。所有 sqlite3_bind 使用 TRANSIENT/STATIC 按变量生命期选择。
  */
 static cc_result_t sqlite_append_message(
     void *self,
@@ -294,7 +228,7 @@ static cc_result_t sqlite_append_message(
 
     cc_mutex_lock(store->mutex);
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "INSERT INTO messages (id, session_id, role, content, content_parts_json, tool_calls_json, reasoning_content, tool_call_id, created_at) "
+    const char *sql = "INSERT INTO messages (id, session_id, role, text, content_parts, tool_calls, reasoning_content, tool_call_id, created_at) "
                       "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
     int rc = sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -307,14 +241,23 @@ static cc_result_t sqlite_append_message(
     sqlite3_bind_text(stmt, 1, message->id ? message->id : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, message->session_id ? message->session_id : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, role_str, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, message->content ? message->content : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, message->content_parts_json ? message->content_parts_json : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 6, message->tool_calls_json ? message->tool_calls_json : "", -1, SQLITE_STATIC);
+    char *summary = NULL;
+    cc_message_get_text_summary(message, &summary);
+    char *content_parts = NULL;
+    cc_content_parts_to_json(&message->content, &content_parts);
+    char *tool_calls = NULL;
+    cc_tool_call_list_to_json(&message->tool_calls, &tool_calls);
+    sqlite3_bind_text(stmt, 4, summary ? summary : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, content_parts ? content_parts : "[]", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, tool_calls ? tool_calls : "[]", -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 7, message->reasoning_content ? message->reasoning_content : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 8, message->tool_call_id ? message->tool_call_id : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 9, now, -1, SQLITE_STATIC);
 
     rc = sqlite3_step(stmt);
+    free(summary);
+    free(content_parts);
+    free(tool_calls);
     sqlite3_finalize(stmt);
     free(now);
 
@@ -327,15 +270,11 @@ static cc_result_t sqlite_append_message(
     return cc_result_ok();
 }
 
-/**
- * @brief 安全的 realloc 封装
+/*
+ * 安全 realloc helper。
  *
- * 当 realloc 失败返回 NULL 时不会丢失原始指针，而是保持原指针不变。
- * 调用者需要通过检查返回值是否等于原指针来判断扩容是否失败。
- *
- * @param ptr      原始内存指针
- * @param new_size 新的内存块大小（字节）
- * @return 新分配的内存指针（成功），或原指针（扩容失败时保持原状）
+ * realloc 失败时返回原指针，调用方通过“返回值仍等于原指针”判断失败并清理旧数组，避免
+ * 直接覆盖指针造成内存泄漏。
  */
 static void *safe_realloc(void *ptr, size_t new_size)
 {
@@ -343,24 +282,11 @@ static void *safe_realloc(void *ptr, size_t new_size)
     return new_ptr ? new_ptr : ptr;
 }
 
-/**
- * @brief vtable 函数：加载指定会话的消息列表
+/*
+ * 加载指定 session 的消息。
  *
- * SQL 语句：
- *   SELECT id, session_id, role, content, tool_call_id, created_at
- *   FROM messages WHERE session_id = ?1
- *   ORDER BY created_at ASC LIMIT ?2
- * 按创建时间升序排列，保证消息的时间顺序正确。limit 参数控制最大返回条数。
- *
- * 角色字符串（system/user/assistant/tool）将转换为 cc_message_role 枚举。
- * 使用动态数组扩容策略：初始容量 16，每次翻倍，直到读完所有结果或达到 limit。
- *
- * @param self         存储实例指针
- * @param session_id   目标会话ID
- * @param limit        最大返回消息数
- * @param out_messages 输出参数，指向结果消息数组的指针
- * @param out_count    输出参数，实际返回的消息数量
- * @return cc_result_t 成功返回 OK，失败（数据库错误/内存不足）返回相应错误码
+ * 返回数组由调用方拥有，需要逐条 cc_message_cleanup 后 free。结果按 created_at 升序，
+ * 用于 context builder 恢复历史上下文。
  */
 static cc_result_t sqlite_load_messages(
     void *self,
@@ -374,7 +300,7 @@ static cc_result_t sqlite_load_messages(
 
     cc_mutex_lock(store->mutex);
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "SELECT id, session_id, role, content, content_parts_json, tool_calls_json, reasoning_content, tool_call_id, created_at "
+    const char *sql = "SELECT id, session_id, role, text, content_parts, tool_calls, reasoning_content, tool_call_id, created_at "
                       "FROM messages WHERE session_id = ?1 "
                       "ORDER BY created_at ASC LIMIT ?2";
     int rc = sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL);
@@ -426,9 +352,16 @@ static cc_result_t sqlite_load_messages(
 
         msg->id = id ? strdup(id) : NULL;
         msg->session_id = sid ? strdup(sid) : NULL;
-        msg->content = content ? strdup(content) : NULL;
-        msg->content_parts_json = (cpj && cpj[0]) ? strdup(cpj) : NULL;
-        msg->tool_calls_json = (tcj && tcj[0]) ? strdup(tcj) : NULL;
+        cc_content_parts_init(&msg->content);
+        cc_tool_call_list_init(&msg->tool_calls);
+        if (cpj && cpj[0]) {
+            cc_content_parts_from_json(cpj, &msg->content);
+        } else {
+            cc_content_parts_append_text(&msg->content, content ? content : "", CC_CONTENT_PART_INPUT);
+        }
+        if (tcj && tcj[0]) {
+            cc_tool_call_list_from_json(tcj, &msg->tool_calls);
+        }
         msg->reasoning_content = (reasoning && reasoning[0]) ? strdup(reasoning) : NULL;
         msg->tool_call_id = (tci && tci[0]) ? strdup(tci) : NULL;
 
@@ -449,21 +382,10 @@ static cc_result_t sqlite_load_messages(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：记录工具调用
+/*
+ * 追加 tool call 记录。
  *
- * SQL 语句：
- *   INSERT INTO tool_calls (id, session_id, name, arguments_json, status, created_at)
- *   VALUES (?1, ?2, ?3, ?4, 'completed', ?5)
- * 工具调用默认 status='completed'，arguments_json 存储工具参数的 JSON 字符串。
- *
- * 安全注意：arguments_json 虽然来源于 AI 模型的输出，但通过参数绑定存储，
- * 不会参与 SQL 解析，不存在二阶注入风险。
- *
- * @param self       存储实例指针
- * @param session_id 关联的会话ID
- * @param call       工具调用对象，包含 id、name、arguments_json
- * @return cc_result_t 成功返回 OK，失败返回 STORAGE 错误
+ * tool call 与普通 message 分表保存，便于审计和调试界面展示模型请求过哪些工具及参数。
  */
 static cc_result_t sqlite_append_tool_call(
     void *self,
@@ -505,24 +427,11 @@ static cc_result_t sqlite_append_tool_call(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：记录工具调用结果
+/*
+ * 追加 tool result 记录。
  *
- * SQL 语句：
- *   INSERT INTO tool_results (id, tool_call_id, ok, content, error, metadata_json, created_at)
- *   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
- * ok 字段为布尔值（1/0），表示工具调用是否成功。
- * content 存储成功时的输出内容，error 存储失败时的错误信息，两者互斥。
- * metadata_json 存储附加的元数据（如执行耗时、资源使用等）。
- *
- * 安全注意：id 直接使用 tool_call_id 作为主键，content/error/metadata_json 全部参数绑定。
- * session_id 参数在 SQLite 实现中未使用（通过 tool_call_id 关联即可溯源会话）。
- *
- * @param self         存储实例指针
- * @param session_id   关联的会话ID（当前实现中未直接使用）
- * @param tool_call_id 关联的工具调用ID，同时作为结果的主键
- * @param result       工具调用结果对象，包含 ok、content、error、metadata_json
- * @return cc_result_t 成功返回 OK，失败返回 STORAGE 错误
+ * result 的 artifact list 序列化成 JSON 字符串保存，避免数据库 schema 需要为多模态资源
+ * 单独建多张表；更复杂的资源生命周期可由 artifact store 承担。
  */
 static cc_result_t sqlite_append_tool_result(
     void *self,
@@ -537,7 +446,7 @@ static cc_result_t sqlite_append_tool_result(
 
     cc_mutex_lock(store->mutex);
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "INSERT INTO tool_results (id, tool_call_id, ok, content, error, metadata_json, artifacts_json, created_at) "
+    const char *sql = "INSERT INTO tool_results (id, tool_call_id, ok, text, error, metadata, artifacts, created_at) "
                       "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
     int rc = sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -550,13 +459,16 @@ static cc_result_t sqlite_append_tool_result(
     sqlite3_bind_text(stmt, 1, tool_call_id, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, tool_call_id, -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 3, result->ok ? 1 : 0);
-    sqlite3_bind_text(stmt, 4, result->content ? result->content : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, result->text ? result->text : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 5, result->error ? result->error : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 6, result->metadata_json ? result->metadata_json : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 7, result->artifacts_json ? result->artifacts_json : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, result->metadata ? result->metadata : "", -1, SQLITE_STATIC);
+    char *artifacts = NULL;
+    cc_media_artifact_list_to_json(&result->artifacts, &artifacts);
+    sqlite3_bind_text(stmt, 7, artifacts ? artifacts : "[]", -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 8, now, -1, SQLITE_STATIC);
 
     rc = sqlite3_step(stmt);
+    free(artifacts);
     sqlite3_finalize(stmt);
     free(now);
 
@@ -569,21 +481,10 @@ static cc_result_t sqlite_append_tool_result(
     return cc_result_ok();
 }
 
-/**
- * @brief vtable 函数：列出所有会话
+/*
+ * 列举所有 session。
  *
- * SQL 语句：
- *   SELECT id, name, workspace_dir, model, status, created_at, updated_at
- *   FROM sessions ORDER BY updated_at DESC
- * 按更新时间降序排列，最近活跃的会话排在最前面。
- *
- * 返回值仅包含 id、name、workspace_dir、model 四个字段，
- * status/created_at/updated_at 等时间戳字段在结果中未使用（调用者可通过其他接口获取）。
- *
- * @param self          存储实例指针
- * @param out_sessions  输出参数，指向结果会话数组的指针
- * @param out_count     输出参数，实际返回的会话数量
- * @return cc_result_t  成功返回 OK，失败返回相应错误码
+ * 返回数组由调用方拥有。查询按 updated_at 倒序，便于 UI 展示最近会话。
  */
 static cc_result_t sqlite_list_sessions(
     void *self,
@@ -656,6 +557,12 @@ static cc_result_t sqlite_list_sessions(
     return cc_result_ok();
 }
 
+/*
+ * 执行带 session_id 参数的删除语句。
+ *
+ * clear_session 在事务中按依赖顺序删除 tool_results/tool_calls/messages；这个 helper
+ * 统一 prepared statement 和错误映射。
+ */
 static cc_result_t sqlite_exec_bound_delete(
     cc_sqlite_session_store_t *store,
     const char *sql,
@@ -676,12 +583,11 @@ static cc_result_t sqlite_exec_bound_delete(
     return cc_result_ok();
 }
 
-/**
- * sqlite_clear_session — 删除 session 的消息和工具审计历史，保留 sessions 行。
+/*
+ * 清空某个 session 的上下文历史和工具审计记录。
  *
- * 删除顺序很重要：tool_results 通过 tool_call_id 关联 tool_calls，所以先根据
- * 当前 session 的 tool_calls 子查询删结果，再删 tool_calls，最后删 messages。
- * 整个过程放在一个事务里，避免 reset 到一半时留下不一致的审计记录。
+ * 使用 BEGIN IMMEDIATE 获得写事务；任何一步失败都会 ROLLBACK，避免 messages 和 tool
+ * 记录出现半清理状态。session 元数据本身保留。
  */
 static cc_result_t sqlite_clear_session(void *self, const char *session_id)
 {
@@ -722,17 +628,16 @@ static cc_result_t sqlite_clear_session(void *self, const char *session_id)
     return rc;
 }
 
-/**
- * @brief vtable 函数：销毁存储实例，释放所有资源
+/*
+ * 销毁 SQLite session store。
  *
- * 在关闭数据库连接前，先执行 PRAGMA optimize 以优化数据库文件布局，
- * 然后调用 sqlite3_close() 安全关闭连接。最后释放存储结构体自身。
- *
- * @param self 存储实例指针（将调用 free 释放）
+ * 关闭前执行 optimize；调用方必须保证没有并发操作仍在使用该 store。mutex 销毁前后顺序
+ * 保证 sqlite3_close 不和其它 vtable 操作交错。
  */
 static void sqlite_destroy(void *self)
 {
     cc_sqlite_session_store_t *store = (cc_sqlite_session_store_t *)self;
+    if (!store) return;
     cc_mutex_lock(store->mutex);
     if (store->db) {
         sqlite3_exec(store->db, "PRAGMA analysis_limit=0", NULL, NULL, NULL);
@@ -744,18 +649,7 @@ static void sqlite_destroy(void *self)
     free(store);
 }
 
-/**
- * @brief SQLite 会话存储的虚函数表
- *
- * 将全部 8 个 vtable 函数绑定到对应的 SQLite 实现：
- *   create_session → sqlite_create_session
- *   append_message → sqlite_append_message
- *   load_messages  → sqlite_load_messages
- *   append_tool_call → sqlite_append_tool_call
- *   append_tool_result → sqlite_append_tool_result
- *   list_sessions  → sqlite_list_sessions
- *   destroy        → sqlite_destroy
- */
+/* SQLite session store vtable，将数据库实现绑定到 cc_session_store_t 端口。 */
 static cc_session_store_vtable_t sqlite_vtable = {
     sqlite_create_session,
     sqlite_append_message,
@@ -767,27 +661,18 @@ static cc_session_store_vtable_t sqlite_vtable = {
     sqlite_destroy
 };
 
-/**
- * @brief 创建 SQLite 会话存储实例（公共工厂函数）
+/*
+ * 创建 SQLite session store。
  *
- * 执行流程：
- *   1. 分配 cc_sqlite_session_store_t 结构体
- *   2. 解析数据库文件路径（调用 build_db_path）
- *   3. 以读写+创建+完整互斥模式打开数据库（SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX）
- *   4. 设置 PRAGMA（WAL、外键、超时、同步模式、缓存）
- *   5. 执行 init_sql 建表脚本
- *   6. 填充输出参数 out_store 的 self 和 vtable
- *
- * 安全注意：
- *   - 使用 SQLITE_OPEN_FULLMUTEX 确保多线程安全
- *   - 任何步骤失败都会正确清理已分配的资源（close db + free self）
- *
- * @param db_path   数据库文件路径，可为 NULL 使用默认路径
- * @param out_store 输出参数，填充创建好的存储实例
- * @return cc_result_t 成功返回 OK，失败返回相应错误码
+ * 成功后 out_store 获得 self/vtable；函数负责打开数据库、设置 pragma、初始化 schema 和
+ * 运行兼容迁移。db_path 为空时使用默认路径，父目录仍应由 builder/filesystem 层创建。
  */
 cc_result_t cc_sqlite_session_store_create(const char *db_path, cc_session_store_t *out_store)
 {
+    if (!out_store) {
+        return cc_result_error(CC_ERR_INVALID_ARGUMENT, "Null SQLite session store output");
+    }
+    memset(out_store, 0, sizeof(*out_store));
     cc_sqlite_session_store_t *self = calloc(1, sizeof(cc_sqlite_session_store_t));
     if (!self) return cc_result_error(CC_ERR_OUT_OF_MEMORY, "Failed to create SQLite store");
 

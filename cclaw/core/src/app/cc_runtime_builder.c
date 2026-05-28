@@ -1,12 +1,4 @@
-/**
- * 学习导读：cclaw/core/src/app/cc_runtime_builder.c
- *
- * 所属层次：核心层。
- * 阅读重点：这里是 runtime 的组合根，重点看依赖注入、工具注册、snapshot 发布、
- *           diagnostics 收集，以及失败路径如何释放已创建资源。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
+
 
 #include "cc/app/cc_runtime_builder.h"
 #include "cc/app/cc_skill_catalog.h"
@@ -21,50 +13,55 @@
 #include <stdio.h>
 #include <string.h>
 
-/**
- * cc_runtime_builder — runtime 组合根，持有构建过程中创建且需要统一销毁的资源。
+/*
+ * Runtime builder 是应用层装配器。
  *
- * builder 是 main.c 与核心运行时之间的资源容器。除了 features 是借用的静态表，
- * 其他字段都是 builder 在创建流程中获得并在 destroy 中释放或转交释放的资源。
+ * 它拥有 logger/event_bus/provider/store/tool registry 等长期对象，真正的
+ * cc_agent_runtime_t 只借用这些端口视图。这个分层是 C 语言里的依赖注入模式：
+ * core runtime 不知道具体实现，只依赖 vtable；builder 负责选择 feature set 中的
+ * adapter/factory，并在销毁时按反向顺序释放资源。
+ *
+ * retired_* 数组用于热重载：新 registry 生效后，旧 generation 仍可能被正在执行的 run
+ * 引用，因此先放入退休列表，到 builder destroy 时统一释放，避免悬空指针。
  */
 struct cc_runtime_builder {
-    /** 借用的应用能力表；生命周期由具体应用的静态存储保证。 */
+
     const cc_runtime_feature_set_t *features;
-    /** builder 拥有的日志器，用于启动/关闭和 runtime 诊断。 */
+
     cc_logger_t *logger;
-    /** builder 拥有的事件总线，runtime 和 gateway 通过它发布/订阅流式事件。 */
+
     cc_event_bus_t *event_bus;
-    /** 默认文件系统端口；底层 self 由 builder destroy 调用 vtable->destroy。 */
+
     cc_filesystem_t fs;
-    /** 会话存储端口；由 feature 工厂创建，builder 负责销毁底层 self。 */
+
     cc_session_store_t store;
-    /** LLM provider 端口；由 provider 工厂创建，builder 负责销毁底层 self。 */
+
     cc_llm_provider_t llm;
-    /** 工具策略引擎端口；由 feature 工厂创建，builder 负责销毁底层 self。 */
+
     cc_policy_engine_t policy;
-    /** 可选长期记忆存储；self 为空表示当前 profile 未启用或创建失败后降级。 */
+
     cc_memory_store_t memory_store;
-    /** 可选 sandbox；由 feature 工厂创建，builder 负责销毁底层 self。 */
+
     cc_sandbox_t sandbox;
-    /** builder 拥有的工具注册表；工具成功注册后由 registry 接管。 */
+
     cc_tool_registry_t *tool_registry;
-    /** builder 拥有的工具并发池；runtime 只借用该指针执行 acquire/release。 */
+
     cc_tool_executor_pool_t *tool_pool;
-    /** 可选 run queue；启用多 Agent 时由 manager 借用，builder 负责销毁。 */
+
     cc_run_queue_t *run_queue;
-    /** 可选多 Agent manager；gateway 可从这里进入，避免绕过 session 串行策略。 */
+
     cc_agent_manager_t *agent_manager;
-    /** 可选 skill catalog；由 builder 拥有，system prompt 已持有注入后的快照文本。 */
+
     cc_skill_catalog_t *skill_catalog;
-    /** builder 拥有的 Agent runtime；销毁时先释放 runtime，再释放其借用依赖。 */
+
     cc_agent_runtime_t *runtime;
-    /** 为 runtime 构造出的系统提示词副本；runtime 创建时会再深拷贝。 */
+
     char *system_prompt;
-    /** 插件加载器返回的不透明状态；由 features->destroy_plugins 释放。 */
+
     void *plugin_state;
-    /** MCP 加载器返回的不透明状态；由 features->destroy_mcp 释放。 */
+
     void *mcp_state;
-    /** 最近一次启动/reload 的非致命 tool/plugin/MCP 诊断。 */
+
     cc_runtime_diagnostics_t diagnostics;
     cc_tool_registry_t **retired_registries;
     void **retired_plugin_states;
@@ -76,6 +73,7 @@ struct cc_runtime_builder {
     unsigned long reload_generation;
 };
 
+/* 初始化 reload report，generation 默认保持不变，后续成功或失败路径再填具体状态。 */
 static void reload_report_init(
     cc_runtime_reload_report_t *report,
     unsigned long generation
@@ -88,6 +86,12 @@ static void reload_report_init(
     cc_runtime_diagnostics_reset(&report->diagnostics);
 }
 
+/*
+ * 记录 reload 失败的组件名和错误信息。
+ *
+ * 这里不接管 rc 的所有权，只复制可读 message 到固定缓冲，方便上层在 rc 释放后仍能
+ * 查看失败阶段。固定缓冲也避免嵌入式环境里 reload report 额外分配内存。
+ */
 static void reload_report_fail(
     cc_runtime_reload_report_t *report,
     const char *component,
@@ -102,16 +106,11 @@ static void reload_report_fail(
         "%s", (rc && rc->message) ? rc->message : "Runtime reload failed");
 }
 
-/**
- * config_tool_enabled — 判断某个内建工具是否被配置允许注册。
+/*
+ * 判断配置是否启用某个内置工具。
  *
- * enabled_tools 为空时表示“注册当前 profile 中所有编译进来的工具”；否则工具
- * name 或 alias 任一命中即可注册。函数只读取配置，不保存字符串。
- *
- * @param config 借用的只读配置；可为 NULL，此时按全部启用处理。
- * @param name 工具正式名借用字符串；可为 NULL。
- * @param alias 工具别名借用字符串；可为 NULL。
- * @return 1 表示允许注册，0 表示被 enabled_tools 过滤掉。
+ * enabled_tools 为空表示“默认全开”；同时支持工具正式 name 和兼容 alias，便于配置文件
+ * 使用更短的命名。这个 helper 不拥有任何字符串，只做只读匹配。
  */
 static int config_tool_enabled(const cc_config_t *config, const char *name, const char *alias)
 {
@@ -125,13 +124,11 @@ static int config_tool_enabled(const cc_config_t *config, const char *name, cons
     return 0;
 }
 
-/**
- * destroy_tool_if_unowned — 清理尚未转交给 registry 的临时工具对象。
+/*
+ * 销毁尚未交给 registry 持有的 tool。
  *
- * 工具工厂创建的 cc_tool_t 在 registry_add 成功前仍由 builder 负责。注册失败
- * 或中途错误时调用该函数，避免 tool.self 泄漏；清理后把结构体清零，防止重复释放。
- *
- * @param tool 临时工具对象；NULL 时函数直接返回。
+ * 工具创建后如果注册失败，registry 不会接管 self；此时必须调用 tool vtable destroy。
+ * 注册成功后 register_created_tool 会清空结构，避免重复销毁。
  */
 static void destroy_tool_if_unowned(cc_tool_t *tool)
 {
@@ -141,15 +138,11 @@ static void destroy_tool_if_unowned(cc_tool_t *tool)
     if (tool) memset(tool, 0, sizeof(*tool));
 }
 
-/**
- * register_created_tool — 将刚创建的工具交给工具注册表接管。
+/*
+ * 将 factory 创建出的工具加入 registry。
  *
- * cc_tool_registry_add 按值接收 tool；成功后 registry 拥有底层 self，临时 tool
- * 必须清零以免 builder 的错误路径再次销毁。失败时仍由本函数销毁临时工具。
- *
- * @param registry 借用的工具注册表；必须已创建且尚未 freeze。
- * @param tool 工具工厂输出的临时工具对象；成功或失败后都会被清零。
- * @return CC_OK 表示注册成功；失败返回 registry_add 的错误码。
+ * 成功后 registry 深拷贝/接管 tool 端口语义，当前栈上 tool 被清零；失败时销毁未转交的
+ * tool self，保证错误路径不泄漏 adapter 私有状态。
  */
 static cc_result_t register_created_tool(cc_tool_registry_t *registry, cc_tool_t *tool)
 {
@@ -162,13 +155,11 @@ static cc_result_t register_created_tool(cc_tool_registry_t *registry, cc_tool_t
     return cc_result_ok();
 }
 
-/**
- * destroy_sandbox_if_owned — 释放 builder 持有的 sandbox 端口实现。
+/*
+ * 销毁 builder 持有的 sandbox 端口。
  *
- * sandbox 是值类型端口，是否真的拥有资源由 vtable/self 决定。销毁后清零，
- * 这样失败路径和正常 destroy 共享代码时不会重复释放。
- *
- * @param sandbox builder 字段地址；NULL 时函数直接返回。
+ * sandbox 是可选能力，只有 self/vtable/destroy 同时存在才调用；随后清零，避免 destroy
+ * 阶段因为多个失败路径重复释放。
  */
 static void destroy_sandbox_if_owned(cc_sandbox_t *sandbox)
 {
@@ -178,16 +169,11 @@ static void destroy_sandbox_if_owned(cc_sandbox_t *sandbox)
     if (sandbox) memset(sandbox, 0, sizeof(*sandbox));
 }
 
-/**
- * create_llm — 按 config.provider 从 feature set 中选择并创建 LLM provider。
+/*
+ * 根据配置 provider 名称从 feature set 创建 LLM provider。
  *
- * features 中的 provider 描述符可能因为编译期开关被标记为未启用。只有名称匹配、
- * compiled 为真且 create 回调存在时才会调用工厂；找不到时返回 INVALID_ARGUMENT。
- *
- * @param config 借用的只读配置；读取 provider 选择和 provider 私有参数。
- * @param features 借用的静态能力表；必须包含 provider 描述符数组。
- * @param out_llm 输出参数；成功时获得 provider 端口值，失败时保持清零。
- * @return CC_OK 表示 provider 创建成功；否则返回 unknown/disabled provider 错误。
+ * 这是典型工厂模式：核心只认识 cc_llm_provider_t 接口，具体 OpenAI/Ollama/Anthropic
+ * 等实现由 feature descriptor 决定。未知或编译关闭的 provider 直接返回配置错误。
  */
 static cc_result_t create_llm(
     const cc_config_t *config,
@@ -208,16 +194,12 @@ static cc_result_t create_llm(
         provider[0] ? provider : "(none)");
 }
 
-/**
- * build_tools — 创建工具注册表并注册当前 profile 启用的内建工具和插件工具。
+/*
+ * 为当前配置构建一个冻结的工具注册表。
  *
- * 先创建 registry，再用 cc_runtime_tool_factory_ctx_t 把配置、文件系统、memory store
- * 和 sandbox 工厂传给工具工厂。内建工具注册完成后加载插件工具，最后 freeze registry，
- * 防止 runtime 运行期再修改工具集合。
- *
- * @param builder 正在组装的 builder；函数会写入 tool_registry 和 plugin_state。
- * @param config 借用的只读配置，用于工具过滤和插件加载。
- * @return CC_OK 表示工具集合已冻结；失败时调用方走 builder 的统一失败清理路径。
+ * 注册顺序是内置工具 -> plugin 工具 -> MCP 工具。plugin_state/mcp_state 由对应 loader
+ * 分配，成功后交给 builder 持有；任一阶段失败都销毁已创建资源。冻结 registry 后，
+ * 运行中的 agent 只能查询，不能再修改，这让多线程读工具 schema 更容易推理。
  */
 static cc_result_t build_tool_registry_for_config(
     cc_runtime_builder_t *builder,
@@ -296,6 +278,7 @@ static cc_result_t build_tool_registry_for_config(
     return cc_result_ok();
 }
 
+/* 初次启动时构建 builder 当前 generation 的工具 registry 和扩展状态。 */
 static cc_result_t build_tools(cc_runtime_builder_t *builder, const cc_config_t *config)
 {
     return build_tool_registry_for_config(
@@ -308,11 +291,12 @@ static cc_result_t build_tools(cc_runtime_builder_t *builder, const cc_config_t 
     );
 }
 
-/**
- * build_tool_pool — 从 config.json 构造工具并发池。
+/*
+ * 按配置创建工具执行池。
  *
- * 所有 lane 策略都在这里一次性展开成 core pool 可消费的扁平数组。pool_create
- * 会深拷贝 lane 名称，因此本函数的临时字符串在返回前即可释放。
+ * tool pool 把不同来源的工具映射到 lane：普通工具使用 tools.policies，plugin/MCP 根据
+ * entry/server 生成专属 lane。这样高延迟外部工具不会占满核心执行通道，是嵌入式/边缘
+ * 设备里控制并发和超时的关键设计点。
  */
 static cc_result_t create_tool_pool_from_config(
     const cc_config_t *config,
@@ -378,16 +362,17 @@ static cc_result_t create_tool_pool_from_config(
 #endif
 }
 
+/* 初次启动时创建 builder 持有的工具执行池；编译关闭 tool pool 时为 no-op。 */
 static cc_result_t build_tool_pool(cc_runtime_builder_t *builder, const cc_config_t *config)
 {
     return create_tool_pool_from_config(config, &builder->tool_pool);
 }
 
-/**
- * build_run_queue — 从 config.json 构造多 Agent run queue。
+/*
+ * 创建 run queue。
  *
- * run queue 是 core 可移植并发闸门。它不创建线程，只在调用线程进入 run
- * 前阻塞等待额度，因此 POSIX/Windows/ESP 都能共享同一套语义。
+ * run queue 只在 multi-agent 和 run-queue profile 同时启用时存在；小型 MCU profile
+ * 可以完全裁剪掉这层，runtime 仍保持同步执行能力。
  */
 static cc_result_t build_run_queue(cc_runtime_builder_t *builder, const cc_config_t *config)
 {
@@ -407,6 +392,8 @@ static cc_result_t build_run_queue(cc_runtime_builder_t *builder, const cc_confi
 #endif
 }
 
+#if CC_ENABLE_MULTI_AGENT && CC_ENABLE_RUN_QUEUE
+/* 将配置字符串映射成 run queue 行为枚举，未知值按 steer 处理保证默认可用。 */
 static cc_run_queue_action_t queue_action_from_config(const char *mode)
 {
     if (!mode || strcmp(mode, "steer") == 0) return CC_RUN_QUEUE_ACTION_STEER;
@@ -415,7 +402,15 @@ static cc_run_queue_action_t queue_action_from_config(const char *mode)
     if (strcmp(mode, "interrupt") == 0) return CC_RUN_QUEUE_ACTION_INTERRUPT;
     return CC_RUN_QUEUE_ACTION_STEER;
 }
+#endif
 
+/*
+ * 构建 system prompt 和 skill catalog 快照。
+ *
+ * system_prompt 是传给 runtime 的配置快照，builder 和 runtime 各自持有自己的指针；
+ * skills 启用时会把 allowlist 内技能拼接进 prompt。失败路径释放 catalog/prompt，
+ * 避免 reload 中构建失败污染旧 generation。
+ */
 static cc_result_t build_system_prompt_snapshot(
     cc_runtime_builder_t *builder,
     const cc_config_t *config,
@@ -484,6 +479,13 @@ static cc_result_t build_system_prompt_snapshot(
     return cc_result_ok();
 }
 
+/*
+ * 把旧 generation 的资源放入退休列表。
+ *
+ * reload 成功切换指针前，旧 registry/tool pool/prompt 仍可能被尚未结束的 run 使用。
+ * 这里不立刻销毁，而是转移到 retired_* 数组；builder 最终销毁时统一释放。这是 C 中
+ * 简化版的“generation based lifetime”策略。
+ */
 static cc_result_t retire_generation(
     cc_runtime_builder_t *builder,
     cc_tool_registry_t *registry,
@@ -541,13 +543,11 @@ static cc_result_t retire_generation(
     return cc_result_ok();
 }
 
-/**
- * destroy_retired_generations — 释放 reload 后暂存的旧工具 generation。
+/*
+ * 销毁所有退休 generation。
  *
- * reload 采用“先构建新 generation，全部成功后再 swap”的回滚模型。swap 后，
- * builder 不会立刻销毁旧 registry/plugin/MCP/pool，因为仍可能存在已经开始执行
- * 的 run 正在读取旧工具表或占用旧 lane。当前实现把旧 generation 保留到 builder
- * destroy；这让生命周期更保守，也避免热重载失败路径影响运行中的调用。
+ * 该函数只在 builder destroy 阶段调用，说明此时上层已经不再提交 run。释放顺序和持有
+ * 顺序对应：先 tool pool/registry，再 plugin/MCP 状态，最后 prompt 字符串和数组。
  */
 static void destroy_retired_generations(cc_runtime_builder_t *builder)
 {
@@ -581,17 +581,12 @@ static void destroy_retired_generations(cc_runtime_builder_t *builder)
     builder->retired_count = 0;
 }
 
-/**
- * cc_runtime_builder_create — 根据配置和 feature set 组装 logger、store、tools、LLM provider 和 Agent runtime。
+/*
+ * 创建完整 runtime builder。
  *
- * 该函数是 C-Claw 启动期的组合根：它校验 feature set，创建平台端口和存储，
- * 选择 LLM provider，注册工具，生成 system prompt，并把这些依赖注入
- * cc_agent_runtime_create。任一步失败都会跳到 fail，复用 destroy 做部分资源清理。
- *
- * @param config 借用的只读配置；builder 只复制 system prompt 等需要长期保存的字符串。
- * @param features 借用的静态能力表；生命周期必须覆盖 builder。
- * @param out_builder 输出参数；成功时获得新 builder，失败时写回 NULL。
- * @return CC_OK 表示 runtime 可用；失败返回具体初始化错误。
+ * 该入口把配置、feature set 和端口工厂装配成一个可运行 SDK 实例。成功后 out_builder
+ * 拥有返回对象；失败路径跳到统一 destroy，释放已创建组件。面试里可以把它解释为
+ * “组合根”：所有依赖都在这里创建，业务核心通过接口使用它们。
  */
 cc_result_t cc_runtime_builder_create(
     const cc_config_t *config,
@@ -667,6 +662,7 @@ cc_result_t cc_runtime_builder_create(
     runtime_config.temperature = config->temperature;
     runtime_config.summary_max_tokens = config->summary_max_tokens;
     runtime_config.summary_temperature = config->summary_temperature;
+    runtime_config.multimodal = config->multimodal;
     runtime_config.active_memory_enabled = config->active_memory_enabled;
     runtime_config.active_memory_write_summary = config->active_memory_write_summary;
     runtime_config.active_memory_max_value_chars = config->active_memory_max_value_chars;
@@ -715,27 +711,40 @@ fail:
     return rc;
 }
 
-/**
- * cc_runtime_builder_runtime — 返回 builder 持有的 runtime 借用指针，调用方不能释放该指针。
+/*
+ * 返回 builder 当前 runtime 的借用指针。
  *
- * @param builder 借用的 builder；可为 NULL。
- * @return builder 内部 runtime 的借用指针；builder 为 NULL 时返回 NULL。
+ * 调用方不能销毁该指针；runtime 生命周期由 builder 管理，reload 只替换 runtime 内部
+ * registry/prompt 等快照，不替换 runtime 对象本身。
  */
 cc_agent_runtime_t *cc_runtime_builder_runtime(cc_runtime_builder_t *builder)
 {
     return builder ? builder->runtime : NULL;
 }
 
+/*
+ * 返回 agent manager 的借用指针。
+ *
+ * 只有 multi-agent/run-queue profile 才会创建 manager；裁剪 profile 返回 NULL，调用方
+ * 需要按能力判断降级到单 runtime 执行。
+ */
 cc_agent_manager_t *cc_runtime_builder_agent_manager(cc_runtime_builder_t *builder)
 {
     return builder ? builder->agent_manager : NULL;
 }
 
+/*
+ * 返回最近一次启动或 reload 的诊断信息借用指针。
+ *
+ * diagnostics 由 builder 持有，不需要释放；plugin/MCP loader 可把非致命问题写入这里，
+ * 让应用展示“部分能力不可用”而不是直接启动失败。
+ */
 const cc_runtime_diagnostics_t *cc_runtime_builder_diagnostics(cc_runtime_builder_t *builder)
 {
     return builder ? &builder->diagnostics : NULL;
 }
 
+/* 简化 reload 入口：不需要详细 report 时调用，内部仍走同一套事务式 reload 实现。 */
 cc_result_t cc_runtime_builder_reload(
     cc_runtime_builder_t *builder,
     const cc_config_t *config
@@ -744,6 +753,13 @@ cc_result_t cc_runtime_builder_reload(
     return cc_runtime_builder_reload_with_report(builder, config, NULL);
 }
 
+/*
+ * 事务式热重载工具、技能和执行池。
+ *
+ * 新资源全部创建成功后才切换到 runtime；任何阶段失败都会销毁新资源并保留旧 generation。
+ * 切换时把旧资源 retire，保证正在执行的 run 不会读到已释放的 registry/prompt。这种
+ * “先构建、后提交、失败回滚”的思路在嵌入式配置热更新中很常见。
+ */
 cc_result_t cc_runtime_builder_reload_with_report(
     cc_runtime_builder_t *builder,
     const cc_config_t *config,
@@ -904,6 +920,12 @@ cc_result_t cc_runtime_builder_reload_with_report(
     return cc_result_ok();
 }
 
+/*
+ * 请求关闭 runtime。
+ *
+ * 当前实现只记录日志；异步 run queue 的实际 worker 销毁发生在 destroy 中。保留这个
+ * API 是为了未来接入更细的 stop/drain 流程时不改变上层调用点。
+ */
 void cc_runtime_builder_request_shutdown(cc_runtime_builder_t *builder)
 {
     if (!builder) return;
@@ -912,26 +934,23 @@ void cc_runtime_builder_request_shutdown(cc_runtime_builder_t *builder)
     }
 }
 
-/**
- * cc_runtime_builder_logger — 返回 builder 持有的 logger 借用指针。
+/*
+ * 返回 logger 的借用指针。
  *
- * gateway 可用该 logger 做额外诊断，但不能销毁它；logger 生命周期由 builder 控制。
- *
- * @param builder 借用的 builder；可为 NULL。
- * @return builder 内部 logger 的借用指针；builder 为 NULL 时返回 NULL。
+ * 调用方可以临时写日志，但不能销毁；logger 的脱敏策略和线程安全由 logger 模块内部
+ * 处理，builder destroy 时统一释放。
  */
 cc_logger_t *cc_runtime_builder_logger(cc_runtime_builder_t *builder)
 {
     return builder ? builder->logger : NULL;
 }
 
-/**
- * cc_runtime_builder_destroy — 按所有权顺序销毁 builder 创建的 runtime、工具、store、provider 和日志资源。
+/*
+ * 销毁 builder 及其拥有的所有组件。
  *
- * 销毁顺序与依赖关系相反：先释放 runtime 和工具注册表，再释放插件状态、
- * stores、provider、policy、sandbox、平台端口和日志/event bus。传入 NULL 安全。
- *
- * @param builder 要释放的 builder；函数取得并销毁该对象所有权。
+ * 释放顺序按依赖关系反向执行：先停止队列/manager，再销毁 runtime，然后销毁 tool
+ * pool、skills、registry、plugin/MCP、store/provider/policy/sandbox、event bus/logger。
+ * 这种顺序能避免后销毁对象在析构期间访问已经失效的底层端口。
  */
 void cc_runtime_builder_destroy(cc_runtime_builder_t *builder)
 {

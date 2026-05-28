@@ -1,47 +1,6 @@
-/**
- * 学习导读：cclaw/core/include/cc/app/cc_agent_runtime.h
- *
- * 所属层次：核心层。
- * 阅读重点：这里声明 Agent runtime API，重点看 handle_message、stream、
- *           run options、取消令牌和配置快照。
- * 注释说明：本文件的中文注释用于帮助理解当前实现；如果注释与代码冲突，
- *           以代码行为和测试为准，并应同步修正注释。
- */
 
-/**
- * cc_agent_runtime.h — Agent 运行时核心模块
- *
- * @file    cc/app/cc_agent_runtime.h
- * @brief   定义 Agent 运行时的配置、结构体和核心接口。
- *
- * cc_agent_runtime_t 是整个应用的核心编排器。它将 LLM Provider、
- * 工具注册表、会话存储、策略引擎和沙箱整合在一起，实现
- * "感知-决策-执行" 的 Agent 循环（也称为 ReAct 循环）。
- *
- * ─── 接口契约 ─────────────────────────────────────────────────────────
- *
- *   - 通过 cc_agent_runtime_create() 创建（依赖注入方式）
- *   - cc_agent_runtime_handle_message() 是主入口，每收到一条用户消息
- *     就启动完整的 Agent 循环
- *   - 运行时只拥有自己复制的配置字符串，不拥有注入组件的底层资源
- *   - event_bus、logger、memory_store 和审批回调通过 deps 统一注入
- *   - thinking_mode 通过 options 初始化，后续可用 setter/getter 线程安全访问
- *
- * ─── Agent 循环流程 ──────────────────────────────────────────────────
- *
- *   1. 从 Store 加载历史消息
- *   2. 拼接 system_prompt + 历史消息 + 当前用户输入 → LLM 请求
- *   3. 调用 LLM.chat() 获取回复
- *   4. 如果回复是文本且 finished → 返回文本给用户
- *   5. 如果回复是工具调用 → 从 ToolRegistry 查找工具 → 执行
- *      → 将结果附加到消息历史 → 回到步骤 2
- *   6. 超过 max_steps → 强制终止并返回当前结果
- *
- * ─── 依赖 ─────────────────────────────────────────────────────────────
- *
- *   依赖 cc/ports/ 下的多个端口接口和 cc/core/cc_result.h。
- *   event_bus、logger 和 memory_store 都是可选依赖，可传 NULL 表示禁用对应能力。
- */
+
+
 
 #ifndef CC_AGENT_RUNTIME_H
 #define CC_AGENT_RUNTIME_H
@@ -59,114 +18,156 @@
 #include "cc/ports/cc_thread.h"
 #include "cc/core/cc_stream_chunk.h"
 #include "cc/app/cc_cancel_token.h"
+#include "cc/util/cc_config.h"
+#include <stddef.h>
 
-/**
- * cc_agent_runtime_config_t — Agent 运行时行为配置
+/*
+ * runtime 统一资源限制。
  *
- * 定义 Agent 的行为参数。与构造函数参数分开的原因是：
- * 这些是"配置"而非"依赖"——它们的值由 config.json 决定，
- * 可以随时调整而无需改变依赖注入关系。
+ * size 用于结构扩展；0 表示使用 SDK/provider 默认值。limits 在 runtime create 时复制，
+ * 后续调用方修改原结构不会影响 runtime。超限应统一映射到 CC_ERR_LIMIT_EXCEEDED，
+ * 工具内部超限通常转成可恢复 tool result。
+ */
+typedef struct cc_runtime_limits {
+    size_t size;
+    /* Zero means use SDK/provider defaults. Values are copied at runtime create. */
+    int run_timeout_ms;
+    int tool_timeout_ms;
+    int provider_timeout_ms;
+    size_t max_input_bytes;
+    size_t max_output_bytes;
+    size_t max_tool_result_bytes;
+    size_t max_stream_bytes;
+    int max_steps;
+    int max_concurrency;
+} cc_runtime_limits_t;
+
+/*
+ * Agent runtime 配置。
+ *
+ * 字符串字段在 create 时深拷贝或转移到 runtime 内部；调用方不需要保持临时配置对象。
+ * 配置覆盖模型参数、上下文窗口、压缩摘要、多模态和 active memory。结构不承诺当前字段
+ * ABI 长期不变，size 字段用于后续兼容扩展。
  */
 typedef struct cc_agent_runtime_config {
-    int max_steps;       /**< 最大推理步数。每步 = 一次 LLM 调用 + 一次工具执行。
-                          *   防止 Agent 陷入无限推理循环。
-                          *   建议值：10（简单任务）- 30（复杂任务） */
-    char *system_prompt;  /**< 系统提示词。定义 Agent 的角色、行为约束和工具使用策略。
-                          *   会在每次 LLM 调用时作为首条消息注入。
-                          *   典型例子："You are a helpful AI assistant..." */
-    char *workspace_dir;  /**< 工作区目录。所有文件相关工具操作限定在此目录下。
-                          *   由外部保证该目录存在且有读写权限 */
-    char *model;          /**< 模型名称。用于日志和元数据，不直接参与 LLM 调用 */
-    int max_tokens;       /**< 主对话单次回复最大 token 数。默认 4096。 */
-    double temperature;   /**< 主对话生成温度。默认 0.7，0.0 表示最确定输出。 */
-    int context_window_tokens; /**< LLM 上下文窗口 token 预算。
-                          *   用于动态截断历史消息。0 表示不限制。
-                          *   默认值：8192 */
-    double context_compress_threshold; /**< 压缩触发阈值（0.0-1.0）。
-                          *   0 表示禁用压缩，仅做硬截断。
-                          *   默认值：0.8 */
-    int context_keep_recent; /**< 压缩时保留最近 N 条原始消息。
-                          *   默认值：20 */
-    int summary_max_tokens; /**< 上下文摘要压缩请求最大 token 数。
-                          *   默认值：1024 */
-    double summary_temperature; /**< 上下文摘要压缩请求温度。
-                          *   默认值：0.3 */
-    int active_memory_enabled; /**< run 后主动写入长期记忆摘要；编译期由 CC_ENABLE_ACTIVE_MEMORY 裁剪。 */
-    int active_memory_write_summary; /**< 当前策略：非 0 时写入 user/assistant 摘要。 */
-    int active_memory_max_value_chars; /**< 单条写入最大字符数，避免嵌入式存储被长文本撑爆。 */
-    char *active_memory_category; /**< active memory 分类名，runtime 深拷贝并在 destroy 时释放。 */
+    size_t size;
+    int max_steps;
+
+    char *system_prompt;
+
+    char *workspace_dir;
+
+    char *model;
+    int max_tokens;
+    double temperature;
+    int context_window_tokens;
+
+    double context_compress_threshold;
+
+    int context_keep_recent;
+
+    int summary_max_tokens;
+
+    double summary_temperature;
+
+    cc_multimodal_config_t multimodal;
+    int active_memory_enabled;
+    int active_memory_write_summary;
+    int active_memory_max_value_chars;
+    char *active_memory_category;
+    cc_runtime_limits_t limits;
 } cc_agent_runtime_config_t;
 
-/**
- * cc_agent_runtime — Agent 主循环的不透明运行时对象。
- *
- * 对外只通过本头文件的函数访问。对象内部保存注入端口的浅拷贝、
- * 配置字符串副本、线程锁和当前会话执行状态；调用方用
- * cc_agent_runtime_destroy 释放。
- */
+/* runtime 不透明句柄；内部持有 provider、store、registry、policy 等依赖。 */
 typedef struct cc_agent_runtime cc_agent_runtime_t;
 
-/**
- * cc_agent_runtime_deps — 创建 runtime 时注入的外部依赖集合。
+/*
+ * runtime 依赖注入集合。
  *
- * 端口值字段（llm/store/policy/sandbox）会被 runtime 浅拷贝，底层 self
- * 的最终所有权仍由 runtime_builder 或调用方管理。指针字段（registry、
- * event_bus、logger、memory_store）均为借用指针，生命周期必须覆盖 runtime。
+ * llm/store/policy/sandbox 按值传入，内部 self/vtable 生命周期由 runtime 使用；registry、
+ * event_bus、logger、memory_store、tool_pool 是外部对象指针，由调用方保证生命周期至少
+ * 覆盖 runtime。approval 回调和 user_data 只在工具审批时借用。
  */
 typedef struct cc_agent_runtime_deps {
-    /** 借用底层 self 的 LLM provider 端口值；runtime 不负责 destroy。 */
+    size_t size;
+
     cc_llm_provider_t llm;
-    /** 借用的工具注册表；必须在 runtime 生命周期内保持有效且通常已 freeze。 */
+
     cc_tool_registry_t *tool_registry;
-    /** 借用底层 self 的会话存储端口值；runtime 只调用其 vtable。 */
+
     cc_session_store_t store;
-    /** 借用底层 self 的策略引擎端口值；用于工具执行前审批。 */
+
     cc_policy_engine_t policy;
-    /** 借用底层 self 的 sandbox 端口值；可为空 vtable 表示未启用。 */
+
     cc_sandbox_t sandbox;
-    /** 可选事件总线；为 NULL 时 runtime 只返回最终响应，不发布流事件。 */
+
     cc_event_bus_t *event_bus;
-    /** 可选 logger；为 NULL 时跳过日志输出。 */
+
     cc_logger_t *logger;
-    /** 可选长期记忆存储；为 NULL 时上下文构建不注入记忆。 */
+
     cc_memory_store_t *memory_store;
-    /** 可选工具并发池；为 NULL 时工具调用保持原有同步直通语义。 */
+
     cc_tool_executor_pool_t *tool_pool;
-    /** 可选人工审批回调；policy 返回需审批时由 tool executor 调用。 */
+
     cc_tool_approval_fn approve_tool_call;
-    /** 传给 approve_tool_call 的调用方上下文，runtime 只保存借用值。 */
+
     void *approval_user_data;
 } cc_agent_runtime_deps_t;
 
-/**
- * cc_agent_runtime_options — 创建 runtime 时传入的行为选项。
+/*
+ * runtime 创建选项。
  *
- * options 与 deps 分离：deps 描述外部端口，options 描述纯行为参数。
- * create 会深拷贝 config 中需要长期持有的字符串，因此调用方可在创建后释放
- * 自己的配置对象。
+ * config 会被 runtime 复制；thinking_mode 控制是否请求 provider 的 reasoning 输出。
  */
 typedef struct cc_agent_runtime_options {
-    /** 运行时配置；system_prompt/workspace_dir/model 会被深拷贝。 */
+    size_t size;
+
     cc_agent_runtime_config_t config;
-    /** 初始思考流展示开关；运行后可通过 setter 线程安全修改。 */
+
     int thinking_mode;
 } cc_agent_runtime_options_t;
 
+/*
+ * 单次同步 run 选项。
+ *
+ * cancel_token 由调用方拥有；runtime 在 provider/tool/step 边界检查取消状态。
+ */
 typedef struct cc_agent_runtime_run_options {
+    size_t size;
     cc_cancel_token_t *cancel_token;
 } cc_agent_runtime_run_options_t;
 
-/**
- * cc_agent_runtime_create — 创建 Agent 运行时实例
+/*
+ * runtime 流式输出回调。
  *
- * 聚合所有注入的依赖，初始化 Agent 运行时。
- * 传入的 llm、store、policy、sandbox 为值拷贝（浅拷贝 vtable），
- * 调用方保有原实例的所有权。
+ * chunk 由 SDK 拥有，只在回调期间有效；如果 UI 或应用线程要缓存内容必须自行复制。
+ * event bus 只承担 observability，不替代该实时输出回调。
+ */
+typedef void (*cc_agent_runtime_stream_callback_fn)(
+    /* Chunk data is owned by the SDK and is valid only during this callback. */
+    const cc_stream_chunk_t *chunk,
+    void *user_data
+);
+
+/*
+ * 单次流式 run 选项。
  *
- * @param deps           依赖集合；值类型接口浅拷贝，指针类型所有权不转移
- * @param options        行为选项；config 中的字符串会被 runtime 深拷贝
- * @param out_runtime    输出：指向新运行时的指针（调用者负责 cc_agent_runtime_destroy）
- * @return               CC_OK 表示成功
+ * cancel_token 用于取消流和工具执行；on_chunk 是实时输出入口；user_data 由调用方拥有。
+ */
+typedef struct cc_agent_runtime_stream_options {
+    size_t size;
+    /* Optional; cancellation is observed between provider/tool/stream chunks. */
+    cc_cancel_token_t *cancel_token;
+    /* Optional realtime output callback. Event bus remains observability-only. */
+    cc_agent_runtime_stream_callback_fn on_chunk;
+    void *user_data;
+} cc_agent_runtime_stream_options_t;
+
+/*
+ * 创建 runtime。
+ *
+ * 函数会校验 provider capabilities、复制配置并绑定依赖。成功后 *out_runtime 由调用方
+ * cc_agent_runtime_destroy()；失败时不会返回半初始化 runtime。
  */
 cc_result_t cc_agent_runtime_create(
     const cc_agent_runtime_deps_t *deps,
@@ -174,115 +175,42 @@ cc_result_t cc_agent_runtime_create(
     cc_agent_runtime_t **out_runtime
 );
 
-/**
- * cc_agent_runtime_destroy — 销毁 Agent 运行时实例
- *
- * 释放运行时自身分配的资源。
- * 注意：不释放 tool_registry 指针指向的对象（所有权在调用方），
- * 也不释放 event_bus、logger、memory_store、tool_registry 或各端口实现的 self。
- *
- * @param runtime  要销毁的运行时实例
- */
+/* 销毁 runtime；不销毁外部拥有的 registry/event_bus/logger/memory_store/tool_pool。 */
 void cc_agent_runtime_destroy(cc_agent_runtime_t *runtime);
 
-/**
- * cc_agent_runtime_set_thinking_mode — 线程安全地更新是否发布 thinking 流事件。
- *
- * @param runtime 借用的 runtime；NULL 时函数直接返回。
- * @param enabled 非 0 表示启用 thinking 事件，0 表示隐藏 thinking 增量。
- */
+/* 动态开关 thinking mode；是否生效仍取决于 provider capability。 */
 void cc_agent_runtime_set_thinking_mode(cc_agent_runtime_t *runtime, int enabled);
 
-/**
- * cc_agent_runtime_get_thinking_mode — 线程安全地读取 thinking 流事件开关。
- *
- * @param runtime 借用的 runtime；NULL 时返回 0。
- * @return 非 0 表示启用 thinking 展示，0 表示关闭或 runtime 无效。
- */
+/* 读取当前 thinking mode，NULL runtime 返回 0。 */
 int cc_agent_runtime_get_thinking_mode(cc_agent_runtime_t *runtime);
 
-/**
- * cc_agent_runtime_set_tool_approval — 更新人工工具审批回调。
- *
- * runtime 只保存函数指针和 user_data，不取得 user_data 的所有权。该接口用于
- * gateway 在运行时注入交互式审批逻辑。
- *
- * @param runtime 借用的 runtime；NULL 时函数直接返回。
- * @param approve_tool_call 可选审批回调；NULL 表示禁用人工审批。
- * @param user_data 原样传给审批回调的借用上下文。
- */
+/* 更新工具审批回调；user_data 生命周期由调用方管理。 */
 void cc_agent_runtime_set_tool_approval(
     cc_agent_runtime_t *runtime,
     cc_tool_approval_fn approve_tool_call,
     void *user_data
 );
 
-/**
- * cc_agent_runtime_event_bus — 返回 runtime 注入的事件总线借用指针，用于 gateway 订阅流式事件。
- *
- * @param runtime 借用的 runtime；可为 NULL。
- * @return 注入的 event_bus 借用指针；未注入或 runtime 为 NULL 时返回 NULL。
- */
+/* 返回 runtime 使用的 event bus；调用方不能销毁该指针，除非本来就是外部拥有者。 */
 cc_event_bus_t *cc_agent_runtime_event_bus(cc_agent_runtime_t *runtime);
 
-/**
- * cc_agent_runtime_tool_registry — 返回 runtime 内部使用的工具注册表借用指针，主要用于测试和诊断。
- *
- * @param runtime 借用的 runtime；可为 NULL。
- * @return 工具注册表借用指针；runtime 为 NULL 时返回 NULL。
- */
+/* 返回 runtime 使用的 tool registry；registry 仍由其原所有者管理。 */
 cc_tool_registry_t *cc_agent_runtime_tool_registry(cc_agent_runtime_t *runtime);
 
-/**
- * cc_agent_runtime_session_store — 返回 runtime 注入的会话存储接口副本，调用方只借用底层 self。
- *
- * @param runtime 借用的 runtime；可为 NULL。
- * @return runtime 内部 store 字段的地址；runtime 为 NULL 时返回 NULL。
- */
+/* 返回 runtime 的 session store 句柄；不要直接销毁其 self，除非 runtime 已销毁。 */
 cc_session_store_t *cc_agent_runtime_session_store(cc_agent_runtime_t *runtime);
 
-/**
- * cc_agent_runtime_supports_stream — 查询当前 LLM provider 是否实现 chat_stream，用于选择流式或同步路径。
- *
- * @param runtime 借用的 runtime；可为 NULL。
- * @return 非 0 表示 provider 支持流式输出，0 表示不支持或 runtime 无效。
- */
+/* 查询 runtime 当前 provider 是否支持 streaming。 */
 int cc_agent_runtime_supports_stream(cc_agent_runtime_t *runtime);
 
-/**
- * cc_agent_runtime_create_session — 通过 runtime 的 session store 创建会话元数据，不触发 LLM 调用。
- *
- * @param runtime 借用的 runtime；不可为 NULL。
- * @param session_id 借用的会话 ID 字符串；store 会按自身约定复制或持久化。
- * @param workspace_dir 借用的工作目录字符串；用于写入会话元数据。
- * @return CC_OK 表示会话创建成功；失败返回 store 或参数校验错误。
- */
+/* 创建 session 记录；workspace_dir 会作为文件工具安全根目录的一部分。 */
 cc_result_t cc_agent_runtime_create_session(
     cc_agent_runtime_t *runtime,
     const char *session_id,
     const char *workspace_dir
 );
 
-/**
- * cc_agent_runtime_handle_message — 处理用户消息（Agent 循环主入口）
- *
- * 这是 Agent 运行时的核心函数。接收用户输入，启动完整的 Agent 循环：
- * 加载上下文 → 调用 LLM → 执行工具 → 循环迭代 → 返回最终回答。
- *
- * 内部逻辑：
- *   1. 从 store 加载会话历史
- *   2. 构建完整的 LLM 上下文（system_prompt + 历史 + 新消息）
- *   3. 调用 LLM.chat() 获取回复
- *   4. 如果回复是文本且 finished=true：将回复保存到 store，返回文本
- *   5. 如果回复是工具调用：通过 policy 评估 → 执行工具 → 保存结果 → goto 3
- *   6. 如果超过 max_steps：强制返回当前文本 + 步数超限提示
- *
- * @param runtime      运行时实例（不可为 NULL）
- * @param session_id   目标会话 ID（不可为 NULL）
- * @param user_input   用户输入文本（不可为 NULL）
- * @param out_response 输出：Agent 的最终文本回复（调用者负责 free）
- * @return             CC_OK 表示成功
- */
+/* 处理一条用户输入并返回完整 assistant 文本；out_response 由调用方 free()。 */
 cc_result_t cc_agent_runtime_handle_message(
     cc_agent_runtime_t *runtime,
     const char *session_id,
@@ -290,6 +218,7 @@ cc_result_t cc_agent_runtime_handle_message(
     char **out_response
 );
 
+/* 带取消选项的同步消息处理。 */
 cc_result_t cc_agent_runtime_handle_message_with_options(
     cc_agent_runtime_t *runtime,
     const char *session_id,
@@ -298,29 +227,10 @@ cc_result_t cc_agent_runtime_handle_message_with_options(
     char **out_response
 );
 
-/**
- * cc_agent_runtime_handle_message_stream — 流式处理用户消息
+/*
+ * 使用 provider streaming 能力处理消息。
  *
- * 与 cc_agent_runtime_handle_message 功能等效，但使用 LLM 流式接口
- * （chat_stream）逐步获取响应。在响应生成过程中，通过事件总线实时发布：
- *
- *   - stream.text → 用户可见的文本增量
- *   - stream.thinking → 模型思考推理过程
- *   - stream.tool.start → 工具调用开始
- *   - stream.tool.delta → 工具调用参数增量
- *   - stream.tool.end → 工具调用执行完毕
- *   - stream.finished → 流结束
- *
- * Gateway / Web UI 通过订阅这些事件实现实时展示效果。
- *
- * 如果 LLM Provider 不支持 chat_stream：
- *   自动降级为同步 chat 模式，事件总线发布最终的完整文本。
- *
- * @param runtime      运行时实例（不可为 NULL）
- * @param session_id   目标会话 ID（不可为 NULL）
- * @param user_input   用户输入文本（不可为 NULL）
- * @param out_response 输出：Agent 的最终文本回复（调用者负责 free）
- * @return             CC_OK 表示成功
+ * 该 legacy 入口只返回最终文本，没有实时回调；新代码优先使用 stream_cb 入口。
  */
 cc_result_t cc_agent_runtime_handle_message_stream(
     cc_agent_runtime_t *runtime,
@@ -329,11 +239,27 @@ cc_result_t cc_agent_runtime_handle_message_stream(
     char **out_response
 );
 
+/* 带取消选项的 legacy stream 入口。 */
 cc_result_t cc_agent_runtime_handle_message_stream_with_options(
     cc_agent_runtime_t *runtime,
     const char *session_id,
     const char *user_input,
     const cc_agent_runtime_run_options_t *options,
+    char **out_response
+);
+
+/*
+ * 正式流式回调入口。
+ *
+ * runtime 会把 text/thinking/tool delta/tool start/tool end/finished/error chunk 推给
+ * on_chunk，同时通过 observability 发布 stream.* 事件。默认只落库完整 final response，
+ * 取消、错误或超限的 partial chunk 不应作为完整 assistant final 落库。
+ */
+cc_result_t cc_agent_runtime_handle_message_stream_cb(
+    cc_agent_runtime_t *runtime,
+    const char *session_id,
+    const char *user_input,
+    const cc_agent_runtime_stream_options_t *options,
     char **out_response
 );
 

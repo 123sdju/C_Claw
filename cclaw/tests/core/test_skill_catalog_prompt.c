@@ -6,11 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 字符串包含断言 helper。 */
 static int has_text(const char *haystack, const char *needle)
 {
     return haystack && needle && strstr(haystack, needle) != NULL;
 }
 
+/*
+ * 验证 skill catalog 从配置目录加载并按 allowlist 构造 prompt。
+ *
+ * 创建 alpha/beta 两个 SKILL.md，但 defaults.skills 只允许 alpha，最终 prompt 不能包含 beta。
+ */
 int main(void)
 {
     cc_filesystem_t fs = {0};
